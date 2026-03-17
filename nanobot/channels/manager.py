@@ -62,6 +62,7 @@ class ChannelManager:
                 channel._transcription_provider = transcription_provider
                 channel._startup_message = self.config.channels.on_start_message
                 channel._startup_notify = self.config.channels.on_start_notify.get(name, [])
+                channel._help_text = self.config.tips.help
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)
             except Exception as e:

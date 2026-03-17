@@ -13,6 +13,14 @@ class Base(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
+
+class CommandAuthConfig(Base):
+    """Restricted command authorization by channel/chat_id."""
+
+    restricted_commands: list[str] = Field(default_factory=lambda: ["model"])
+    authorized_chat_ids: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class ChannelsConfig(Base):
     """Configuration for chat channels.
 
@@ -28,6 +36,7 @@ class ChannelsConfig(Base):
     on_start_notify: dict[str, list[str]] = Field(
         default_factory=dict
     )  # {channel_name: [chat_id, ...]}
+    command_auth: CommandAuthConfig = Field(default_factory=CommandAuthConfig)
 
 
 class AgentDefaults(Base):
@@ -207,23 +216,37 @@ class TipsConfig(Base):
         "/stop — Stop the current task\n"
         "/restart — Restart the bot\n"
         "/model — View or switch the active model\n"
+        "/ctx — Show current context usage\n"
+        "/sid — Show channel/chat identity\n"
         "/help — Show available commands"
     )
     # /model (no args) — {model_name}, {provider_name}
     model_info: str = (
-        "Current model: {model_name}\n"
+        "🐈 Current model: {model_name}\n"
         "Provider: {provider_name}\n\n"
         "Usage: /model <provider> <model_name>\n"
-        "Example: /model anthropic claude-opus-4-5"
+        "Example: /model openai gpt-4o"
     )
     # /model (missing second arg)
-    model_usage: str = (
-        "Usage: /model <provider> <model_name>\nExample: /model anthropic claude-opus-4-5"
-    )
+    model_usage: str = "Usage: /model <provider> <model_name>\nExample: /model openai gpt-4o"
     # /model (success) — {model_name}
     model_updated: str = "Model updated: {model_name}\nRestarting to apply changes..."
     # /model (error) — {error}
     model_error: str = "Error updating model: {error}"
+    # command auth denied — {command}, {channel}, {chat_id}
+    command_auth_denied: str = "Not authorized: {command} (channel={channel}, chat_id={chat_id})"
+    # /sid — {channel}, {chat_id}, {session_key}
+    sid_info: str = (
+        "🐈 Session Identity\nChannel: {channel}\nChat ID: {chat_id}\nSession Key: {session_key}"
+    )
+    # /ctx panel body
+    ctx_panel: str = (
+        "🐈 Context Usage ({model_name})\n"
+        "prompt={estimated_prompt_tokens}/{context_window_tokens} ({context_usage_percent}%)\n"
+        "overflow={overflow_tokens}/{context_window_tokens} ({overflow_percent}%)\n"
+        "msgs={messages_unconsolidated}/{messages_total} ({unconsolidated_percent}%)\n"
+        "history={history_messages}/{messages_total}\n"
+    )
     # agent loop finished with no content
     no_response: str = "I've completed processing but have no response to give."
 

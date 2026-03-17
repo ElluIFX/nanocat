@@ -197,6 +197,8 @@ class TelegramChannel(BaseChannel):
         BotCommand("help", "Show available commands"),
         BotCommand("restart", "Restart the bot"),
         BotCommand("model", "View or switch the active model"),
+        BotCommand("ctx", "Show context/token panel"),
+        BotCommand("sid", "Show current channel/chat IDs"),
     ]
 
     @classmethod
@@ -265,6 +267,8 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("restart", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
         self._app.add_handler(CommandHandler("model", self._forward_command))
+        self._app.add_handler(CommandHandler("ctx", self._forward_command))
+        self._app.add_handler(CommandHandler("sid", self._forward_command))
 
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -471,14 +475,17 @@ class TelegramChannel(BaseChannel):
         """Handle /help command, bypassing ACL so all users can access it."""
         if not update.message:
             return
-        await update.message.reply_text(
+        help_text = getattr(self, "_help_text", None) or (
             "🐈 nanobot commands:\n"
             "/new — Start a new conversation\n"
             "/stop — Stop the current task\n"
             "/restart — Restart the bot\n"
             "/model — View or switch the active model\n"
+            "/ctx — Show current context panel\n"
+            "/sid — Show channel/chat identity\n"
             "/help — Show available commands"
         )
+        await update.message.reply_text(help_text)
 
     @staticmethod
     def _sender_id(user) -> str:

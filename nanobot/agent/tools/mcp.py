@@ -101,6 +101,7 @@ async def connect_mcp_servers(
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif transport_type == "sse":
+
                 def httpx_client_factory(
                     headers: dict[str, str] | None = None,
                     timeout: httpx.Timeout | None = None,
@@ -159,7 +160,7 @@ async def connect_mcp_servers(
                     continue
                 wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
                 registry.register(wrapper)
-                logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)
+                # logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)
                 registered_count += 1
                 if enabled_tools:
                     if tool_def.name in enabled_tools:

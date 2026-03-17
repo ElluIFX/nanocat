@@ -192,6 +192,44 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
+    def _extract_slash_command(text: str) -> str | None:
+        """Extract normalized slash command name, e.g. '/model x' -> 'model'."""
+        raw = text.strip()
+        if not raw.startswith("/"):
+            return None
+        token = raw.split(maxsplit=1)[0][1:]
+        if not token:
+            return None
+        # Telegram-style /cmd@botname support
+        return token.split("@", 1)[0].strip().lower() or None
+
+    def _is_command_blocked(self, msg: InboundMessage, command: str | None) -> bool:
+        """Return True when a slash command should be blocked by command auth."""
+        if not command or msg.channel == "system":
+            return False
+        cfg = getattr(self.channels_config, "command_auth", None) if self.channels_config else None
+        if cfg is None:
+            return False
+        restricted = {c.strip().lstrip("/").lower() for c in (cfg.restricted_commands or []) if c}
+        if command not in restricted:
+            return False
+        allowed_map = cfg.authorized_chat_ids or {}
+        allowed = {str(cid) for cid in allowed_map.get(msg.channel, [])}
+        return str(msg.chat_id) not in allowed
+
+    def _build_command_denied(self, msg: InboundMessage, command: str) -> OutboundMessage:
+        """Build the standard blocked-command response."""
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=self.tips.command_auth_denied.format(
+                command=f"/{command}",
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+            ),
+        )
+
+    @staticmethod
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
 
@@ -347,6 +385,11 @@ class AgentLoop:
                 logger.warning("Error consuming inbound message: {}, continuing...", e)
                 continue
 
+            command = self._extract_slash_command(msg.content)
+            if self._is_command_blocked(msg, command):
+                await self.bus.publish_outbound(self._build_command_denied(msg, command))
+                continue
+
             cmd = msg.content.strip().lower()
             if cmd == "/stop":
                 await self._handle_stop(msg)
@@ -453,6 +496,47 @@ class AgentLoop:
 
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="")
 
+    async def _handle_ctx(self, msg: InboundMessage, session: Session) -> OutboundMessage:
+        """Handle /ctx command — show compact numeric context panel."""
+        estimated_tokens, _ = self.memory_consolidator.estimate_session_prompt_tokens(session)
+        context_window = max(0, self.context_window_tokens)
+        usage_percent = (estimated_tokens / context_window) * 100 if context_window > 0 else 0.0
+        overflow_tokens = max(0, estimated_tokens - context_window) if context_window > 0 else 0
+        overflow_percent = (overflow_tokens / context_window) * 100 if context_window > 0 else 0.0
+
+        history_messages = len(session.get_history(max_messages=0))
+        messages_total = len(session.messages)
+        messages_unconsolidated = max(0, messages_total - session.last_consolidated)
+        unconsolidated_percent = (
+            (messages_unconsolidated / messages_total) * 100 if messages_total > 0 else 0.0
+        )
+
+        content = self.tips.ctx_panel.format(
+            model_name=self.model,
+            estimated_prompt_tokens=estimated_tokens,
+            context_window_tokens=context_window,
+            context_usage_percent=f"{usage_percent:.2f}",
+            overflow_tokens=overflow_tokens,
+            overflow_percent=f"{overflow_percent:.2f}",
+            messages_total=messages_total,
+            messages_unconsolidated=messages_unconsolidated,
+            unconsolidated_percent=f"{unconsolidated_percent:.2f}",
+            history_messages=history_messages,
+        )
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+    async def _handle_sid(self, msg: InboundMessage, session_key: str) -> OutboundMessage:
+        """Handle /sid command — show channel and chat routing IDs."""
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=self.tips.sid_info.format(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                session_key=session_key,
+            ),
+        )
+
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under the global lock."""
         async with self._processing_lock:
@@ -549,7 +633,11 @@ class AgentLoop:
         session = self.sessions.get_or_create(key)
 
         # Slash commands
-        cmd = msg.content.strip().lower()
+        raw = msg.content.strip()
+        command = self._extract_slash_command(raw)
+        if self._is_command_blocked(msg, command):
+            return self._build_command_denied(msg, command)
+        cmd = raw.lower()
         if cmd == "/new":
             snapshot = session.messages[session.last_consolidated :]
             session.clear()
@@ -568,6 +656,10 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self.tips.help,
             )
+        if cmd == "/ctx":
+            return await self._handle_ctx(msg, session)
+        if cmd == "/sid":
+            return await self._handle_sid(msg, key)
         if msg.content.strip().lower().startswith("/model"):
             return await self._handle_model(msg)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
