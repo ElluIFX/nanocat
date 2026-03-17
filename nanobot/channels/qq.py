@@ -1,15 +1,19 @@
 """QQ channel implementation using botpy SDK."""
 
 import asyncio
+import hashlib
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
 from loguru import logger
 from pydantic import Field
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 
 try:
@@ -92,8 +96,8 @@ class QQChannel(BaseChannel):
             return
 
         self._running = True
-        BotClass = _make_bot_class(self)
-        self._client = BotClass()
+        bot_class = _make_bot_class(self)
+        self._client = bot_class()
         logger.info("QQ bot started (C2C & Group supported)")
         await self._run_bot()
 
@@ -152,6 +156,59 @@ class QQChannel(BaseChannel):
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
 
+    async def _download_attachment(
+        self, attachment: Any, media_dir: Path
+    ) -> tuple[str | None, str | None]:
+        """Download a QQ message attachment. Returns (file_path, content_part)."""
+        url = getattr(attachment, "url", None)
+        content_type = getattr(attachment, "content_type", "") or ""
+        filename = getattr(attachment, "filename", None) or "attachment"
+
+        if not url:
+            return None, None
+
+        # Normalize protocol-relative URLs (//gchat.qpic.cn/...)
+        if url.startswith("//"):
+            url = "https:" + url
+
+        if content_type.startswith("image/"):
+            ext = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/gif": ".gif",
+                "image/webp": ".webp",
+            }.get(content_type, ".jpg")
+            media_type = "image"
+        elif content_type in ("voice",) or content_type.startswith("audio/"):
+            ext = ".amr"
+            media_type = "voice"
+        elif content_type.startswith("video/"):
+            ext = ".mp4"
+            media_type = "video"
+        else:
+            ext = Path(filename).suffix or ""
+            media_type = "file"
+
+        file_path = media_dir / f"{hashlib.md5(url.encode()).hexdigest()[:16]}{ext}"
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                file_path.write_bytes(resp.content)
+
+            path_str = str(file_path)
+            if media_type == "voice":
+                transcription = await self.transcribe_audio(file_path)
+                if transcription:
+                    logger.info("Transcribed QQ voice: {}...", transcription[:50])
+                    return path_str, f"[transcription: {transcription}]"
+                return path_str, f"[voice: {path_str}]"
+            return path_str, f"[{media_type}: {path_str}]"
+        except Exception as e:
+            logger.warning("Failed to download QQ attachment {}: {}", url, e)
+            return None, f"[{media_type}: download failed]"
+
     async def _on_message(self, data: "C2CMessage | GroupMessage", is_group: bool = False) -> None:
         """Handle incoming message from QQ."""
         try:
@@ -159,10 +216,6 @@ class QQChannel(BaseChannel):
             if data.id in self._processed_ids:
                 return
             self._processed_ids.append(data.id)
-
-            content = (data.content or "").strip()
-            if not content:
-                return
 
             if is_group:
                 chat_id = data.group_openid
@@ -176,10 +229,31 @@ class QQChannel(BaseChannel):
                 user_id = chat_id
                 self._chat_type_cache[chat_id] = "c2c"
 
+            content_parts = []
+            media_paths = []
+
+            text = (data.content or "").strip()
+            if text:
+                content_parts.append(text)
+
+            attachments = getattr(data, "attachments", None) or []
+            if attachments:
+                media_dir = get_media_dir("qq")
+                for att in attachments:
+                    path, part = await self._download_attachment(att, media_dir)
+                    if path:
+                        media_paths.append(path)
+                    if part:
+                        content_parts.append(part)
+
+            if not content_parts and not media_paths:
+                return
+
             await self._handle_message(
                 sender_id=user_id,
                 chat_id=chat_id,
-                content=content,
+                content="\n".join(content_parts) if content_parts else "[empty message]",
+                media=media_paths,
                 metadata={"message_id": data.id},
             )
         except Exception:
