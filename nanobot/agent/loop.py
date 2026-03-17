@@ -31,7 +31,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, TipsConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -65,11 +65,13 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        tips_config: TipsConfig | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, WebSearchConfig
+        from nanobot.config.schema import ExecToolConfig, TipsConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
+        self.tips = tips_config or TipsConfig()
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
@@ -234,7 +236,7 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                    logger.debug("Tool call: {}({})", tool_call.name, args_str)
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
@@ -307,7 +309,7 @@ class AgentLoop:
                 pass
         sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
         total = cancelled + sub_cancelled
-        content = f"Stopped {total} task(s)." if total else "No active task to stop."
+        content = self.tips.stop_tasks.format(count=total) if total else self.tips.stop_idle
         await self.bus.publish_outbound(
             OutboundMessage(
                 channel=msg.channel,
@@ -322,7 +324,7 @@ class AgentLoop:
             OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="Restarting NanoBot, will be back soon...",
+                content=self.tips.restart,
             )
         )
 
@@ -333,6 +335,58 @@ class AgentLoop:
             os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
 
         asyncio.create_task(_do_restart())
+
+    async def _handle_model(self, msg: InboundMessage) -> OutboundMessage:
+        """Handle /model command — query or update the active model."""
+        from nanobot.config.loader import get_config_path, load_config
+
+        raw_args = msg.content.strip()[len("/model") :].strip()
+        parts = raw_args.split() if raw_args else []
+
+        if not parts:
+            config = load_config()
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self.tips.model_info.format(
+                    model_name=config.agents.defaults.model,
+                    provider_name=config.agents.defaults.provider,
+                ),
+            )
+
+        if len(parts) < 2:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self.tips.model_usage,
+            )
+
+        full_model = f"{parts[0]}/{parts[1]}"
+        config_path = get_config_path()
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("agents", {}).setdefault("defaults", {})["model"] = full_model
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_updated.format(model_name=full_model),
+                )
+            )
+            await self._handle_restart(msg)
+        except Exception as e:
+            logger.error("Failed to update model config: {}", e)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self.tips.model_error.format(error=e),
+            )
+
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="")
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under the global lock."""
@@ -359,7 +413,7 @@ class AgentLoop:
                     OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="Sorry, I encountered an error.",
+                        content=self.tips.error,
                     )
                 )
 
@@ -420,7 +474,7 @@ class AgentLoop:
             return OutboundMessage(
                 channel=channel,
                 chat_id=chat_id,
-                content=final_content or "Background task completed.",
+                content=final_content or self.tips.background_done,
             )
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
@@ -441,22 +495,16 @@ class AgentLoop:
                 self._schedule_background(self.memory_consolidator.archive_messages(snapshot))
 
             return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content="New session started."
+                channel=msg.channel, chat_id=msg.chat_id, content=self.tips.new_session
             )
         if cmd == "/help":
-            lines = [
-                "🐈 nanobot commands:",
-                "/new — Start a new conversation",
-                "/stop — Stop the current task",
-                "/restart — Restart the bot",
-                "/model — View or switch the active model",
-                "/help — Show available commands",
-            ]
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="\n".join(lines),
+                content=self.tips.help,
             )
+        if msg.content.strip().lower().startswith("/model"):
+            return await self._handle_model(msg)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
@@ -491,15 +539,15 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
         )
 
-        if final_content is None:
-            final_content = "I've completed processing but have no response to give."
-
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
+
+        if final_content is None:
+            final_content = self.tips.no_response
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)

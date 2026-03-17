@@ -182,6 +182,52 @@ class TranscriptionConfig(Base):
     whisper: WhisperTranscriptionConfig = Field(default_factory=WhisperTranscriptionConfig)
 
 
+class TipsConfig(Base):
+    """Configurable system response strings shown to users.
+
+    Strings marked with placeholders use Python .format() substitution.
+    Available placeholders per field are listed in the comments.
+    """
+
+    # /restart
+    restart: str = "Restarting NanoBot, will be back soon..."
+    # /new
+    new_session: str = "New session started."
+    # /stop — {count}
+    stop_tasks: str = "Stopped {count} task(s)."
+    stop_idle: str = "No active task to stop."
+    # unhandled exception
+    error: str = "Sorry, I encountered an error."
+    # background (subagent) task with no reply
+    background_done: str = "Background task completed."
+    # /help (full text, newlines supported)
+    help: str = (
+        "🐈 nanobot commands:\n"
+        "/new — Start a new conversation\n"
+        "/stop — Stop the current task\n"
+        "/restart — Restart the bot\n"
+        "/model — View or switch the active model\n"
+        "/help — Show available commands"
+    )
+    # /model (no args) — {model_name}, {provider_name}
+    model_info: str = (
+        "Current model: {model_name}\n"
+        "Provider: {provider_name}\n\n"
+        "Usage: /model <provider> <model_name>\n"
+        "Example: /model anthropic claude-opus-4-5"
+    )
+    # /model (missing second arg)
+    model_usage: str = (
+        "Usage: /model <provider> <model_name>\nExample: /model anthropic claude-opus-4-5"
+    )
+    # /model (success) — {model_name}
+    model_updated: str = "Model updated: {model_name}\nRestarting to apply changes..."
+    # /model (error) — {error}
+    model_error: str = "Error updating model: {error}"
+    # agent loop finished with no content
+    no_response: str = "I've completed processing but have no response to give."
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -191,6 +237,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
+    tips: TipsConfig = Field(default_factory=TipsConfig)
 
     @property
     def workspace_path(self) -> Path:

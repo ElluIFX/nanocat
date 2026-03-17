@@ -505,6 +505,7 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        tips_config=config.tips,
     )
 
     # Set cron callback (needs agent)
@@ -695,6 +696,7 @@ def agent(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
+        tips_config=config.tips,
         channels_config=config.channels,
     )
 

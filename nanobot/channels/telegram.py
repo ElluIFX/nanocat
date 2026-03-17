@@ -264,7 +264,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
-        self._app.add_handler(CommandHandler("model", self._on_model_command))
+        self._app.add_handler(CommandHandler("model", self._forward_command))
 
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -479,75 +479,6 @@ class TelegramChannel(BaseChannel):
             "/model — View or switch the active model\n"
             "/help — Show available commands"
         )
-
-    async def _on_model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /model command — query or update the active model."""
-        import json
-
-        from nanobot.bus.events import InboundMessage
-        from nanobot.config.loader import get_config_path, load_config
-
-        if not update.message or not update.effective_user:
-            return
-
-        args = context.args or []
-
-        if not args:
-            config = load_config()
-            model = config.agents.defaults.model
-            provider_name = config.get_provider_name(model) or "auto"
-            await update.message.reply_text(
-                f"Current model: {model}\n"
-                f"Provider: {provider_name}\n\n"
-                "Usage: /model <provider> <model_name>\n"
-                "Example: /model anthropic claude-opus-4-5"
-            )
-            return
-
-        user = update.effective_user
-        sender_id = self._sender_id(user)
-        if not self.is_allowed(sender_id):
-            await update.message.reply_text("Access denied.")
-            return
-
-        if len(args) < 2:
-            await update.message.reply_text(
-                "Usage: /model <provider> <model_name>\nExample: /model anthropic claude-opus-4-5"
-            )
-            return
-
-        provider = args[0].strip()
-        modelname = args[1].strip()
-        full_model = f"{provider}/{modelname}"
-
-        config_path = get_config_path()
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                data = json.load(f)
-            data.setdefault("agents", {}).setdefault("defaults", {})["model"] = full_model
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
-            new_config = load_config()
-            resolved_provider = new_config.get_provider_name(full_model) or "auto"
-
-            await update.message.reply_text(
-                f"Model updated: {full_model}\n"
-                f"Resolved provider: {resolved_provider}\n\n"
-                "Restarting to apply changes..."
-            )
-
-            await self.bus.publish_inbound(
-                InboundMessage(
-                    channel=self.name,
-                    sender_id=str(sender_id),
-                    chat_id=str(update.message.chat_id),
-                    content="/restart",
-                )
-            )
-        except Exception as e:
-            logger.error("Failed to update model config: {}", e)
-            await update.message.reply_text(f"Error updating model: {e}")
 
     @staticmethod
     def _sender_id(user) -> str:
