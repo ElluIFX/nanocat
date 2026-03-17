@@ -126,6 +126,7 @@ class ExecTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
+                encoding="utf-8",
             )
 
             try:

@@ -19,7 +19,13 @@ from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.delegate import DelegateTool
-from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.filesystem import (
+    EditFileTool,
+    ListDirTool,
+    ReadFileTool,
+    ReadImageFileTool,
+    WriteFileTool,
+)
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -125,6 +131,11 @@ class AgentLoop:
                 workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
             )
         )
+        self.tools.register(
+            ReadImageFileTool(
+                workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
+            )
+        )
         for cls in (WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(
@@ -193,6 +204,44 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _bridge_image_tool_result(
+        tool_name: str, result: Any
+    ) -> tuple[str, list[dict[str, Any]]] | None:
+        """Convert read_image_file output to a tool text + synthetic user image message."""
+        if tool_name != "read_image_file" or not isinstance(result, list):
+            return None
+        image_blocks = [
+            block
+            for block in result
+            if isinstance(block, dict) and block.get("type") in {"image_url", "text"}
+        ]
+        if not any(block.get("type") == "image_url" for block in image_blocks):
+            logger.debug(
+                "Image bridge skipped for {}: missing image_url block (result_type={})",
+                tool_name,
+                type(result).__name__,
+            )
+            return None
+
+        tool_text = (
+            "Image read completed. Wait for the next user message carrying the image payload "
+            "from this tool."
+        )
+        user_blocks = [
+            {
+                "type": "text",
+                "text": "[Tool Return] Auto-forwarded image payload from read_image_file.",
+            },
+            *image_blocks,
+        ]
+        logger.info(
+            "Image bridge prepared for {} with {} content blocks",
+            tool_name,
+            len(user_blocks),
+        )
+        return tool_text, user_blocks
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -238,6 +287,22 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.debug("Tool call: {}({})", tool_call.name, args_str)
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if bridged := self._bridge_image_tool_result(tool_call.name, result):
+                        tool_text, user_blocks = bridged
+                        logger.info(
+                            "Applying image bridge for tool_call_id={} ({})",
+                            tool_call.id,
+                            tool_call.name,
+                        )
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, tool_text
+                        )
+                        messages.append({"role": "user", "content": user_blocks})
+                        logger.debug(
+                            "Injected synthetic user image message from tool {}",
+                            tool_call.name,
+                        )
+                        continue
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
