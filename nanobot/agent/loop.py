@@ -322,7 +322,7 @@ class AgentLoop:
             OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="Restarting...",
+                content="Restarting NanoBot, will be back soon...",
             )
         )
 
