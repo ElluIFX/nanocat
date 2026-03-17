@@ -147,19 +147,19 @@ class ReadFileTool(_FsTool):
 # ---------------------------------------------------------------------------
 
 
-class ReadImageFileTool(_FsTool):
-    """Read image as base64 content and include EXIF metadata."""
+class LoadImageTool(_FsTool):
+    """Load image content from file and include EXIF metadata."""
 
     _MAX_BYTES = 8 * 1024 * 1024
 
     @property
     def name(self) -> str:
-        return "read_image_file"
+        return "load_image"
 
     @property
     def description(self) -> str:
         return (
-            "Read an image file and return base64-embedded image content and EXIF metadata. "
+            "Load content of an image file into your context, including its MIME type and EXIF metadata. "
             "Only suitable for vision-capable models."
         )
 
@@ -168,7 +168,7 @@ class ReadImageFileTool(_FsTool):
         return {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "The image file path to read"},
+                "path": {"type": "string", "description": "The image file path to load"},
             },
             "required": ["path"],
         }

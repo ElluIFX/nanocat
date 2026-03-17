@@ -12,8 +12,8 @@ from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import (
     EditFileTool,
     ListDirTool,
+    LoadImageTool,
     ReadFileTool,
-    ReadImageFileTool,
     WriteFileTool,
 )
 from nanobot.agent.tools.registry import ToolRegistry
@@ -130,7 +130,7 @@ class SubagentManager:
             )
         )
         tools.register(
-            ReadImageFileTool(
+            LoadImageTool(
                 workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
             )
         )
