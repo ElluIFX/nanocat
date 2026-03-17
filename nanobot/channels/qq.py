@@ -3,8 +3,9 @@
 import asyncio
 import hashlib
 from collections import deque
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import httpx
 from loguru import logger
@@ -29,6 +30,35 @@ except ImportError:
 
 if TYPE_CHECKING:
     from botpy.message import C2CMessage, GroupMessage
+
+_T = TypeVar("_T")
+
+
+async def _with_retry(
+    fn: Callable[[], Coroutine[Any, Any, _T]],
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    label: str = "QQ API",
+) -> _T:
+    """Run an async callable with exponential-backoff retry on any exception."""
+    for attempt in range(max_attempts):
+        try:
+            return await fn()
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            delay = base_delay * (2**attempt)
+            logger.warning(
+                "{} attempt {}/{} failed: {}. Retrying in {:.0f}s…",
+                label,
+                attempt + 1,
+                max_attempts,
+                e,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 def _make_bot_class(channel: "QQChannel") -> "type[botpy.Client]":
@@ -144,14 +174,16 @@ class QQChannel(BaseChannel):
 
             chat_type = self._chat_type_cache.get(msg.chat_id, "c2c")
             if chat_type == "group":
-                await self._client.api.post_group_message(
-                    group_openid=msg.chat_id,
-                    **payload,
+                await _with_retry(
+                    lambda: self._client.api.post_group_message(
+                        group_openid=msg.chat_id, **payload
+                    ),
+                    label="QQ post_group_message",
                 )
             else:
-                await self._client.api.post_c2c_message(
-                    openid=msg.chat_id,
-                    **payload,
+                await _with_retry(
+                    lambda: self._client.api.post_c2c_message(openid=msg.chat_id, **payload),
+                    label="QQ post_c2c_message",
                 )
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
@@ -223,10 +255,14 @@ class QQChannel(BaseChannel):
         file_path = media_dir / f"{hashlib.md5(url.encode()).hexdigest()[:16]}{ext}"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                file_path.write_bytes(resp.content)
+
+            async def _download() -> None:
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                    file_path.write_bytes(resp.content)
+
+            await _with_retry(_download, label=f"QQ attachment download ({media_type})")
 
             path_str = str(file_path)
             if media_type == "voice":
