@@ -5,7 +5,6 @@ from pathlib import Path
 
 from nanobot.config.schema import Config
 
-
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
 
@@ -40,7 +39,9 @@ def load_config(config_path: Path | None = None) -> Config:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             data = _migrate_config(data)
-            return Config.model_validate(data)
+            config = Config.model_validate(data)
+            save_config(config, path)
+            return config
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
             print("Using default configuration.")

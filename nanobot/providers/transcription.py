@@ -1,35 +1,31 @@
-"""Voice transcription provider using Groq."""
+"""Voice transcription provider using the OpenAI-compatible Whisper API."""
 
-import os
 from pathlib import Path
 
 import httpx
 from loguru import logger
 
 
-class GroqTranscriptionProvider:
-    """
-    Voice transcription provider using Groq's Whisper API.
+class WhisperTranscriptionProvider:
+    """Voice transcription via any OpenAI-compatible Whisper endpoint."""
 
-    Groq offers extremely fast transcription with a generous free tier.
-    """
-
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.environ.get("GROQ_API_KEY")
-        self.api_url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    def __init__(self, api_key: str, api_url: str, model: str = "whisper-large-v3"):
+        self.api_key = api_key
+        self.api_url = api_url
+        self.model = model
 
     async def transcribe(self, file_path: str | Path) -> str:
         """
-        Transcribe an audio file using Groq.
+        Transcribe an audio file.
 
         Args:
             file_path: Path to the audio file.
 
         Returns:
-            Transcribed text.
+            Transcribed text, or empty string on failure.
         """
         if not self.api_key:
-            logger.warning("Groq API key not configured for transcription")
+            logger.warning("Whisper API key not configured for transcription")
             return ""
 
         path = Path(file_path)
@@ -40,25 +36,25 @@ class GroqTranscriptionProvider:
         try:
             async with httpx.AsyncClient() as client:
                 with open(path, "rb") as f:
-                    files = {
-                        "file": (path.name, f),
-                        "model": (None, "whisper-large-v3"),
-                    }
-                    headers = {
-                        "Authorization": f"Bearer {self.api_key}",
-                    }
-
                     response = await client.post(
                         self.api_url,
-                        headers=headers,
-                        files=files,
-                        timeout=60.0
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        data={"model": self.model},
+                        files={"file": (path.name, f)},
+                        timeout=60.0,
                     )
 
-                    response.raise_for_status()
-                    data = response.json()
-                    return data.get("text", "")
+                    if not response.is_success:
+                        logger.error(
+                            "Whisper transcription error: {} {}\n{}",
+                            response.status_code,
+                            response.reason_phrase,
+                            response.text,
+                        )
+                        return ""
+
+                    return response.json().get("text", "")
 
         except Exception as e:
-            logger.error("Groq transcription error: {}", e)
+            logger.error("Whisper transcription error: {}", e)
             return ""

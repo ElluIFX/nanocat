@@ -33,8 +33,18 @@ class ChannelManager:
     def _init_channels(self) -> None:
         """Initialize channels discovered via pkgutil scan + entry_points plugins."""
         from nanobot.channels.registry import discover_all
+        from nanobot.providers.transcription import WhisperTranscriptionProvider
 
-        groq_key = self.config.providers.groq.api_key
+        transcription_cfg = self.config.transcription
+        transcription_provider = (
+            WhisperTranscriptionProvider(
+                api_key=transcription_cfg.whisper.api_key,
+                api_url=transcription_cfg.whisper.api_url,
+                model=transcription_cfg.whisper.model,
+            )
+            if transcription_cfg.enabled
+            else None
+        )
 
         for name, cls in discover_all().items():
             section = getattr(self.config.channels, name, None)
@@ -49,7 +59,9 @@ class ChannelManager:
                 continue
             try:
                 channel = cls(section, self.bus)
-                channel.transcription_api_key = groq_key
+                channel._transcription_provider = transcription_provider
+                channel._startup_message = self.config.channels.on_start_message
+                channel._startup_notify = self.config.channels.on_start_notify.get(name, [])
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)
             except Exception as e:
@@ -116,15 +128,15 @@ class ChannelManager:
 
         while True:
             try:
-                msg = await asyncio.wait_for(
-                    self.bus.consume_outbound(),
-                    timeout=1.0
-                )
+                msg = await asyncio.wait_for(self.bus.consume_outbound(), timeout=1.0)
 
                 if msg.metadata.get("_progress"):
                     if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
                         continue
-                    if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
+                    if (
+                        not msg.metadata.get("_tool_hint")
+                        and not self.config.channels.send_progress
+                    ):
                         continue
 
                 channel = self.channels.get(msg.channel)
@@ -148,10 +160,7 @@ class ChannelManager:
     def get_status(self) -> dict[str, Any]:
         """Get status of all channels."""
         return {
-            name: {
-                "enabled": True,
-                "running": channel.is_running
-            }
+            name: {"enabled": True, "running": channel.is_running}
             for name, channel in self.channels.items()
         }
 

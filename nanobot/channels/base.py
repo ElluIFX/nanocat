@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,6 @@ class BaseChannel(ABC):
 
     name: str = "base"
     display_name: str = "Base"
-    transcription_api_key: str = ""
 
     def __init__(self, config: Any, bus: MessageBus):
         """
@@ -34,17 +34,31 @@ class BaseChannel(ABC):
         """
         self.config = config
         self.bus = bus
-        self._running = False
+        self.__running: bool = False
+        self._startup_message: str = ""
+        self._startup_notify: list[str] = []
+        self._transcription_provider: Any = None
+
+    @property
+    def _running(self) -> bool:
+        return self.__running
+
+    @_running.setter
+    def _running(self, value: bool) -> None:
+        was_running = self.__running
+        self.__running = value
+        if value and not was_running and self._startup_message and self._startup_notify:
+            try:
+                asyncio.get_running_loop().create_task(self._notify_startup())
+            except RuntimeError:
+                pass  # no event loop (e.g. during tests)
 
     async def transcribe_audio(self, file_path: str | Path) -> str:
-        """Transcribe an audio file via Groq Whisper. Returns empty string on failure."""
-        if not self.transcription_api_key:
+        """Transcribe an audio file via Whisper. Returns empty string when transcription is disabled or fails."""
+        if self._transcription_provider is None:
             return ""
         try:
-            from nanobot.providers.transcription import GroqTranscriptionProvider
-
-            provider = GroqTranscriptionProvider(api_key=self.transcription_api_key)
-            return await provider.transcribe(file_path)
+            return await self._transcription_provider.transcribe(file_path)
         except Exception as e:
             logger.warning("{}: audio transcription failed: {}", self.name, e)
             return ""
@@ -112,7 +126,8 @@ class BaseChannel(ABC):
             logger.warning(
                 "Access denied for sender {} on channel {}. "
                 "Add them to allowFrom list in config to grant access.",
-                sender_id, self.name,
+                sender_id,
+                self.name,
             )
             return
 
@@ -133,7 +148,24 @@ class BaseChannel(ABC):
         """Return default config for onboard. Override in plugins to auto-populate config.json."""
         return {"enabled": False}
 
+    async def _notify_startup(self) -> None:
+        """Send the configured startup message to all registered chat IDs."""
+        for chat_id in self._startup_notify:
+            try:
+                await self.send(
+                    OutboundMessage(
+                        channel=self.name,
+                        chat_id=str(chat_id),
+                        content=self._startup_message,
+                    )
+                )
+                logger.debug("{}: startup notification sent to {}", self.name, chat_id)
+            except Exception as e:
+                logger.warning(
+                    "{}: failed to send startup notification to {}: {}", self.name, chat_id, e
+                )
+
     @property
     def is_running(self) -> bool:
         """Check if the channel is running."""
-        return self._running
+        return self.__running

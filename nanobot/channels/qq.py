@@ -156,6 +156,37 @@ class QQChannel(BaseChannel):
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
 
+    @staticmethod
+    async def _convert_silk(silk_path: Path) -> Path | None:
+        """Convert a QQ SILK v3 voice file to WAV via pilk.
+
+        QQ voice messages use SILK v3 encoding regardless of the .amr extension.
+        Returns the converted WAV path, or None on failure.
+        """
+        import importlib.util
+
+        if importlib.util.find_spec("pilk") is None:
+            logger.warning("QQ voice conversion requires 'pilk' (uv add pilk)")
+            return None
+
+        import pilk
+
+        out_path = silk_path.with_suffix(".wav")
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, lambda: pilk.silk_to_wav(str(silk_path), str(out_path), rate=24000)
+            )
+            if out_path.exists() and out_path.stat().st_size > 0:
+                logger.debug(
+                    "QQ SILK→WAV converted: {} ({} bytes)", out_path.name, out_path.stat().st_size
+                )
+                return out_path
+            logger.warning("QQ SILK→WAV produced empty output: {}", silk_path.name)
+        except Exception as e:
+            logger.warning("QQ SILK→WAV conversion failed ({}): {}", silk_path.name, e)
+        return None
+
     async def _download_attachment(
         self, attachment: Any, media_dir: Path
     ) -> tuple[str | None, str | None]:
@@ -199,7 +230,9 @@ class QQChannel(BaseChannel):
 
             path_str = str(file_path)
             if media_type == "voice":
-                transcription = await self.transcribe_audio(file_path)
+                transcription = await self.transcribe_audio(
+                    await self._convert_silk(file_path) or file_path
+                )
                 if transcription:
                     logger.info("Transcribed QQ voice: {}...", transcription[:50])
                     return path_str, f"[transcription: {transcription}]"
