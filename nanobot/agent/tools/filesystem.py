@@ -158,10 +158,7 @@ class LoadImageTool(_FsTool):
 
     @property
     def description(self) -> str:
-        return (
-            "Load content of an image file into your context, including its MIME type and EXIF metadata. "
-            "Only suitable for vision-capable models."
-        )
+        return "Load content of an image file into your context, including its MIME type and EXIF metadata. "
 
     @property
     def parameters(self) -> dict[str, Any]:
