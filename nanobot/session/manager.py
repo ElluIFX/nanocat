@@ -21,8 +21,8 @@ class Session:
     Stores messages in JSONL format for easy reading and persistence.
 
     Important: Messages are append-only for LLM cache efficiency.
-    The consolidation process writes summaries to MEMORY.md/HISTORY.md
-    but does NOT modify the messages list or get_history() output.
+    Consolidation only advances an offset and updates the session-level
+    consolidated memory block; raw messages remain on disk.
     """
 
     key: str  # channel:chat_id
@@ -30,16 +30,15 @@ class Session:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
-    last_consolidated: int = 0  # Number of messages already consolidated to files
+    consolidated_memory: str = ""
+    skip_next_nowledge_extraction: bool = False
+    last_consolidated: int = (
+        0  # Exclusive raw-message offset already folded into consolidated_memory
+    )
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
-        msg = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat(),
-            **kwargs
-        }
+        msg = {"role": role, "content": content, "timestamp": datetime.now().isoformat(), **kwargs}
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
@@ -59,27 +58,28 @@ class Session:
                 if tid and str(tid) not in declared:
                     start = i + 1
                     declared.clear()
-                    for prev in messages[start:i + 1]:
+                    for prev in messages[start : i + 1]:
                         if prev.get("role") == "assistant":
                             for tc in prev.get("tool_calls") or []:
                                 if isinstance(tc, dict) and tc.get("id"):
                                     declared.add(str(tc["id"]))
         return start
 
-    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a legal tool-call boundary."""
-        unconsolidated = self.messages[self.last_consolidated:]
-        sliced = unconsolidated[-max_messages:]
+    @classmethod
+    def _build_history_view(
+        cls,
+        messages: list[dict[str, Any]],
+        max_messages: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Convert a raw message slice into an LLM-safe history view."""
+        sliced = messages if max_messages == 0 else messages[-max_messages:]
 
-        # Drop leading non-user messages to avoid starting mid-turn when possible.
         for i, message in enumerate(sliced):
             if message.get("role") == "user":
                 sliced = sliced[i:]
                 break
 
-        # Some providers reject orphan tool results if the matching assistant
-        # tool_calls message fell outside the fixed-size history window.
-        start = self._find_legal_start(sliced)
+        start = cls._find_legal_start(sliced)
         if start:
             sliced = sliced[start:]
 
@@ -92,9 +92,62 @@ class Session:
             out.append(entry)
         return out
 
+    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+        """Return unconsolidated messages for LLM input, aligned to a legal tool-call boundary."""
+        unconsolidated = self.messages[self.last_consolidated :]
+        return self._build_history_view(unconsolidated, max_messages=max_messages)
+
+    def get_history_from(self, start_idx: int, max_messages: int = 500) -> list[dict[str, Any]]:
+        """Return an LLM-safe history view from an arbitrary raw-message offset."""
+        start = max(0, start_idx)
+        return self._build_history_view(self.messages[start:], max_messages=max_messages)
+
+    def get_completed_turn_boundaries(
+        self,
+        start_idx: int | None = None,
+        end_idx: int | None = None,
+    ) -> list[tuple[int, int]]:
+        """Return completed user/assistant turn boundaries in raw message indices.
+
+        A turn starts at a user message and ends at the final assistant reply for
+        that user request. Intermediate assistant tool-calls and tool results are
+        included in the same turn and do not count as separate turns.
+        """
+        start = self.last_consolidated if start_idx is None else max(0, start_idx)
+        end = len(self.messages) if end_idx is None else min(len(self.messages), end_idx)
+        turns: list[tuple[int, int]] = []
+        current_start: int | None = None
+
+        for idx in range(start, end):
+            message = self.messages[idx]
+            role = message.get("role")
+
+            if role == "user":
+                if current_start is None:
+                    current_start = idx
+                continue
+
+            if role == "tool" and current_start is not None and message.get("name") == "message":
+                turns.append((current_start, idx + 1))
+                current_start = None
+                continue
+
+            if role != "assistant" or current_start is None:
+                continue
+
+            if message.get("tool_calls"):
+                continue
+
+            turns.append((current_start, idx + 1))
+            current_start = None
+
+        return turns
+
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
         self.messages = []
+        self.consolidated_memory = ""
+        self.skip_next_nowledge_extraction = False
         self.last_consolidated = 0
         self.updated_at = datetime.now()
 
@@ -162,6 +215,8 @@ class SessionManager:
             metadata = {}
             created_at = None
             last_consolidated = 0
+            consolidated_memory = ""
+            skip_next_nowledge_extraction = False
 
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -173,7 +228,16 @@ class SessionManager:
 
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
-                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        created_at = (
+                            datetime.fromisoformat(data["created_at"])
+                            if data.get("created_at")
+                            else None
+                        )
+                        consolidated_memory = data.get("consolidated_memory", "")
+                        skip_next_nowledge_extraction = data.get(
+                            "skip_next_nowledge_extraction",
+                            False,
+                        )
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
@@ -183,7 +247,9 @@ class SessionManager:
                 messages=messages,
                 created_at=created_at or datetime.now(),
                 metadata=metadata,
-                last_consolidated=last_consolidated
+                consolidated_memory=consolidated_memory,
+                skip_next_nowledge_extraction=skip_next_nowledge_extraction,
+                last_consolidated=last_consolidated,
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
@@ -200,7 +266,9 @@ class SessionManager:
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
                 "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
+                "consolidated_memory": session.consolidated_memory,
+                "skip_next_nowledge_extraction": session.skip_next_nowledge_extraction,
+                "last_consolidated": session.last_consolidated,
             }
             f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
             for msg in session.messages:
@@ -230,12 +298,14 @@ class SessionManager:
                         data = json.loads(first_line)
                         if data.get("_type") == "metadata":
                             key = data.get("key") or path.stem.replace("_", ":", 1)
-                            sessions.append({
-                                "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
-                                "path": str(path)
-                            })
+                            sessions.append(
+                                {
+                                    "key": key,
+                                    "created_at": data.get("created_at"),
+                                    "updated_at": data.get("updated_at"),
+                                    "path": str(path),
+                                }
+                            )
             except Exception:
                 continue
 

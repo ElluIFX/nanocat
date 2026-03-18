@@ -44,6 +44,9 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    assistant_model: str | None = (
+        None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
+    )
     provider: str = (
         "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
     )
@@ -191,6 +194,31 @@ class TranscriptionConfig(Base):
     whisper: WhisperTranscriptionConfig = Field(default_factory=WhisperTranscriptionConfig)
 
 
+class NowledgeConfig(Base):
+    """Nowledge Mem connection configuration."""
+
+    enabled: bool = True
+    auto_extract_memories: bool = False  # extract durable memories before consolidation
+    api_url: str = "http://127.0.0.1:14242"
+    api_key: str | None = None
+    thread_source: str = "nanobot"
+
+
+class MemoryConfig(Base):
+    """Memory system configuration.
+
+    Consolidation settings always apply to session history.
+    MEMORY.md is a static, manually maintained long-term memory block.
+    Nowledge-specific extraction behavior is configured under memory.nowledge.
+    """
+
+    consolidation_threshold: float = (
+        0.5  # trigger compression when prompt exceeds this fraction of context_window_tokens
+    )
+    no_consolidate_history_num: int = 3  # keep this many recent user/assistant turns raw
+    nowledge: NowledgeConfig = Field(default_factory=NowledgeConfig)
+
+
 class TipsConfig(Base):
     """Configurable system response strings shown to users.
 
@@ -213,6 +241,7 @@ class TipsConfig(Base):
     help: str = (
         "🐈 nanobot commands:\n"
         "/new — Start a new conversation\n"
+        "/consolidate — Manually consolidate old session turns\n"
         "/stop — Stop the current task\n"
         "/restart — Restart the bot\n"
         "/model — View or switch the active model\n"
@@ -249,6 +278,9 @@ class TipsConfig(Base):
     )
     # agent loop finished with no content
     no_response: str = "I've completed processing but have no response to give."
+    # Consolidation tips
+    consolidate_completed: str = "Session consolidation completed."
+    consolidate_failed: str = "No completed turns are eligible for consolidation."
 
 
 class Config(BaseSettings):
@@ -261,6 +293,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     tips: TipsConfig = Field(default_factory=TipsConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     @property
     def workspace_path(self) -> Path:

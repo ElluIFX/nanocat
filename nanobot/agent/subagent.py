@@ -172,7 +172,7 @@ class SubagentManager:
                 messages.append(
                     build_assistant_message(
                         response.content or "",
-                        tool_calls=tool_call_dicts,
+                        tool_calls=tool_call_dicts, 
                         reasoning_content=response.reasoning_content,
                         thinking_blocks=response.thinking_blocks,
                     )

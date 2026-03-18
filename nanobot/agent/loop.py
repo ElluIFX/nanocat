@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.memory import MemoryConsolidator
+from nanobot.agent.memory import (
+    MemoryConsolidator,
+    NowledgeClient,
+    NowledgeMemoryManager,
+    ThreadManager,
+)
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
@@ -37,7 +42,13 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, TipsConfig, WebSearchConfig
+    from nanobot.config.schema import (
+        ChannelsConfig,
+        ExecToolConfig,
+        MemoryConfig,
+        TipsConfig,
+        WebSearchConfig,
+    )
     from nanobot.cron.service import CronService
 
 
@@ -61,6 +72,7 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
+        assistant_model: str | None = None,
         max_iterations: int = 40,
         context_window_tokens: int = 65_536,
         web_search_config: WebSearchConfig | None = None,
@@ -72,8 +84,9 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         tips_config: TipsConfig | None = None,
+        memory_config: MemoryConfig | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, TipsConfig, WebSearchConfig
+        from nanobot.config.schema import ExecToolConfig, MemoryConfig, TipsConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -81,6 +94,7 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.assistant_model = assistant_model or self.model
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
@@ -89,7 +103,13 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
+        _mem = memory_config or MemoryConfig()
+        _nowledge_cfg = _mem.nowledge
+
+        self.context = ContextBuilder(
+            workspace,
+            nowledge_enabled=_nowledge_cfg.enabled,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -111,6 +131,32 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._processing_lock = asyncio.Lock()
+
+        # Nowledge Mem integration (optional)
+        self.nowledge_client: NowledgeClient | None = (
+            NowledgeClient(api_url=_nowledge_cfg.api_url, api_key=_nowledge_cfg.api_key)
+            if _nowledge_cfg.enabled
+            else None
+        )
+        self.thread_manager: ThreadManager | None = (
+            ThreadManager(
+                client=self.nowledge_client,
+                sessions=self.sessions,
+                source=_nowledge_cfg.thread_source,
+            )
+            if self.nowledge_client
+            else None
+        )
+        self.nowledge_memory_manager: NowledgeMemoryManager | None = (
+            NowledgeMemoryManager(
+                client=self.nowledge_client,
+                provider=provider,
+                model=self.assistant_model,
+            )
+            if self.nowledge_client and _nowledge_cfg.auto_extract_memories
+            else None
+        )
+
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -119,6 +165,10 @@ class AgentLoop:
             context_window_tokens=context_window_tokens,
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
+            consolidation_model=self.assistant_model,
+            threshold=_mem.consolidation_threshold,
+            no_consolidate_turns=_mem.no_consolidate_history_num,
+            nowledge_manager=self.nowledge_memory_manager,
         )
         self._register_default_tools()
 
@@ -153,6 +203,20 @@ class AgentLoop:
         self.tools.register(DelegateTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        if self.nowledge_client:
+            from nanobot.agent.tools.nowledge import (
+                MemoryAddTool,
+                MemoryDeleteTool,
+                MemorySearchTool,
+                MemoryUpdateTool,
+                ReadWorkingMemoryTool,
+            )
+
+            self.tools.register(MemorySearchTool(self.nowledge_client))
+            self.tools.register(MemoryAddTool(self.nowledge_client))
+            self.tools.register(MemoryUpdateTool(self.nowledge_client))
+            self.tools.register(MemoryDeleteTool(self.nowledge_client))
+            self.tools.register(ReadWorkingMemoryTool(self.nowledge_client))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -594,8 +658,13 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        transient: bool = False,
     ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
+        """Process a single inbound message and return the response.
+
+        When transient=True the session is still saved but memory consolidation
+        and Nowledge thread appending are skipped (used for cron/heartbeat).
+        """
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (
@@ -604,22 +673,34 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+            if not transient:
+                await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
             # Subagent results should be assistant role, other system messages use user role
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
                 history=history,
+                consolidated_memory=session.consolidated_memory,
                 current_message=msg.content,
                 channel=channel,
                 chat_id=chat_id,
                 current_role=current_role,
             )
+            n_initial_sys = len(messages)
             final_content, _, all_msgs = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, 1 + len(history))
+            _old_msg_count_sys = len(session.messages)
+            self._save_turn(session, all_msgs, n_initial_sys - 1)
             self.sessions.save(session)
-            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+            if not transient:
+                self._schedule_background(
+                    self.memory_consolidator.maybe_consolidate_by_tokens(session)
+                )
+                if self.thread_manager:
+                    _new_msgs_sys = session.messages[_old_msg_count_sys:]
+                    self._schedule_background(
+                        self.thread_manager.append_turn(session, _new_msgs_sys)
+                    )
             return OutboundMessage(
                 channel=channel,
                 chat_id=chat_id,
@@ -639,13 +720,10 @@ class AgentLoop:
             return self._build_command_denied(msg, command)
         cmd = raw.lower()
         if cmd == "/new":
-            snapshot = session.messages[session.last_consolidated :]
+            session.metadata.pop("nowledge_thread_id", None)
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
-
-            if snapshot:
-                self._schedule_background(self.memory_consolidator.archive_messages(snapshot))
 
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=self.tips.new_session
@@ -656,13 +734,20 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self.tips.help,
             )
+        if cmd == "/consolidate":
+            changed = await self.memory_consolidator.maybe_consolidate_by_tokens(
+                session, force=True
+            )
+            content = self.tips.consolidate_completed if changed else self.tips.consolidate_failed
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
         if cmd == "/ctx":
             return await self._handle_ctx(msg, session)
         if cmd == "/sid":
             return await self._handle_sid(msg, key)
         if msg.content.strip().lower().startswith("/model"):
             return await self._handle_model(msg)
-        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+        if not transient:
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
@@ -672,6 +757,7 @@ class AgentLoop:
         history = session.get_history(max_messages=0)
         initial_messages = self.context.build_messages(
             history=history,
+            consolidated_memory=session.consolidated_memory,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
@@ -691,14 +777,20 @@ class AgentLoop:
                 )
             )
 
+        n_initial = len(initial_messages)
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
         )
 
-        self._save_turn(session, all_msgs, 1 + len(history))
+        _old_msg_count = len(session.messages)
+        self._save_turn(session, all_msgs, n_initial - 1)
         self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        if not transient:
+            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+            if self.thread_manager:
+                _new_msgs = session.messages[_old_msg_count:]
+                self._schedule_background(self.thread_manager.append_turn(session, _new_msgs))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -749,10 +841,9 @@ class AgentLoop:
                             and c["text"].startswith(ContextBuilder._RUNTIME_CONTEXT_TAG)
                         ):
                             continue  # Strip runtime context from multimodal messages
-                        if (
-                            c.get("type") == "image_url"
-                            and c.get("image_url", {}).get("url", "").startswith("data:image/")
-                        ):
+                        if c.get("type") == "image_url" and c.get("image_url", {}).get(
+                            "url", ""
+                        ).startswith("data:image/"):
                             path = (c.get("_meta") or {}).get("path", "")
                             placeholder = f"[image: {path}]" if path else "[image]"
                             filtered.append({"type": "text", "text": placeholder})
@@ -772,11 +863,16 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        transient: bool = False,
     ) -> str:
-        """Process a message directly (for CLI or cron usage)."""
+        """Process a message directly (for CLI or cron usage).
+
+        Set transient=True for background tasks (cron, heartbeat) to skip
+        memory consolidation and Nowledge thread saving.
+        """
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress
+            msg, session_key=session_key, on_progress=on_progress, transient=transient
         )
         return response.content if response else ""

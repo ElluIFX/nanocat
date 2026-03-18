@@ -50,6 +50,12 @@ class CronTool(Tool):
                     "description": "Action to perform",
                 },
                 "message": {"type": "string", "description": "Reminder message (for add)"},
+                "notify": {
+                    "type": "string",
+                    "enum": ["never", "always", "smart"],
+                    "default": "smart",
+                    "description": "Whether to notify the user, 'never' means silent execution, 'always' means always notify when the job is executed (usually for one-shot task), 'smart' means assitant model will decide this for you.",
+                },
                 "every_seconds": {
                     "type": "integer",
                     "description": "Interval in seconds (for recurring tasks)",
@@ -75,6 +81,7 @@ class CronTool(Tool):
         self,
         action: str,
         message: str = "",
+        notify: str = "smart",
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         tz: str | None = None,
@@ -85,7 +92,7 @@ class CronTool(Tool):
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"
-            return self._add_job(message, every_seconds, cron_expr, tz, at)
+            return self._add_job(message, notify, every_seconds, cron_expr, tz, at)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -95,6 +102,7 @@ class CronTool(Tool):
     def _add_job(
         self,
         message: str,
+        notify: str,
         every_seconds: int | None,
         cron_expr: str | None,
         tz: str | None,
@@ -137,10 +145,10 @@ class CronTool(Tool):
             name=message[:30],
             schedule=schedule,
             message=message,
-            deliver=True,
             channel=self._channel,
             to=self._chat_id,
             delete_after_run=delete_after,
+            notify_mode=notify,
         )
         return f"Created job '{job.name}' (id: {job.id})"
 

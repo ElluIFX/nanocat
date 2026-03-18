@@ -108,7 +108,7 @@ class SkillsLoader:
         Returns:
             XML-formatted skills summary.
         """
-        all_skills = self.list_skills(filter_unavailable=False)
+        all_skills = self.list_skills(filter_unavailable=True)
         if not all_skills:
             return ""
 

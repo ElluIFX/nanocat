@@ -23,8 +23,8 @@ def _make_messages(message_count: int = 30):
     ]
 
 
-def _make_tool_response(history_entry, memory_update):
-    """Create an LLMResponse with a save_memory tool call."""
+def _make_tool_response(memory_update):
+    """Create an LLMResponse with a save_memory tool call (no history_entry)."""
     return LLMResponse(
         content=None,
         tool_calls=[
@@ -32,7 +32,6 @@ def _make_tool_response(history_entry, memory_update):
                 id="call_1",
                 name="save_memory",
                 arguments={
-                    "history_entry": history_entry,
                     "memory_update": memory_update,
                 },
             )
@@ -66,7 +65,6 @@ class TestMemoryConsolidationTypeHandling:
         provider = AsyncMock()
         provider.chat = AsyncMock(
             return_value=_make_tool_response(
-                history_entry="[2026-01-01] User discussed testing.",
                 memory_update="# Memory\nUser likes testing.",
             )
         )
@@ -76,8 +74,6 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is True
-        assert store.history_file.exists()
-        assert "[2026-01-01] User discussed testing." in store.history_file.read_text()
         assert "User likes testing." in store.memory_file.read_text()
 
     @pytest.mark.asyncio
@@ -87,7 +83,6 @@ class TestMemoryConsolidationTypeHandling:
         provider = AsyncMock()
         provider.chat = AsyncMock(
             return_value=_make_tool_response(
-                history_entry={"timestamp": "2026-01-01", "summary": "User discussed testing."},
                 memory_update={"facts": ["User likes testing"], "topics": ["testing"]},
             )
         )
@@ -97,11 +92,6 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is True
-        assert store.history_file.exists()
-        history_content = store.history_file.read_text()
-        parsed = json.loads(history_content.strip())
-        assert parsed["summary"] == "User discussed testing."
-
         memory_content = store.memory_file.read_text()
         parsed_mem = json.loads(memory_content)
         assert "User likes testing" in parsed_mem["facts"]
@@ -119,7 +109,6 @@ class TestMemoryConsolidationTypeHandling:
                     id="call_1",
                     name="save_memory",
                     arguments=json.dumps({
-                        "history_entry": "[2026-01-01] User discussed testing.",
                         "memory_update": "# Memory\nUser likes testing.",
                     }),
                 )
@@ -132,7 +121,7 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is True
-        assert "User discussed testing." in store.history_file.read_text()
+        assert "User likes testing." in store.memory_file.read_text()
 
     @pytest.mark.asyncio
     async def test_no_tool_call_returns_false(self, tmp_path: Path) -> None:
@@ -148,7 +137,7 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is False
-        assert not store.history_file.exists()
+        assert not store.memory_file.exists()
 
     @pytest.mark.asyncio
     async def test_skips_when_message_chunk_is_empty(self, tmp_path: Path) -> None:
@@ -176,7 +165,6 @@ class TestMemoryConsolidationTypeHandling:
                     id="call_1",
                     name="save_memory",
                     arguments=[{
-                        "history_entry": "[2026-01-01] User discussed testing.",
                         "memory_update": "# Memory\nUser likes testing.",
                     }],
                 )
@@ -189,7 +177,6 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is True
-        assert "User discussed testing." in store.history_file.read_text()
         assert "User likes testing." in store.memory_file.read_text()
 
     @pytest.mark.asyncio
@@ -241,8 +228,8 @@ class TestMemoryConsolidationTypeHandling:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_missing_history_entry_returns_false_without_writing(self, tmp_path: Path) -> None:
-        """Do not persist partial results when required fields are missing."""
+    async def test_memory_update_only_succeeds(self, tmp_path: Path) -> None:
+        """A payload with only memory_update (no history_entry) is valid and writes MEMORY.md."""
         store = MemoryStore(tmp_path)
         provider = AsyncMock()
         provider.chat_with_retry = AsyncMock(
@@ -261,13 +248,12 @@ class TestMemoryConsolidationTypeHandling:
 
         result = await store.consolidate(messages, provider, "test-model")
 
-        assert result is False
-        assert not store.history_file.exists()
-        assert not store.memory_file.exists()
+        assert result is True
+        assert "Only memory update" in store.memory_file.read_text()
 
     @pytest.mark.asyncio
     async def test_missing_memory_update_returns_false_without_writing(self, tmp_path: Path) -> None:
-        """Do not append history if memory_update is missing."""
+        """Payload without memory_update should return False and not write MEMORY.md."""
         store = MemoryStore(tmp_path)
         provider = AsyncMock()
         provider.chat_with_retry = AsyncMock(
@@ -277,7 +263,7 @@ class TestMemoryConsolidationTypeHandling:
                     ToolCallRequest(
                         id="call_1",
                         name="save_memory",
-                        arguments={"history_entry": "[2026-01-01] Partial output."},
+                        arguments={"some_other_field": "data"},
                     )
                 ],
             )
@@ -287,18 +273,23 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is False
-        assert not store.history_file.exists()
         assert not store.memory_file.exists()
 
     @pytest.mark.asyncio
-    async def test_null_required_field_returns_false_without_writing(self, tmp_path: Path) -> None:
-        """Null required fields should be rejected before persistence."""
+    async def test_null_memory_update_returns_false_without_writing(self, tmp_path: Path) -> None:
+        """Null memory_update should be rejected before persistence."""
         store = MemoryStore(tmp_path)
         provider = AsyncMock()
         provider.chat_with_retry = AsyncMock(
-            return_value=_make_tool_response(
-                history_entry=None,
-                memory_update="# Memory\nUser likes testing.",
+            return_value=LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_1",
+                        name="save_memory",
+                        arguments={"memory_update": None},
+                    )
+                ],
             )
         )
         messages = _make_messages(message_count=60)
@@ -306,26 +297,6 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is False
-        assert not store.history_file.exists()
-        assert not store.memory_file.exists()
-
-    @pytest.mark.asyncio
-    async def test_empty_history_entry_returns_false_without_writing(self, tmp_path: Path) -> None:
-        """Empty history entries should be rejected to avoid blank archival records."""
-        store = MemoryStore(tmp_path)
-        provider = AsyncMock()
-        provider.chat_with_retry = AsyncMock(
-            return_value=_make_tool_response(
-                history_entry="   ",
-                memory_update="# Memory\nUser likes testing.",
-            )
-        )
-        messages = _make_messages(message_count=60)
-
-        result = await store.consolidate(messages, provider, "test-model")
-
-        assert result is False
-        assert not store.history_file.exists()
         assert not store.memory_file.exists()
 
     @pytest.mark.asyncio
@@ -334,7 +305,6 @@ class TestMemoryConsolidationTypeHandling:
         provider = ScriptedProvider([
             LLMResponse(content="503 server error", finish_reason="error"),
             _make_tool_response(
-                history_entry="[2026-01-01] User discussed testing.",
                 memory_update="# Memory\nUser likes testing.",
             ),
         ])
@@ -359,7 +329,6 @@ class TestMemoryConsolidationTypeHandling:
         provider = AsyncMock()
         provider.chat_with_retry = AsyncMock(
             return_value=_make_tool_response(
-                history_entry="[2026-01-01] User discussed testing.",
                 memory_update="# Memory\nUser likes testing.",
             )
         )
@@ -386,7 +355,6 @@ class TestMemoryConsolidationTypeHandling:
             tool_calls=[],
         )
         ok_resp = _make_tool_response(
-            history_entry="[2026-01-01] Fallback worked.",
             memory_update="# Memory\nFallback OK.",
         )
 
@@ -406,7 +374,7 @@ class TestMemoryConsolidationTypeHandling:
         assert len(call_log) == 2
         assert isinstance(call_log[0]["tool_choice"], dict)
         assert call_log[1]["tool_choice"] == "auto"
-        assert "Fallback worked." in store.history_file.read_text()
+        assert "Fallback OK." in store.memory_file.read_text()
 
     @pytest.mark.asyncio
     async def test_tool_choice_fallback_auto_no_tool_call(self, tmp_path: Path) -> None:
@@ -430,11 +398,11 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(messages, provider, "test-model")
 
         assert result is False
-        assert not store.history_file.exists()
+        assert not store.memory_file.exists()
 
     @pytest.mark.asyncio
-    async def test_raw_archive_after_consecutive_failures(self, tmp_path: Path) -> None:
-        """After 3 consecutive failures, raw-archive messages and return True."""
+    async def test_skip_after_consecutive_failures(self, tmp_path: Path) -> None:
+        """After 3 consecutive failures, skip the chunk (return True) without writing anything."""
         store = MemoryStore(tmp_path)
         no_tool = LLMResponse(content="No tool call.", finish_reason="stop", tool_calls=[])
         provider = AsyncMock()
@@ -445,11 +413,7 @@ class TestMemoryConsolidationTypeHandling:
         assert await store.consolidate(messages, provider, "m") is False
         assert await store.consolidate(messages, provider, "m") is True
 
-        assert store.history_file.exists()
-        content = store.history_file.read_text()
-        assert "[RAW]" in content
-        assert "10 messages" in content
-        assert "msg0" in content
+        # Skip fallback does not write any file
         assert not store.memory_file.exists()
 
     @pytest.mark.asyncio
@@ -458,7 +422,6 @@ class TestMemoryConsolidationTypeHandling:
         store = MemoryStore(tmp_path)
         no_tool = LLMResponse(content="Nope.", finish_reason="stop", tool_calls=[])
         ok_resp = _make_tool_response(
-            history_entry="[2026-01-01] OK.",
             memory_update="# Memory\nOK.",
         )
         messages = _make_messages(message_count=10)

@@ -199,6 +199,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("model", "View or switch the active model"),
         BotCommand("ctx", "Show context/token panel"),
         BotCommand("sid", "Show current channel/chat IDs"),
+        BotCommand("consolidate", "Consolidate the current conversation"),
     ]
 
     @classmethod
@@ -269,6 +270,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("model", self._forward_command))
         self._app.add_handler(CommandHandler("ctx", self._forward_command))
         self._app.add_handler(CommandHandler("sid", self._forward_command))
+        self._app.add_handler(CommandHandler("consolidate", self._forward_command))
 
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -465,26 +467,13 @@ class TelegramChannel(BaseChannel):
             return
 
         user = update.effective_user
-        await update.message.reply_text(
-            f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
-            "Send me a message and I'll respond!\n"
-            "Type /help to see available commands."
-        )
+        await update.message.reply_text(f"👋 Hi {user.first_name}! I'm 🐈 nanobot.")
 
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /help command, bypassing ACL so all users can access it."""
         if not update.message:
             return
-        help_text = getattr(self, "_help_text", None) or (
-            "🐈 nanobot commands:\n"
-            "/new — Start a new conversation\n"
-            "/stop — Stop the current task\n"
-            "/restart — Restart the bot\n"
-            "/model — View or switch the active model\n"
-            "/ctx — Show current context panel\n"
-            "/sid — Show channel/chat identity\n"
-            "/help — Show available commands"
-        )
+        help_text = getattr(self, "_help_text", "") or ("🐈 nanobot")
         await update.message.reply_text(help_text)
 
     @staticmethod
