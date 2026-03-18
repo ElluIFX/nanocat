@@ -1,8 +1,10 @@
 """Shell execution tool."""
 
 import asyncio
+import locale
 import logging
 import os
+import platform
 import re
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,21 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_output(data: bytes) -> str:
+    """Decode subprocess output bytes to str.
+
+    Tries UTF-8 first; on failure falls back to the system's preferred
+    encoding (e.g. GBK/CP936 on Chinese Windows) so that non-UTF-8
+    tool output is still rendered legibly instead of being replaced.
+    """
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        system_enc = locale.getpreferredencoding(False) or "utf-8"
+        return data.decode(system_enc, errors="replace")
+
 
 _UNIX = "unix"
 _CMD = "cmd"
@@ -73,7 +90,22 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command and return its output. Use with caution."
+        system = platform.system()
+        runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
+
+        platform_policy = ""
+        if system == "Windows":
+            platform_policy = """## Platform Policy (Windows)
+- You are running on Windows. Do not assume GNU tools like `grep`, `sed`, or `awk` exist.
+- Prefer Windows-native commands or file tools when they are more reliable.
+- If terminal output is garbled, retry with UTF-8 output enabled.
+"""
+        else:
+            platform_policy = """## Platform Policy (POSIX)
+- You are running on a POSIX system. Prefer UTF-8 and standard shell tools.
+- Use file tools when they are simpler or more reliable than shell commands.
+"""
+        return f"Execute a shell command and return its output. \n\n##Runtime\n{runtime}\n\n{platform_policy}"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -119,6 +151,9 @@ class ExecTool(Tool):
         if self.path_append:
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
+
         try:
             process = await asyncio.create_subprocess_shell(
                 command,
@@ -126,7 +161,6 @@ class ExecTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
-                encoding="utf-8",
             )
 
             try:
@@ -145,10 +179,10 @@ class ExecTool(Tool):
             output_parts = []
 
             if stdout:
-                output_parts.append(stdout.decode("utf-8", errors="replace"))
+                output_parts.append(_decode_output(stdout))
 
             if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
+                stderr_text = _decode_output(stderr)
                 if stderr_text.strip():
                     output_parts.append(f"STDERR:\n{stderr_text}")
 
