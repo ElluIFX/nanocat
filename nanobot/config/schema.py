@@ -294,6 +294,28 @@ class TipsConfig(Base):
         "  channel={channel}\n"
         "  chat_id={chat_id}"
     )
+    # /session — usage shown when subcommand is unknown or missing
+    session_usage: str = (
+        "Usage:\n"
+        "  /session save <name>  — Save current session\n"
+        "  /session load <name>  — Load a saved session\n"
+        "  /session list         — List saved sessions"
+    )
+    # /session save / load — missing name arg
+    session_save_usage: str = "Usage: /session save <name>"
+    session_load_usage: str = "Usage: /session load <name>"
+    # /session save — success — {name}
+    session_saved: str = "Session saved as '{name}'."
+    # /session load — success — {name}
+    session_loaded: str = "Session '{name}' loaded."
+    # /session load — not found — {name}
+    session_not_found: str = "No saved session named '{name}'."
+    # /session save/load — invalid name — {name}, {reason}
+    session_invalid_name: str = "Invalid session name '{name}': {reason}."
+    # /session list — no saves exist
+    session_list_empty: str = "No saved sessions."
+    # /session list — {items} (pre-formatted bullet list)
+    session_list: str = "Saved sessions:\n{items}"
     # /sid — {channel}, {chat_id}, {session_key}
     sid_info: str = (
         "🐈 Session Identity\nChannel: {channel}\nChat ID: {chat_id}\nSession Key: {session_key}"

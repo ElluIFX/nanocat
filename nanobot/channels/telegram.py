@@ -200,6 +200,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("ctx", "Show context/token panel"),
         BotCommand("sid", "Show current channel/chat IDs"),
         BotCommand("consolidate", "Consolidate the current conversation"),
+        BotCommand("session", "Save, load, or list sessions"),
     ]
 
     @classmethod
@@ -271,6 +272,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("ctx", self._forward_command))
         self._app.add_handler(CommandHandler("sid", self._forward_command))
         self._app.add_handler(CommandHandler("consolidate", self._forward_command))
+        self._app.add_handler(CommandHandler("session", self._forward_command))
 
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(

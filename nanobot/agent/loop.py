@@ -51,6 +51,8 @@ if TYPE_CHECKING:
     )
     from nanobot.cron.service import CronService
 
+_SESSION_NAME_UNSAFE = re.compile(r'[<>:"/\\|?*\t\r\n]')
+
 
 class AgentLoop:
     """
@@ -588,6 +590,57 @@ class AgentLoop:
 
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="")
 
+    @staticmethod
+    def _validate_session_name(name: str) -> str | None:
+        """Return an error reason string if *name* is not a valid save name, else None."""
+        if not name:
+            return "name is empty"
+        if len(name) > 64:
+            return "name too long (max 64 characters)"
+        if _SESSION_NAME_UNSAFE.search(name):
+            return 'contains invalid characters (/ \\ : * ? " < > | and whitespace are not allowed)'
+        if name in (".", ".."):
+            return "name is reserved"
+        return None
+
+    async def _handle_session(self, msg: InboundMessage, session: Session) -> OutboundMessage:
+        """Handle /session save|load|list commands."""
+
+        def _reply(content: str) -> OutboundMessage:
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        parts = msg.content.strip().split(maxsplit=2)
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        name = parts[2].strip() if len(parts) > 2 else ""
+
+        if sub == "list":
+            names = self.sessions.list_named(session.key)
+            if not names:
+                return _reply(self.tips.session_list_empty)
+            return _reply(self.tips.session_list.format(items="\n".join(f"• {n}" for n in names)))
+
+        if sub == "save":
+            if not name:
+                return _reply(self.tips.session_save_usage)
+            if reason := self._validate_session_name(name):
+                return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
+            # Flush in-memory state first so the snapshot is up-to-date.
+            self.sessions.save(session)
+            self.sessions.save_named(session, name)
+            return _reply(self.tips.session_saved.format(name=name))
+
+        if sub == "load":
+            if not name:
+                return _reply(self.tips.session_load_usage)
+            if reason := self._validate_session_name(name):
+                return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
+            loaded = self.sessions.load_named(session.key, name)
+            if loaded is None:
+                return _reply(self.tips.session_not_found.format(name=name))
+            return _reply(self.tips.session_loaded.format(name=name))
+
+        return _reply(self.tips.session_usage)
+
     async def _handle_ctx(self, msg: InboundMessage, session: Session) -> OutboundMessage:
         """Handle /ctx command — show compact numeric context panel."""
         estimated_tokens, _ = self.memory_consolidator.estimate_session_prompt_tokens(session)
@@ -774,6 +827,8 @@ class AgentLoop:
             return await self._handle_sid(msg, key)
         if msg.content.strip().lower().startswith("/model"):
             return await self._handle_model(msg)
+        if msg.content.strip().lower().startswith("/session"):
+            return await self._handle_session(msg, session)
         if not transient:
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 

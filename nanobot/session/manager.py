@@ -280,6 +280,55 @@ class SessionManager:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
 
+    def _get_saved_dir(self, key: str) -> Path:
+        """Return the directory that holds named saves for a session key."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        return self.sessions_dir / safe_key
+
+    def save_named(self, session: Session, name: str) -> Path:
+        """Write a named snapshot of *session* to disk, silently overwriting if it exists."""
+        save_dir = ensure_dir(self._get_saved_dir(session.key))
+        path = save_dir / f"{name}.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            metadata_line = {
+                "_type": "metadata",
+                "key": session.key,
+                "created_at": session.created_at.isoformat(),
+                "updated_at": session.updated_at.isoformat(),
+                "metadata": session.metadata,
+                "consolidated_memory": session.consolidated_memory,
+                "skip_next_nowledge_extraction": session.skip_next_nowledge_extraction,
+                "last_consolidated": session.last_consolidated,
+            }
+            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+            for msg in session.messages:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        logger.debug("Named session saved: {} -> {}", session.key, path)
+        return path
+
+    def load_named(self, key: str, name: str) -> Session | None:
+        """Replace the active session with a named snapshot. Returns the loaded Session or None."""
+        path = self._get_saved_dir(key) / f"{name}.jsonl"
+        if not path.exists():
+            return None
+        # Overwrite the active session file so the state is durable immediately.
+        active_path = self._get_session_path(key)
+        shutil.copy2(str(path), str(active_path))
+        self.invalidate(key)
+        session = self.get_or_create(key)
+        # The saved file carries the original key; keep it consistent.
+        session.key = key
+        self._cache[key] = session
+        logger.debug("Named session loaded: {} <- {}", key, path)
+        return session
+
+    def list_named(self, key: str) -> list[str]:
+        """Return sorted names of all saved snapshots for *key* (without .jsonl suffix)."""
+        save_dir = self._get_saved_dir(key)
+        if not save_dir.exists():
+            return []
+        return sorted(p.stem for p in save_dir.glob("*.jsonl"))
+
     def list_sessions(self) -> list[dict[str, Any]]:
         """
         List all sessions.
