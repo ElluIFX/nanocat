@@ -49,12 +49,19 @@ class CronTool(Tool):
                     "enum": ["add", "list", "remove"],
                     "description": "Action to perform",
                 },
-                "message": {"type": "string", "description": "Reminder message (for add)"},
+                "task_description": {
+                    "type": "string",
+                    "description": (
+                        "Only for action=add: the description of what to do when the job is executed. "
+                        "Include a clear objective and all necessary context—"
+                        "the executor cannot access prior history, so provide enough information for it to understand the intended goal and any important background."
+                    ),
+                },
                 "notify": {
                     "type": "string",
                     "enum": ["never", "always", "smart"],
                     "default": "smart",
-                    "description": "Whether to notify the user, 'never' means silent execution, 'always' means always notify when the job is executed (usually for one-shot task), 'smart' means assitant model will decide this for you.",
+                    "description": "Whether to notify the user, 'never' means silent execution, 'always' means always notify when the job is executed (usually for one-shot task), 'smart' means assitant model will decide this for you everytime.",
                 },
                 "every_seconds": {
                     "type": "integer",
@@ -80,7 +87,7 @@ class CronTool(Tool):
     async def execute(
         self,
         action: str,
-        message: str = "",
+        task_description: str = "",
         notify: str = "smart",
         every_seconds: int | None = None,
         cron_expr: str | None = None,
@@ -92,7 +99,7 @@ class CronTool(Tool):
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"
-            return self._add_job(message, notify, every_seconds, cron_expr, tz, at)
+            return self._add_job(task_description, notify, every_seconds, cron_expr, tz, at)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -101,15 +108,15 @@ class CronTool(Tool):
 
     def _add_job(
         self,
-        message: str,
+        task_description: str,
         notify: str,
         every_seconds: int | None,
         cron_expr: str | None,
         tz: str | None,
         at: str | None,
     ) -> str:
-        if not message:
-            return "Error: message is required for add"
+        if not task_description:
+            return "Error: task_description is required for add"
         if not self._channel or not self._chat_id:
             return "Error: no session context (channel/chat_id)"
         if tz and not cron_expr:
@@ -142,9 +149,9 @@ class CronTool(Tool):
             return "Error: either every_seconds, cron_expr, or at is required"
 
         job = self._cron.add_job(
-            name=message[:30],
+            name=task_description[:30],
             schedule=schedule,
-            message=message,
+            message=task_description,
             channel=self._channel,
             to=self._chat_id,
             delete_after_run=delete_after,
