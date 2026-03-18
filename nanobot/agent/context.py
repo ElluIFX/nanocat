@@ -2,7 +2,6 @@
 
 import base64
 import mimetypes
-import platform
 from pathlib import Path
 from typing import Any
 
@@ -56,21 +55,6 @@ Skills with available="false" need dependencies installed first - you can try in
     def _get_identity(self) -> str:
         """Get the core identity section."""
         workspace_path = str(self.workspace.expanduser().resolve())
-        system = platform.system()
-        runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-
-        platform_policy = ""
-        if system == "Windows":
-            platform_policy = """## Platform Policy (Windows)
-- You are running on Windows. Do not assume GNU tools like `grep`, `sed`, or `awk` exist.
-- Prefer Windows-native commands or file tools when they are more reliable.
-- If terminal output is garbled, retry with UTF-8 output enabled.
-"""
-        else:
-            platform_policy = """## Platform Policy (POSIX)
-- You are running on a POSIX system. Prefer UTF-8 and standard shell tools.
-- Use file tools when they are simpler or more reliable than shell commands.
-"""
 
         memory_guidelines = self._get_memory_guidelines(workspace_path)
 
@@ -78,15 +62,10 @@ Skills with available="false" need dependencies installed first - you can try in
 
 You are nanobot, a helpful AI assistant.
 
-## Runtime
-{runtime}
-
 ## Workspace
 Your workspace is at: {workspace_path}
 - Long-term memory: {workspace_path}/MEMORY.md (always injected into context)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
-
-{platform_policy}
 
 {memory_guidelines}
 
