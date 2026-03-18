@@ -38,6 +38,9 @@ class BaseChannel(ABC):
         self._startup_message: str = ""
         self._startup_notify: list[str] = []
         self._transcription_provider: Any = None
+        self._chat_auth_required: bool = False
+        self._chat_authorized_ids: list[str] = []
+        self._chat_auth_denied_tip: str = ""
 
     @property
     def _running(self) -> bool:
@@ -90,6 +93,12 @@ class BaseChannel(ABC):
         """
         pass
 
+    def is_chat_authorized(self, chat_id: str) -> bool:
+        """Return False when chat_auth is enabled and chat_id is not in the allowlist."""
+        if not self._chat_auth_required:
+            return True
+        return str(chat_id) in self._chat_authorized_ids
+
     def is_allowed(self, sender_id: str) -> bool:
         """Check if *sender_id* is permitted.  Empty list → deny all; ``"*"`` → allow all."""
         allow_list = getattr(self.config, "allow_from", [])
@@ -129,6 +138,33 @@ class BaseChannel(ABC):
                 sender_id,
                 self.name,
             )
+            return
+
+        if not self.is_chat_authorized(chat_id):
+            logger.warning(
+                "Chat auth denied: chat_id={} sender_id={} on channel={}",
+                chat_id,
+                sender_id,
+                self.name,
+            )
+            tip = self._chat_auth_denied_tip.format(
+                channel=self.name,
+                chat_id=chat_id,
+                sender_id=sender_id,
+            )
+            try:
+                await self.send(
+                    OutboundMessage(
+                        channel=self.name,
+                        chat_id=str(chat_id),
+                        content=tip,
+                        metadata=metadata or {},
+                    )
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send chat_auth_denied reply to {}/{}: {}", self.name, chat_id, e
+                )
             return
 
         msg = InboundMessage(

@@ -63,6 +63,10 @@ class ChannelManager:
                 channel._startup_message = self.config.channels.on_start_message
                 channel._startup_notify = self.config.channels.on_start_notify.get(name, [])
                 channel._help_text = self.config.tips.help
+                chat_auth = self.config.channels.chat_auth
+                channel._chat_auth_required = chat_auth.auth_required
+                channel._chat_authorized_ids = chat_auth.authorized_chat_ids.get(name, [])
+                channel._chat_auth_denied_tip = self.config.tips.chat_auth_denied
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)
             except Exception as e:
