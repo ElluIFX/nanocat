@@ -143,14 +143,14 @@ class ReadFileTool(_FsTool):
 
 
 # ---------------------------------------------------------------------------
-# read_image_file
+# load_image
 # ---------------------------------------------------------------------------
 
 
 class LoadImageTool(_FsTool):
     """Load image content from file and include EXIF metadata."""
 
-    _MAX_BYTES = 8 * 1024 * 1024
+    _MAX_BYTES = 12 * 1024 * 1024  # 12MB
 
     @property
     def name(self) -> str:
@@ -184,7 +184,7 @@ class LoadImageTool(_FsTool):
             if len(raw) > self._MAX_BYTES:
                 return (
                     f"Error: File too large: {path} ({len(raw)} bytes). "
-                    f"Maximum supported size is {self._MAX_BYTES} bytes."
+                    f"Maximum supported size is {self._MAX_BYTES} bytes. Compress the image to reduce its size."
                 )
 
             mime = detect_image_mime(raw) or mimetypes.guess_type(str(fp))[0]
@@ -197,7 +197,7 @@ class LoadImageTool(_FsTool):
 
             return [
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                {"type": "text", "text": f"MIME: {mime}\nEXIF:\n{meta_text}"},
+                {"type": "text", "text": f"Image EXIF:\n{meta_text}"},
             ]
         except PermissionError as e:
             return f"Error: {e}"

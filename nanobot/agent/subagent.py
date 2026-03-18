@@ -55,8 +55,8 @@ class SubagentManager:
     def _bridge_image_tool_result(
         tool_name: str, result: Any
     ) -> tuple[str, list[dict[str, Any]]] | None:
-        """Convert read_image_file output to a tool text + synthetic user image message."""
-        if tool_name != "read_image_file" or not isinstance(result, list):
+        """Convert load_image output to a tool text + synthetic user image message."""
+        if tool_name != "load_image" or not isinstance(result, list):
             return None
         image_blocks = [
             block
@@ -78,7 +78,7 @@ class SubagentManager:
         user_blocks = [
             {
                 "type": "text",
-                "text": "[Tool Return Value] Auto-forwarded image payload from read_image_file.",
+                "text": "[Tool Return Value] Auto-forwarded image payload from load_image.",
             },
             *image_blocks,
         ]
@@ -172,7 +172,7 @@ class SubagentManager:
                 messages.append(
                     build_assistant_message(
                         response.content or "",
-                        tool_calls=tool_call_dicts, 
+                        tool_calls=tool_call_dicts,
                         reasoning_content=response.reasoning_content,
                         thinking_blocks=response.thinking_blocks,
                     )

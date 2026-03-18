@@ -310,8 +310,8 @@ class AgentLoop:
     def _bridge_image_tool_result(
         tool_name: str, result: Any
     ) -> tuple[str, list[dict[str, Any]]] | None:
-        """Convert read_image_file output to a tool text + synthetic user image message."""
-        if tool_name != "read_image_file" or not isinstance(result, list):
+        """Convert load_image output to a tool text + synthetic user image message."""
+        if tool_name != "load_image" or not isinstance(result, list):
             return None
         image_blocks = [
             block
@@ -333,7 +333,7 @@ class AgentLoop:
         user_blocks = [
             {
                 "type": "text",
-                "text": "[Tool Return] Auto-forwarded image payload from read_image_file.",
+                "text": "[Tool Return] Auto-forwarded image payload from load_image.",
             },
             *image_blocks,
         ]
