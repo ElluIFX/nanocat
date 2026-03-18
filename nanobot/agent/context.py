@@ -1,6 +1,7 @@
 """Context builder for assembling agent prompts."""
 
 import base64
+import json
 import mimetypes
 from pathlib import Path
 from typing import Any
@@ -169,6 +170,7 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         history: list[dict[str, Any]],
         current_message: str,
         consolidated_memory: str | None = None,
+        injected_memories: list[dict] | None = None,
         skill_names: list[str] | None = None,
         media: list[str] | None = None,
         channel: str | None = None,
@@ -188,12 +190,13 @@ Keep MEMORY.md concise — it is loaded on every turn."""
 
         consolidated_msg = self._build_consolidated_memory_message(consolidated_memory)
 
-        messages = [
-            {
-                "role": "system",
-                "content": self.build_system_prompt(skill_names),
-            },
-        ]
+        system_content = self.build_system_prompt(skill_names)
+        if injected_memories:
+            system_content += "\n\n## NowledgeMem auto-search\n" + json.dumps(
+                injected_memories, ensure_ascii=False, indent=2
+            )
+
+        messages = [{"role": "system", "content": system_content}]
         if consolidated_msg:
             messages.append(consolidated_msg)
         messages.extend(history)

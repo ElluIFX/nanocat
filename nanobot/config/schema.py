@@ -194,6 +194,15 @@ class TranscriptionConfig(Base):
     whisper: WhisperTranscriptionConfig = Field(default_factory=WhisperTranscriptionConfig)
 
 
+class NowledgeAutoInjectConfig(Base):
+    """Auto-inject Nowledge search results into the system prompt on every user turn."""
+
+    enabled: bool = False
+    score_threshold: float = 0.5  # minimum similarity_score to include a result
+    max_length: int = 128  # truncate memory content beyond this char count
+    max_num: int = 5  # maximum number of memories to inject
+
+
 class NowledgeConfig(Base):
     """Nowledge Mem connection configuration."""
 
@@ -202,6 +211,7 @@ class NowledgeConfig(Base):
     api_url: str = "http://127.0.0.1:14242"
     api_key: str | None = None
     thread_source: str = "nanobot"
+    auto_inject: NowledgeAutoInjectConfig = Field(default_factory=NowledgeAutoInjectConfig)
 
 
 class MemoryConfig(Base):

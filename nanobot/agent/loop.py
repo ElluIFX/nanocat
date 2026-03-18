@@ -105,6 +105,7 @@ class AgentLoop:
 
         _mem = memory_config or MemoryConfig()
         _nowledge_cfg = _mem.nowledge
+        self._nowledge_auto_inject = _nowledge_cfg.auto_inject
 
         self.context = ContextBuilder(
             workspace,
@@ -343,6 +344,33 @@ class AgentLoop:
             len(user_blocks),
         )
         return tool_text, user_blocks
+
+    async def _auto_inject_memories(self, query: str) -> list[dict] | None:
+        """Search Nowledge and return cleaned results for system prompt injection."""
+        cfg = self._nowledge_auto_inject
+        if not cfg.enabled or not self.nowledge_client:
+            return None
+        results = await self.nowledge_client.search_memories(query, limit=cfg.max_num)
+        cleaned = []
+        for r in results:
+            score = r.get("similarity_score", 0)
+            if score < cfg.score_threshold:
+                continue
+            mem = r.get("memory") or {}
+            content = mem.get("content") or ""
+            if len(content) > cfg.max_length:
+                content = content[: cfg.max_length] + "[TRUNCATED, SEARCH IF USEFUL]"
+            cleaned.append(
+                {
+                    "id": mem.get("id"),
+                    "title": mem.get("title"),
+                    "content": content,
+                    "similarity_score": score,
+                }
+            )
+        if cleaned:
+            logger.info(f"Auto-injected {len(cleaned)} memories to system prompt")
+        return cleaned or None
 
     async def _run_agent_loop(
         self,
@@ -755,9 +783,11 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
+        injected_memories = await self._auto_inject_memories(msg.content) if not transient else None
         initial_messages = self.context.build_messages(
             history=history,
             consolidated_memory=session.consolidated_memory,
+            injected_memories=injected_memories,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
