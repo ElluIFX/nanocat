@@ -163,32 +163,49 @@ class QQChannel(BaseChannel):
             return 2
         if ext in (".silk", ".amr", ".wav", ".mp3", ".ogg", ".m4a"):
             return 3
-        return None
+        return 4
+
+    _UPLOAD_TIMEOUT = 120  # seconds; base64 upload of large files needs more than the default 5s
 
     async def _upload_media(self, file_path: str, chat_type: str, chat_id: str) -> dict | None:
         """Upload a local file to QQ media API via base64.
 
         botpy SDK only exposes URL-based upload; the QQ API itself accepts file_data (base64),
         so we bypass the SDK wrapper and call the underlying HTTP session directly.
+        BotHttp.timeout is temporarily raised for the upload because the default 5 s is far too
+        short for large file payloads; async is cooperative so the swap is race-free.
         """
         from botpy.http import Route
 
         ft = self._qq_file_type(file_path)
-        if ft is None:
-            logger.warning("QQ: unsupported media type for upload: {}", file_path)
-            return None
 
         try:
             raw = Path(file_path).read_bytes()
+            size_kb = len(raw) / 1024
             b64 = base64.b64encode(raw).decode()
-            payload = {"file_type": ft, "file_data": b64, "srv_send_msg": False}
+            payload = {
+                "file_type": ft,
+                "file_data": b64,
+                "file_name": Path(file_path).name,
+                "srv_send_msg": False,
+            }
 
             if chat_type == "group":
                 route = Route("POST", "/v2/groups/{group_openid}/files", group_openid=chat_id)
             else:
                 route = Route("POST", "/v2/users/{openid}/files", openid=chat_id)
 
-            return await self._client.api._http.request(route, json=payload)
+            logger.debug(
+                "QQ: uploading {} ({:.1f} KB, file_type={})", Path(file_path).name, size_kb, ft
+            )
+            http = self._client.api._http
+            saved_timeout = http.timeout
+            http.timeout = self._UPLOAD_TIMEOUT
+            try:
+                result = await http.request(route, json=payload)
+            finally:
+                http.timeout = saved_timeout
+            return result
         except Exception as e:
             logger.warning("QQ media upload failed ({}): {}", Path(file_path).name, e)
             return None
