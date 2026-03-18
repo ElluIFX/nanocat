@@ -1,6 +1,7 @@
 """QQ channel implementation using botpy SDK."""
 
 import asyncio
+import base64
 import hashlib
 from collections import deque
 from collections.abc import Callable, Coroutine
@@ -152,6 +153,46 @@ class QQChannel(BaseChannel):
                 pass
         logger.info("QQ bot stopped")
 
+    @staticmethod
+    def _qq_file_type(path: str) -> int | None:
+        """Map file extension to QQ file_type (1=image, 2=video, 3=audio, None=unsupported)."""
+        ext = Path(path).suffix.lower()
+        if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            return 1
+        if ext == ".mp4":
+            return 2
+        if ext in (".silk", ".amr", ".wav", ".mp3", ".ogg", ".m4a"):
+            return 3
+        return None
+
+    async def _upload_media(self, file_path: str, chat_type: str, chat_id: str) -> dict | None:
+        """Upload a local file to QQ media API via base64.
+
+        botpy SDK only exposes URL-based upload; the QQ API itself accepts file_data (base64),
+        so we bypass the SDK wrapper and call the underlying HTTP session directly.
+        """
+        from botpy.http import Route
+
+        ft = self._qq_file_type(file_path)
+        if ft is None:
+            logger.warning("QQ: unsupported media type for upload: {}", file_path)
+            return None
+
+        try:
+            raw = Path(file_path).read_bytes()
+            b64 = base64.b64encode(raw).decode()
+            payload = {"file_type": ft, "file_data": b64, "srv_send_msg": False}
+
+            if chat_type == "group":
+                route = Route("POST", "/v2/groups/{group_openid}/files", group_openid=chat_id)
+            else:
+                route = Route("POST", "/v2/users/{openid}/files", openid=chat_id)
+
+            return await self._client.api._http.request(route, json=payload)
+        except Exception as e:
+            logger.warning("QQ media upload failed ({}): {}", Path(file_path).name, e)
+            return None
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through QQ."""
         if not self._client:
@@ -160,8 +201,40 @@ class QQChannel(BaseChannel):
 
         try:
             msg_id = msg.metadata.get("message_id")
-            self._msg_seq += 1
             use_markdown = self.config.msg_format == "markdown"
+            chat_type = self._chat_type_cache.get(msg.chat_id, "c2c")
+
+            # Send media files before text
+            for media_path in msg.media or []:
+                try:
+                    media = await self._upload_media(media_path, chat_type, msg.chat_id)
+                    if not media:
+                        continue
+                    self._msg_seq += 1
+                    m_payload: dict[str, Any] = {
+                        "msg_type": 7,
+                        "media": media,
+                        "msg_id": msg_id,
+                        "msg_seq": self._msg_seq,
+                    }
+                    if chat_type == "group":
+                        await _with_retry(
+                            lambda p=m_payload: self._client.api.post_group_message(
+                                group_openid=msg.chat_id, **p
+                            ),
+                            label="QQ post_group_message (media)",
+                        )
+                    else:
+                        await _with_retry(
+                            lambda p=m_payload: self._client.api.post_c2c_message(
+                                openid=msg.chat_id, **p
+                            ),
+                            label="QQ post_c2c_message (media)",
+                        )
+                except Exception as e:
+                    logger.warning("QQ: failed to send media {}: {}", Path(media_path).name, e)
+
+            self._msg_seq += 1
             payload: dict[str, Any] = {
                 "msg_type": 2 if use_markdown else 0,
                 "msg_id": msg_id,
@@ -172,7 +245,6 @@ class QQChannel(BaseChannel):
             else:
                 payload["content"] = msg.content
 
-            chat_type = self._chat_type_cache.get(msg.chat_id, "c2c")
             if chat_type == "group":
                 await _with_retry(
                     lambda: self._client.api.post_group_message(
