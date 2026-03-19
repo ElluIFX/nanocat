@@ -368,13 +368,13 @@ def _onboard_plugins(config_path: Path) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def _make_provider(config: Config):
+def _make_provider(config: Config, override_model: str | None = None):
     """Create the appropriate LLM provider from config."""
     from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
     from nanobot.providers.base import GenerationSettings
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 
-    model = config.agents.defaults.model
+    model = override_model or config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 

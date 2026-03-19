@@ -263,7 +263,6 @@ class MemoryConsolidator:
         context_window_tokens: int,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
-        consolidation_model: str | None = None,
         threshold: float = 0.5,
         no_consolidate_turns: int = 3,
         nowledge_manager: NowledgeMemoryManager | None = None,
@@ -271,7 +270,6 @@ class MemoryConsolidator:
         self.store = MemoryStore(workspace)
         self.provider = provider
         self.model = model
-        self.consolidation_model = consolidation_model
         self.sessions = sessions
         self.context_window_tokens = context_window_tokens
         self.threshold = threshold
@@ -285,9 +283,6 @@ class MemoryConsolidator:
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
-
-    def _effective_model(self) -> str:
-        return self.consolidation_model or self.model
 
     @staticmethod
     def _channel_and_chat(session: Session) -> tuple[str | None, str | None]:
@@ -373,7 +368,7 @@ class MemoryConsolidator:
                 },
                 {"role": "user", "content": prompt},
             ],
-            model=self._effective_model(),
+            model=self.model,
             max_tokens=max(512, min(4096, target_chars // 2)),
             temperature=0.0,
         )

@@ -267,7 +267,7 @@ class TipsConfig(Base):
         "/model <choice_number>"
     )
     # /model (success) — {model_name}
-    model_updated: str = "Model updated: {model_name}\nRestarting to apply changes..."
+    model_updated: str = "Model updated: {model_name}"
     # /model (error) — {error}
     model_error: str = "Error updating model: {error}"
     # /model (choice invalid) — {choice_number}

@@ -163,12 +163,11 @@ class AgentLoop:
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
-            model=self.model,
+            model=self.assistant_model,
             sessions=self.sessions,
             context_window_tokens=context_window_tokens,
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
-            consolidation_model=self.assistant_model,
             threshold=_mem.consolidation_threshold,
             no_consolidate_turns=_mem.no_consolidate_history_num,
             nowledge_manager=self.nowledge_memory_manager,
@@ -583,7 +582,7 @@ class AgentLoop:
 
     async def _handle_model(self, msg: InboundMessage) -> OutboundMessage:
         """Handle /model command — query or update the active model."""
-        from nanobot.config.loader import get_config_path, load_config
+        from nanobot.config.loader import load_config
 
         raw_args = msg.content.strip()[len("/model") :].strip()
         parts = raw_args.split() if raw_args else []
@@ -597,12 +596,16 @@ class AgentLoop:
                     for i, model in enumerate(config.agents.defaults.model_choice)
                 ]
             )
+            provider_name = self.provider.name
+            model_name = self.model
+            if model_name.startswith(provider_name + "/"):
+                model_name = model_name[len(provider_name) + 1 :]
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self.tips.model_info.format(
-                    model_name=config.agents.defaults.model,
-                    provider_name=config.agents.defaults.provider,
+                    model_name=model_name,
+                    provider_name=provider_name,
                     model_choice=choices,
                 ),
             )
@@ -617,13 +620,19 @@ class AgentLoop:
             full_model = config.agents.defaults.model_choice[choice_number - 1]
         else:
             full_model = f"{parts[0]}/{parts[1]}"
-        config_path = get_config_path()
         try:
-            with open(config_path, encoding="utf-8") as f:
-                data = json.load(f)
-            data.setdefault("agents", {}).setdefault("defaults", {})["model"] = full_model
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            from nanobot.cli.commands import _make_provider
+
+            new_provider = _make_provider(config, override_model=full_model)
+            if self.assistant_model == self.model:
+                self.assistant_model = full_model
+            self.model = full_model
+            self.provider = new_provider
+            self.memory_consolidator.model = self.assistant_model
+            self.memory_consolidator.provider = new_provider
+            if self.nowledge_memory_manager is not None:
+                self.nowledge_memory_manager.model = self.assistant_model
+                self.nowledge_memory_manager.provider = new_provider
 
             await self.bus.publish_outbound(
                 OutboundMessage(
@@ -632,7 +641,6 @@ class AgentLoop:
                     content=self.tips.model_updated.format(model_name=full_model),
                 )
             )
-            await self._handle_restart(msg)
         except Exception as e:
             logger.error("Failed to update model config: {}", e)
             return OutboundMessage(
