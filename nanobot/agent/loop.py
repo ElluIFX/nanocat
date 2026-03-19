@@ -35,6 +35,7 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.todo import TodoTool
 from nanobot.agent.tools.wait import WaitTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -203,6 +204,7 @@ class AgentLoop:
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(WaitTool(send_callback=self.bus.publish_outbound))
+        self.tools.register(TodoTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         self.tools.register(DelegateTool(manager=self.subagents))
         if self.cron_service:
@@ -245,12 +247,22 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        session: Session | None = None,
+    ) -> None:
         """Update context for all tools that need routing info."""
         for name in ("message", "wait", "spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+        if session is not None:
+            if todo_tool := self.tools.get("todo"):
+                if hasattr(todo_tool, "set_context"):
+                    todo_tool.set_context(channel, chat_id, session)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -818,7 +830,7 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             if not transient:
                 await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), session)
             history = session.get_history(max_messages=0)
             # Subagent results should be assistant role, other system messages use user role
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
@@ -894,7 +906,7 @@ class AgentLoop:
         if not transient:
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), session)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
