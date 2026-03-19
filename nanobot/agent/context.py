@@ -92,7 +92,7 @@ Use it proactively — it is your primary knowledge store.
 **At Session FIRST Turn (not every turn) (`read_working_memory`):**
 - Call `read_working_memory` for today's briefing
 - Understand user's active focus areas, priorities, and unresolved flags
-- Reference this context naturally when it connects to the current task
+- Do not recite working memory to the user; only reference this context naturally in subsequent tasks
 
 **When to Search (`memory_search`):**
 - Current topic connects to prior work
