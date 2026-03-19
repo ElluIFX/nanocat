@@ -469,6 +469,7 @@ class AgentLoop:
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
+        asyncio.create_task(self._dispatch_restart_notify())
 
         while self._running:
             try:
@@ -530,6 +531,17 @@ class AgentLoop:
             )
         )
 
+        try:
+            from nanobot.config.paths import get_restart_notify_path
+
+            notify_path = get_restart_notify_path()
+            notify_path.write_text(
+                json.dumps({"channel": msg.channel, "chat_id": msg.chat_id}),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("Failed to persist restart notify: {}", e)
+
         async def _do_restart():
             await asyncio.sleep(1)
             # Use -m nanobot instead of sys.argv[0] for Windows compatibility
@@ -537,6 +549,37 @@ class AgentLoop:
             os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
 
         asyncio.create_task(_do_restart())
+
+    async def _dispatch_restart_notify(self) -> None:
+        """Send a restart-done notification if one was persisted before the last restart."""
+        from nanobot.config.paths import get_restart_notify_path
+
+        notify_path = get_restart_notify_path()
+        if not notify_path.exists():
+            return
+
+        try:
+            data = json.loads(notify_path.read_text(encoding="utf-8"))
+            channel = data.get("channel")
+            chat_id = data.get("chat_id")
+        except Exception as e:
+            logger.warning("Failed to read restart notify file: {}", e)
+            notify_path.unlink(missing_ok=True)
+            return
+
+        # Remove before sending — avoids re-delivery if the send itself triggers another restart
+        notify_path.unlink(missing_ok=True)
+
+        if not channel or not chat_id:
+            return
+
+        # Wait for channels to initialize and connect before delivering
+        await asyncio.sleep(5)
+
+        await self.bus.publish_outbound(
+            OutboundMessage(channel=channel, chat_id=chat_id, content=self.tips.restart_done)
+        )
+        logger.info("Sent restart-done notification to {}:{}", channel, chat_id)
 
     async def _handle_model(self, msg: InboundMessage) -> OutboundMessage:
         """Handle /model command — query or update the active model."""

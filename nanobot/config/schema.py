@@ -234,6 +234,7 @@ class TipsConfig(Base):
 
     # /restart
     restart: str = "Restarting NanoBot, will be back soon..."
+    restart_done: str = "Bot restarted."
     # /new
     new_session: str = "New session started."
     # /stop — {count}

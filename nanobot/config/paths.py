@@ -50,6 +50,11 @@ def get_bridge_install_dir() -> Path:
     return Path.home() / ".nanobot" / "bridge"
 
 
+def get_restart_notify_path() -> Path:
+    """Return the path to the pending post-restart notification file."""
+    return get_runtime_subdir("restart") / "pending_notify.json"
+
+
 def get_legacy_sessions_dir() -> Path:
     """Return the legacy global session directory used for migration fallback."""
     return Path.home() / ".nanobot" / "sessions"
