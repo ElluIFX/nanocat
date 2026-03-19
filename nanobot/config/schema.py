@@ -39,10 +39,11 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.nanobot/workspace"
-    model: str = "anthropic/claude-opus-4-5"
+    model: str = "openai/gpt-4o"
     assistant_model: str | None = (
         None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
     )
+    model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     provider: str = (
         "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
     )
@@ -248,27 +249,29 @@ class TipsConfig(Base):
     help: str = (
         "🐈 nanobot commands:\n"
         "/new — Start a new conversation\n"
-        "/consolidate — Manually consolidate old session turns\n"
         "/stop — Stop the current task\n"
         "/restart — Restart the bot\n"
         "/model — View or switch the active model\n"
-        "/ctx — Show current context usage\n"
+        "/ctx — Show current context info\n"
         "/sid — Show channel/chat identity\n"
-        "/help — Show available commands"
+        "/help — Show available commands\n"
+        "/consolidate — Manually consolidate old session turns\n"
+        "/session — Save, load, or list sessions"
     )
     # /model (no args) — {model_name}, {provider_name}
     model_info: str = (
         "🐈 Current model: {model_name}\n"
         "Provider: {provider_name}\n\n"
-        "Usage: /model <provider> <model_name>\n"
-        "Example: /model openai gpt-4o"
+        "Available models:\n{model_choice}\n"
+        "Usage:\n/model <provider> <model_name>\n"
+        "/model <choice_number>"
     )
-    # /model (missing second arg)
-    model_usage: str = "Usage:\n/model <provider> <model_name>\nExample: /model openai gpt-4o"
     # /model (success) — {model_name}
     model_updated: str = "Model updated: {model_name}\nRestarting to apply changes..."
     # /model (error) — {error}
     model_error: str = "Error updating model: {error}"
+    # /model (choice invalid) — {choice_number}
+    model_choice_invalid: str = "Invalid choice number: {choice_number}"
     # command auth denied — {command}, {channel}, {chat_id}
     command_auth_denied: str = "Not authorized: {command} (channel={channel}, chat_id={chat_id})"
     # /session — usage shown when subcommand is unknown or missing
@@ -278,9 +281,6 @@ class TipsConfig(Base):
         "  /session load <name>  — Load a saved session\n"
         "  /session list         — List saved sessions"
     )
-    # /session save / load — missing name arg
-    session_save_usage: str = "Usage: /session save <name>"
-    session_load_usage: str = "Usage: /session load <name>"
     # /session save — success — {name}
     session_saved: str = "Session saved as '{name}'."
     # /session load — success — {name}

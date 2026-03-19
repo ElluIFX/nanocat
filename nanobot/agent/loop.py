@@ -588,25 +588,35 @@ class AgentLoop:
         raw_args = msg.content.strip()[len("/model") :].strip()
         parts = raw_args.split() if raw_args else []
 
-        if not parts:
-            config = load_config()
+        config = load_config()
+
+        if not parts or (len(parts) < 2 and not parts[0].isdigit()):
+            choices = "\n".join(
+                [
+                    f" {i + 1}. {model}"
+                    for i, model in enumerate(config.agents.defaults.model_choice)
+                ]
+            )
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self.tips.model_info.format(
                     model_name=config.agents.defaults.model,
                     provider_name=config.agents.defaults.provider,
+                    model_choice=choices,
                 ),
             )
-
-        if len(parts) < 2:
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=self.tips.model_usage,
-            )
-
-        full_model = f"{parts[0]}/{parts[1]}"
+        if len(parts) == 1:
+            choice_number = int(parts[0])
+            if choice_number < 1 or choice_number > len(config.agents.defaults.model_choice):
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_choice_invalid.format(choice_number=choice_number),
+                )
+            full_model = config.agents.defaults.model_choice[choice_number - 1]
+        else:
+            full_model = f"{parts[0]}/{parts[1]}"
         config_path = get_config_path()
         try:
             with open(config_path, encoding="utf-8") as f:
@@ -662,9 +672,7 @@ class AgentLoop:
                 return _reply(self.tips.session_list_empty)
             return _reply(self.tips.session_list.format(items="\n".join(f"• {n}" for n in names)))
 
-        if sub == "save":
-            if not name:
-                return _reply(self.tips.session_save_usage)
+        if sub == "save" and name:
             if reason := self._validate_session_name(name):
                 return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
             # Flush in-memory state first so the snapshot is up-to-date.
@@ -672,9 +680,7 @@ class AgentLoop:
             self.sessions.save_named(session, name)
             return _reply(self.tips.session_saved.format(name=name))
 
-        if sub == "load":
-            if not name:
-                return _reply(self.tips.session_load_usage)
+        if sub == "load" and name:
             if reason := self._validate_session_name(name):
                 return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
             loaded = self.sessions.load_named(session.key, name)
