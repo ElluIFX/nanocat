@@ -83,4 +83,4 @@ class WaitTool(Tool):
                 pass  # Don't let notification failure abort the wait
 
         await asyncio.sleep(wait_s)
-        return f"Waited {wait_s}s, now is {current_time_str()}"
+        return f"Waited {wait_s}s, now is {current_time_str(timezone=False)}"

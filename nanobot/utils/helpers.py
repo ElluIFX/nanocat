@@ -34,11 +34,13 @@ def timestamp() -> str:
     return datetime.now().isoformat()
 
 
-def current_time_str() -> str:
+def current_time_str(timezone: bool = True) -> str:
     """Human-readable current time with weekday and timezone, e.g. '2026-03-15 22:30 (Saturday) (CST)'."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-    tz = time.strftime("%Z") or "UTC"
-    return f"{now} ({tz})"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
+    if timezone:
+        tz = time.strftime("%Z") or "UTC"
+        return f"{now} ({tz})"
+    return now
 
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
