@@ -66,7 +66,7 @@ class MemorySearchTool(Tool):
             "Search long-term memories in Nowledge Mem using a semantic query. "
             "Use this to recall past decisions, facts, preferences, or insights. "
             "Search before answering questions about past work or context."
-            "The result will be return as json string."
+            "The json result will be cleaned before returned."
         )
 
     @property
@@ -96,6 +96,40 @@ class MemorySearchTool(Tool):
         return json.dumps([_clean_search_result(r) for r in results], ensure_ascii=False)
 
 
+class MemoryGetTool(Tool):
+    """Get a memory by ID from Nowledge Mem."""
+
+    def __init__(self, client: NowledgeClient):
+        self._client = client
+
+    @property
+    def name(self) -> str:
+        return "memory_get"
+
+    @property
+    def description(self) -> str:
+        return "Get complete content of a memory by ID from Nowledge Mem."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "memory_id": {
+                    "type": "string",
+                    "description": "The ID of the memory to get.",
+                },
+            },
+            "required": ["memory_id"],
+        }
+
+    async def execute(self, memory_id: str, **_: Any) -> str:
+        result = await self._client.get_memory(memory_id)
+        if not result:
+            return "Failed to get memory."
+        return json.dumps(result, ensure_ascii=False)
+
+
 class MemoryAddTool(Tool):
     """Save a new memory to Nowledge Mem."""
 
@@ -109,7 +143,7 @@ class MemoryAddTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Save a new long-term memory to Nowledge Mem. "
+            "Save a new memory to Nowledge Mem. "
             "Use for important decisions, facts, preferences, or insights worth remembering across sessions. "
             "Before adding, consider searching first to avoid creating near-duplicates."
         )

@@ -530,6 +530,18 @@ class NowledgeClient:
             logger.error(traceback.format_exc())
             return []
 
+    async def get_memory(self, memory_id: str) -> dict:
+        """Get a memory by ID. Returns the memory dict or empty dict on failure."""
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{self._api_url}/memories/{memory_id}", headers=self._headers(), timeout=10.0
+                )
+                r.raise_for_status()
+                return r.json() or {}
+        except Exception:
+            logger.warning("Nowledge get_memory failed for id={}", memory_id)
+
     async def create_memory(
         self,
         content: str,
