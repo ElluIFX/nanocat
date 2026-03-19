@@ -131,14 +131,17 @@ class ReadFileTool(_FsTool):
                 end = start + len(trimmed)
                 content = "\n".join(trimmed)
 
-            return json.dumps({
-                "path": str(fp),
-                "total_lines": total,
-                "showing": [offset, end],
-                "truncated": end < total,
-                "next_offset": end + 1 if end < total else None,
-                "content": content,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "path": str(fp),
+                    "total_lines": total,
+                    "showing": [offset, end],
+                    "truncated": end < total,
+                    "next_offset": end + 1 if end < total else None,
+                    "content": content,
+                },
+                ensure_ascii=False,
+            )
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -161,7 +164,10 @@ class LoadImageTool(_FsTool):
 
     @property
     def description(self) -> str:
-        return "Load content of an image file into your context, including its EXIF metadata. "
+        return (
+            "Load content of an image file into your context, including its EXIF metadata. "
+            "Use compress=True to downscale and compress oversized images before loading."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -169,11 +175,20 @@ class LoadImageTool(_FsTool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "The image file path to load"},
+                "compress": {
+                    "type": "boolean",
+                    "description": (
+                        "Downscale the image to JPEG <= 3840x3840. Only for oversized images."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["path"],
         }
 
-    async def execute(self, path: str, **kwargs: Any) -> str | list[dict[str, Any]]:
+    async def execute(
+        self, path: str, compress: bool = False, **kwargs: Any
+    ) -> str | list[dict[str, Any]]:
         try:
             fp = self._resolve(path)
             if not fp.exists():
@@ -184,13 +199,19 @@ class LoadImageTool(_FsTool):
             raw = fp.read_bytes()
             if not raw:
                 return f"Error: Empty file: {path}"
-            if len(raw) > self._MAX_BYTES:
-                return (
-                    f"Error: File too large: {path} ({len(raw)} bytes). "
-                    f"Maximum supported size is {self._MAX_BYTES} bytes. Compress the image to reduce its size."
-                )
 
-            mime = detect_image_mime(raw) or mimetypes.guess_type(str(fp))[0]
+            if compress:
+                raw, mime = self._compress_image(raw)
+            else:
+                if len(raw) > self._MAX_BYTES:
+                    size_mb = len(raw) / (1024 * 1024)
+                    return (
+                        f"Error: File too large: {path} ({size_mb:.1f} MB). "
+                        f"Maximum supported size is {self._MAX_BYTES // (1024 * 1024)} MB. "
+                        f"Use load_image(path, compress=True) to read it as compressed image."
+                    )
+                mime = detect_image_mime(raw) or mimetypes.guess_type(str(fp))[0]
+
             if not mime or not mime.startswith("image/"):
                 return f"Error: Unsupported or non-image file: {path}"
 
@@ -206,6 +227,32 @@ class LoadImageTool(_FsTool):
             return f"Error: {e}"
         except Exception as e:
             return f"Error reading image file: {e}"
+
+    @staticmethod
+    def _compress_image(raw: bytes, max_edge: int = 3840, quality: int = 95) -> tuple[bytes, str]:
+        """Downscale so longest edge <= max_edge, then JPEG-compress."""
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(raw))
+        # Convert palette / RGBA to RGB for JPEG
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGB")
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        w, h = img.size
+        longest = max(w, h)
+        if longest > max_edge:
+            scale = max_edge / longest
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue(), "image/jpeg"
 
     @staticmethod
     def _extract_exif(path: Path) -> dict[str, Any]:
@@ -320,11 +367,25 @@ class EditFileTool(_FsTool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path to edit"},
-                "old_text": {"type": "string", "description": "Text to find and replace (omit when using line_start/line_end)"},
+                "old_text": {
+                    "type": "string",
+                    "description": "Text to find and replace (omit when using line_start/line_end)",
+                },
                 "new_text": {"type": "string", "description": "Replacement text"},
-                "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)"},
-                "line_start": {"type": "integer", "minimum": 1, "description": "1-indexed start line for line-range replace"},
-                "line_end": {"type": "integer", "minimum": 1, "description": "1-indexed end line (inclusive) for line-range replace"},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace all occurrences (default false)",
+                },
+                "line_start": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed start line for line-range replace",
+                },
+                "line_end": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed end line (inclusive) for line-range replace",
+                },
             },
             "required": ["path", "new_text"],
         }
@@ -515,12 +576,14 @@ class ListDirTool(_FsTool):
             if not items and total == 0:
                 return json.dumps({"path": str(dp), "entries": [], "total": 0, "truncated": False})
 
-            return json.dumps({
-                "path": str(dp),
-                "entries": items,
-                "total": total,
-                "truncated": total > cap,
-            })
+            return json.dumps(
+                {
+                    "path": str(dp),
+                    "entries": items,
+                    "total": total,
+                    "truncated": total > cap,
+                }
+            )
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -550,8 +613,16 @@ class GrepFileTool(_FsTool):
             "properties": {
                 "path": {"type": "string", "description": "File path to search"},
                 "pattern": {"type": "string", "description": "Regex pattern to search for"},
-                "context_lines": {"type": "integer", "minimum": 0, "description": "Lines of context before/after each match (default 0)"},
-                "max_matches": {"type": "integer", "minimum": 1, "description": "Max matches to return (default 50)"},
+                "context_lines": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Lines of context before/after each match (default 0)",
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Max matches to return (default 50)",
+                },
             },
             "required": ["path", "pattern"],
         }
@@ -588,20 +659,25 @@ class GrepFileTool(_FsTool):
                 for j in range(start, end):
                     if j not in seen:
                         seen.add(j)
-                        results.append({
-                            "line": j + 1,
-                            "content": lines[j],
-                            "match": j == i,
-                        })
+                        results.append(
+                            {
+                                "line": j + 1,
+                                "content": lines[j],
+                                "match": j == i,
+                            }
+                        )
 
         truncated = match_count > max_matches
-        return json.dumps({
-            "path": str(fp),
-            "pattern": pattern,
-            "matches": match_count if not truncated else f"{max_matches}+",
-            "truncated": truncated,
-            "results": results,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "path": str(fp),
+                "pattern": pattern,
+                "matches": match_count if not truncated else f"{max_matches}+",
+                "truncated": truncated,
+                "results": results,
+            },
+            ensure_ascii=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -626,14 +702,26 @@ class InsertLinesTool(_FsTool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path"},
-                "line": {"type": "integer", "minimum": 1, "description": "1-indexed line number to insert relative to"},
-                "text": {"type": "string", "description": "Text to insert (newline appended if missing)"},
-                "after": {"type": "boolean", "description": "Insert after the line (default true); false = insert before"},
+                "line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed line number to insert relative to",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Text to insert (newline appended if missing)",
+                },
+                "after": {
+                    "type": "boolean",
+                    "description": "Insert after the line (default true); false = insert before",
+                },
             },
             "required": ["path", "line", "text"],
         }
 
-    async def execute(self, path: str, line: int, text: str, after: bool = True, **kwargs: Any) -> str:
+    async def execute(
+        self, path: str, line: int, text: str, after: bool = True, **kwargs: Any
+    ) -> str:
         try:
             fp = self._resolve(path)
             if not fp.exists():
@@ -682,8 +770,16 @@ class DeleteLinesTool(_FsTool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path"},
-                "line_start": {"type": "integer", "minimum": 1, "description": "1-indexed first line to delete"},
-                "line_end": {"type": "integer", "minimum": 1, "description": "1-indexed last line to delete (inclusive)"},
+                "line_start": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed first line to delete",
+                },
+                "line_end": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed last line to delete (inclusive)",
+                },
             },
             "required": ["path", "line_start", "line_end"],
         }
@@ -704,11 +800,13 @@ class DeleteLinesTool(_FsTool):
             if uses_crlf:
                 new_content = new_content.replace("\n", "\r\n")
             fp.write_bytes(new_content.encode("utf-8"))
-            return json.dumps({
-                "path": str(fp),
-                "deleted_lines": [line_start, line_end],
-                "lines_remaining": len(lines),
-            })
+            return json.dumps(
+                {
+                    "path": str(fp),
+                    "deleted_lines": [line_start, line_end],
+                    "lines_remaining": len(lines),
+                }
+            )
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -744,10 +842,25 @@ class FileHexTool(_FsTool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path"},
-                "mode": {"type": "string", "enum": ["read", "write"], "description": "read or write (default read)"},
-                "offset": {"type": "integer", "minimum": 0, "description": "Byte offset (default 0)"},
-                "length": {"type": "integer", "minimum": 1, "description": f"Bytes to read (default {self._DEFAULT_LENGTH}, max {self._MAX_LENGTH})"},
-                "hex_data": {"type": "string", "description": "Hex string to write (write mode only, e.g. 'deadbeef')"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["read", "write"],
+                    "description": "read or write (default read)",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Byte offset (default 0)",
+                },
+                "length": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": f"Bytes to read (default {self._DEFAULT_LENGTH}, max {self._MAX_LENGTH})",
+                },
+                "hex_data": {
+                    "type": "string",
+                    "description": "Hex string to write (write mode only, e.g. 'deadbeef')",
+                },
             },
             "required": ["path"],
         }
@@ -787,27 +900,30 @@ class FileHexTool(_FsTool):
             n = min(length or self._DEFAULT_LENGTH, self._MAX_LENGTH)
             raw = fp.read_bytes()
             file_size = len(raw)
-            chunk = raw[offset: offset + n]
+            chunk = raw[offset : offset + n]
             actual = len(chunk)
 
             lines = []
             for i in range(0, actual, 16):
-                row = chunk[i: i + 16]
+                row = chunk[i : i + 16]
                 addr = f"{offset + i:08x}"
                 hex_part = " ".join(f"{b:02x}" for b in row)
                 hex_part = f"{hex_part:<47}"
                 ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
                 lines.append(f"{addr}  {hex_part}  {ascii_part}")
 
-            return json.dumps({
-                "path": str(fp),
-                "offset": offset,
-                "length": actual,
-                "file_size": file_size,
-                "truncated": (offset + actual) < file_size,
-                "next_offset": offset + actual if (offset + actual) < file_size else None,
-                "hex_dump": "\n".join(lines),
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "path": str(fp),
+                    "offset": offset,
+                    "length": actual,
+                    "file_size": file_size,
+                    "truncated": (offset + actual) < file_size,
+                    "next_offset": offset + actual if (offset + actual) < file_size else None,
+                    "hex_dump": "\n".join(lines),
+                },
+                ensure_ascii=False,
+            )
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:

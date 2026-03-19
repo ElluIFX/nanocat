@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
 import sys
+import tempfile
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -57,8 +59,6 @@ if TYPE_CHECKING:
     )
     from nanobot.cron.service import CronService
 
-_SESSION_NAME_UNSAFE = re.compile(r'[<>:"/\\|?*\t\r\n]')
-
 
 class AgentLoop:
     """
@@ -73,6 +73,12 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 16_000
+
+    # Matches base64 data blobs in stringified MCP ImageContent blocks
+    # e.g.  data='iVBORw0KGgo...'  or  data="iVBORw0KGgo..."
+    _B64_BLOB_RE = re.compile(r"""data=['\"]([A-Za-z0-9+/=\n]{1024,})['\"]""")
+    _MIME_IN_BLOB_RE = re.compile(r"""mimeType=['\"]([^'\"]+)['\"]""")
+    _SESSION_NAME_UNSAFE = re.compile(r'[<>:"/\\|?*\t\r\n]')
 
     def __init__(
         self,
@@ -194,7 +200,15 @@ class AgentLoop:
                 workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
             )
         )
-        for cls in (WriteFileTool, EditFileTool, ListDirTool, GrepFileTool, InsertLinesTool, DeleteLinesTool, FileHexTool):
+        for cls in (
+            WriteFileTool,
+            EditFileTool,
+            ListDirTool,
+            GrepFileTool,
+            InsertLinesTool,
+            DeleteLinesTool,
+            FileHexTool,
+        ):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(
             ExecTool(
@@ -326,6 +340,57 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    def _intercept_oversized_image(self, result: Any) -> Any:
+        """Intercept base64 image blobs in tool results.
+
+        If a tool result string contains a base64 image blob (from e.g. MCP
+        ImageContent stringified), decode it, save to a temp file, and replace
+        the blob with a notice telling the model to use load_image to read it.
+        """
+        if not isinstance(result, str):
+            return result
+
+        match = self._B64_BLOB_RE.search(result)
+        if not match:
+            return result
+
+        b64_data = match.group(1)
+        try:
+            raw = base64.b64decode(b64_data)
+        except Exception:
+            return result
+
+        # Determine file extension from mimeType if present
+        mime_match = self._MIME_IN_BLOB_RE.search(result)
+        ext = ".png"
+        if mime_match:
+            mime = mime_match.group(1)
+            import mimetypes as _mt
+
+            ext = _mt.guess_extension(mime) or ext
+
+        # Save to temp file
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="nanobot_img_")
+        try:
+            os.write(fd, raw)
+        finally:
+            os.close(fd)
+
+        size_mb = len(raw) / (1024 * 1024)
+        logger.warning(
+            "Intercepted image ({:.1f} MB) from tool result, saved to {}",
+            size_mb,
+            tmp_path,
+        )
+
+        notice = (
+            f"[Image intercepted: the tool returned a raw base64 image ({size_mb:.1f} MB) "
+            f"which cannot be passed as text context. "
+            f"Saved to local file: {tmp_path}, use load_image(path) to read it.]"
+        )
+        # Replace the entire base64 blob region with the notice
+        return result[: match.start()] + notice + result[match.end() :]
+
     @staticmethod
     def _bridge_image_tool_result(
         tool_name: str, result: Any
@@ -437,8 +502,17 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.debug("Tool call: {}({})", tool_call.name, args_str)
+                    logger.debug(f"Tool call: {tool_call.name}({args_str})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = self._intercept_oversized_image(result)
+                    result_str = str(result)
+                    if len(result_str) > 512:
+                        result_str = (
+                            result_str[:256]
+                            + f"...[TRUNCATED {len(result_str) - 512} CHARS]..."
+                            + result_str[-256:]
+                        )
+                    logger.debug(f"Tool {tool_call.name} result: {result_str}")
                     if bridged := self._bridge_image_tool_result(tool_call.name, result):
                         tool_text, user_blocks = bridged
                         logger.info(
@@ -672,14 +746,13 @@ class AgentLoop:
 
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="")
 
-    @staticmethod
-    def _validate_session_name(name: str) -> str | None:
+    def _validate_session_name(self, name: str) -> str | None:
         """Return an error reason string if *name* is not a valid save name, else None."""
         if not name:
             return "name is empty"
         if len(name) > 64:
             return "name too long (max 64 characters)"
-        if _SESSION_NAME_UNSAFE.search(name):
+        if self._SESSION_NAME_UNSAFE.search(name):
             return 'contains invalid characters (/ \\ : * ? " < > | and whitespace are not allowed)'
         if name in (".", ".."):
             return "name is reserved"
