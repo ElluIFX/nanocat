@@ -52,7 +52,7 @@ def get_bridge_install_dir() -> Path:
 
 def get_restart_notify_path() -> Path:
     """Return the path to the pending post-restart notification file."""
-    return get_runtime_subdir("restart") / "pending_notify.json"
+    return get_data_dir() / ".pending_restart_notify.json"
 
 
 def get_legacy_sessions_dir() -> Path:
