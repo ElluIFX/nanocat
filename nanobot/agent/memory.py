@@ -683,11 +683,11 @@ class NowledgeClient:
 
 
 # ---------------------------------------------------------------------------
-# ThreadManager
+# NowledgeThreadManager
 # ---------------------------------------------------------------------------
 
 
-class ThreadManager:
+class NowledgeThreadManager:
     """Manages per-session Nowledge thread lifecycle (create on first turn, append thereafter)."""
 
     _MAX_MSG_CHARS = 800

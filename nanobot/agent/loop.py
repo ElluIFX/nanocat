@@ -18,7 +18,7 @@ from nanobot.agent.memory import (
     MemoryConsolidator,
     NowledgeClient,
     NowledgeMemoryManager,
-    ThreadManager,
+    NowledgeThreadManager,
 )
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.subagent import SubagentManager
@@ -141,8 +141,8 @@ class AgentLoop:
             if _nowledge_cfg.enabled
             else None
         )
-        self.thread_manager: ThreadManager | None = (
-            ThreadManager(
+        self.thread_manager: NowledgeThreadManager | None = (
+            NowledgeThreadManager(
                 client=self.nowledge_client,
                 sessions=self.sessions,
                 source=_nowledge_cfg.thread_source,
