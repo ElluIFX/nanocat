@@ -174,7 +174,7 @@ class MemoryAddTool(Tool):
                     "minimum": 0.1,
                     "maximum": 1.0,
                     "description": (
-                        "Relevance score: 0.8-1.0 critical, 0.5-0.7 useful, 0.1-0.4 background context."
+                        "Relevance score: 0.8-1.0 critical, 0.4-0.7 useful, 0.1-0.3 background context."
                     ),
                 },
             },
@@ -339,5 +339,5 @@ class ReadWorkingMemoryTool(Tool):
     async def execute(self, **_: Any) -> str:
         content = await self._client.get_working_memory()
         if not content:
-            return "Working memory is empty or Nowledge Mem is unavailable."
+            return "Working memory is empty."
         return content
