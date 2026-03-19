@@ -21,18 +21,6 @@ class CommandAuthConfig(Base):
     authorized_chat_ids: dict[str, list[str]] = Field(default_factory=dict)
 
 
-class ChatAuthConfig(Base):
-    """Allowlist gate applied at the chat level before messages reach the agent.
-
-    When auth_required is true, only chat_ids listed under the channel's key in
-    authorized_chat_ids may converse with the bot; others receive the
-    tips.chat_auth_denied message and are silently dropped.
-    """
-
-    auth_required: bool = True
-    authorized_chat_ids: dict[str, list[str]] = Field(default_factory=dict)
-
-
 class ChannelsConfig(Base):
     """Configuration for chat channels.
 
@@ -49,7 +37,6 @@ class ChannelsConfig(Base):
         default_factory=dict
     )  # {channel_name: [chat_id, ...]}
     command_auth: CommandAuthConfig = Field(default_factory=CommandAuthConfig)
-    chat_auth: ChatAuthConfig = Field(default_factory=ChatAuthConfig)
 
 
 class AgentDefaults(Base):
@@ -280,20 +267,13 @@ class TipsConfig(Base):
         "Example: /model openai gpt-4o"
     )
     # /model (missing second arg)
-    model_usage: str = "Usage: /model <provider> <model_name>\nExample: /model openai gpt-4o"
+    model_usage: str = "Usage:\n/model <provider> <model_name>\nExample: /model openai gpt-4o"
     # /model (success) — {model_name}
     model_updated: str = "Model updated: {model_name}\nRestarting to apply changes..."
     # /model (error) — {error}
     model_error: str = "Error updating model: {error}"
     # command auth denied — {command}, {channel}, {chat_id}
     command_auth_denied: str = "Not authorized: {command} (channel={channel}, chat_id={chat_id})"
-    # chat auth denied — {channel}, {chat_id}, {sender_id}
-    chat_auth_denied: str = (
-        "Access denied. This chat is not authorized to use this bot.\n"
-        "Contact an admin and provide your ID:\n"
-        "  channel={channel}\n"
-        "  chat_id={chat_id}"
-    )
     # /session — usage shown when subcommand is unknown or missing
     session_usage: str = (
         "Usage:\n"
