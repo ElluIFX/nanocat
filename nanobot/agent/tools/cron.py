@@ -37,7 +37,14 @@ class CronTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Schedule reminders and recurring tasks. Actions: add, list, remove."
+        return (
+            "Schedule reminders and recurring tasks.\n"
+            "- Reminder mode: task_description is sent as-is to the user when the job fires.\n"
+            "- Task mode: task_description is executed by the agent each time the job fires.\n"
+            "- One-time (at=): fires once then auto-deletes.\n"
+            "Scheduling: every_seconds=1200 (every 20 min), cron_expr='0 8 * * *' (daily 8am), "
+            "at='<ISO datetime>' (one-shot). Use tz with cron_expr for non-local timezones."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -47,39 +54,34 @@ class CronTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": ["add", "list", "remove"],
-                    "description": "Action to perform",
                 },
                 "task_description": {
                     "type": "string",
                     "description": (
-                        "Only for action=add: the description of what to do when the job is executed. "
-                        "Include a clear objective and all necessary context—"
-                        "the executor cannot access prior history, so provide enough information for it to understand the intended goal and any important background."
+                        "What to remind or do. Include full context — "
+                        "the executor has no access to prior conversation history."
                     ),
                 },
                 "notify": {
                     "type": "string",
                     "enum": ["never", "always", "smart"],
                     "default": "smart",
-                    "description": "Whether to notify the user, 'never' means silent execution, 'always' means always notify when the job is executed (usually for one-shot task), 'smart' means assitant model will decide this for you everytime.",
+                    "description": "never=silent, always=notify on every run, smart=another agent decides.",
                 },
-                "every_seconds": {
-                    "type": "integer",
-                    "description": "Interval in seconds (for recurring tasks)",
-                },
+                "every_seconds": {"type": "integer", "description": "Repeat interval in seconds."},
                 "cron_expr": {
                     "type": "string",
-                    "description": "Cron expression like '0 9 * * *' (for scheduled tasks)",
+                    "description": "Cron expression, e.g. '0 9 * * *'.",
                 },
                 "tz": {
                     "type": "string",
-                    "description": "IANA timezone for cron expressions (e.g. 'America/Vancouver')",
+                    "description": "IANA timezone for cron_expr, e.g. 'Asia/Shanghai'.",
                 },
                 "at": {
                     "type": "string",
-                    "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')",
+                    "description": "ISO datetime for one-time run, e.g. '2026-03-19T10:30:00'.",
                 },
-                "job_id": {"type": "string", "description": "Job ID (for remove)"},
+                "job_id": {"type": "string", "description": "Job ID (required for remove)."},
             },
             "required": ["action"],
         }
