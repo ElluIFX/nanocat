@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -98,13 +99,25 @@ class ExecTool(Tool):
 
         platform_policy = ""
         if system == "Windows":
-            platform_policy = """## Platform Policy (Windows)
-- You are running on Windows. Do not assume GNU tools like `grep`, `sed`, or `awk` exist.
-- Prefer Windows-native commands or file tools when they are more reliable.
+            platform_policy = """## Platform Policy
+- You are running on Windows.
 - If terminal output is garbled, retry with UTF-8 output enabled.
 """
+            # tools like git may bring GNU tools to windows, that will be really good for LLM
+            if not all([shutil.which(x) for x in ["grep", "sed", "awk"]]):
+                platform_policy += "\n- Do not assume GNU tools like `grep`, `sed`, or `awk` exist."
+                platform_policy += (
+                    "\n- Prefer Windows-native commands or file tools when they are more reliable."
+                )
+            else:
+                platform_policy += (
+                    "\n- GNU tools like `grep`, `sed`, or `awk` are available in this system."
+                )
+                platform_policy += (
+                    "\n- Fallback to Windows-native commands or file tools when GNU tools failed."
+                )
         else:
-            platform_policy = """## Platform Policy (POSIX)
+            platform_policy = """## Platform Policy
 - You are running on a POSIX system. Prefer UTF-8 and standard shell tools.
 - Use file tools when they are simpler or more reliable than shell commands.
 """
