@@ -327,7 +327,9 @@ class TelegramChannel(BaseChannel):
         thread_kwargs: dict | None = None,
     ) -> None:
         """Send via telegramify(): async, auto-splits, extracts code blocks as files."""
-        results = await telegramify(text, max_message_length=TELEGRAM_MAX_MESSAGE_LEN)
+        results = await telegramify(
+            text, max_message_length=TELEGRAM_MAX_MESSAGE_LEN, min_file_lines=64
+        )
         for item in results:
             if item.content_type == ContentType.TEXT:
                 entities = [MessageEntity(**entity.to_dict()) for entity in (item.entities or [])]
