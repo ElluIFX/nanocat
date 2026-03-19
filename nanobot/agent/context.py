@@ -192,8 +192,9 @@ Keep MEMORY.md concise — it is loaded on every turn."""
 
         system_content = self.build_system_prompt(skill_names)
         if injected_memories:
-            system_content += "\n\n## NowledgeMem Auto-Search\n" + json.dumps(
-                injected_memories, ensure_ascii=False, indent=2
+            system_content += (
+                "\n\n## NowledgeMem Auto-Matched\n(search/read if it may useful)\n"
+                + json.dumps(injected_memories, ensure_ascii=False, indent=2)
             )
 
         messages = [{"role": "system", "content": system_content}]

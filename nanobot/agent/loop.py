@@ -358,20 +358,22 @@ class AgentLoop:
             if score < cfg.score_threshold:
                 continue
             mem = r.get("memory") or {}
-            content = mem.get("content") or ""
-            if len(content) > cfg.max_length:
-                content = content[: cfg.max_length] + "[TRUNCATED, SEARCH IF USEFUL]"
-            cleaned.append(
-                {
-                    "id": mem.get("id"),
-                    "title": mem.get("title"),
-                    "content": content,
-                    "similarity_score": score,
-                }
-            )
+            if not mem:
+                continue
+            item = {
+                "id": mem.get("id"),
+                "title": mem.get("title"),
+                "score": score,
+            }
+            if cfg.with_content:
+                content = mem.get("content") or ""
+                if len(content) > cfg.max_length:
+                    content = content[: cfg.max_length] + "[TRUNCATED, SEARCH IF USEFUL]"
+                item["content"] = content
+            cleaned.append(item)
         if cleaned:
-            log = " / ".join(f"'{mem['title']}'" for mem in cleaned)
-            logger.info(f"Auto-injected {len(cleaned)} memories to system prompt ({log})")
+            log = " / ".join(f"{mem['score'] * 100:.0f}% '{mem['title']}'" for mem in cleaned)
+            logger.debug(f"Auto-injected {len(cleaned)} memories to system prompt ({log})")
         return cleaned or None
 
     async def _run_agent_loop(

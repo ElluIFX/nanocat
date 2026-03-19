@@ -195,6 +195,7 @@ class NowledgeAutoInjectConfig(Base):
     """Auto-inject Nowledge search results into the system prompt on every user turn."""
 
     enabled: bool = False
+    with_content: bool = False  # include memory content in the injected system prompt
     score_threshold: float = 0.5  # minimum similarity_score to include a result
     max_length: int = 128  # truncate memory content beyond this char count
     max_num: int = 5  # maximum number of memories to inject
