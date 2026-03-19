@@ -86,7 +86,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             return f"""\
 ## Memory System Guidelines
 
-You have access to a semantic memory system (Nowledge Mem) via built-in tools. \
+You have access to a memory system (Nowledge Mem) via built-in tools. \
 Use it proactively — it is your primary knowledge store.
 
 **At Session FIRST Turn (not every turn) (`read_working_memory`):**
@@ -115,8 +115,7 @@ Use it proactively — it is your primary knowledge store.
 ## Long-term Memory
 
 **MEMORY.md** (`{workspace_path}/MEMORY.md`) is a static override layer that is always visible in context. \
-Only write to it when the user explicitly requests a permanent record there. \
-Do not use MEMORY.md as an automatic sink for session compression or Nowledge extraction."""
+Only write to it when the user explicitly requests a permanent record there."""
         else:
             return f"""\
 ## Memory Guidelines
