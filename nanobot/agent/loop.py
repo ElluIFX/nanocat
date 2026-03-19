@@ -25,7 +25,11 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.delegate import DelegateTool
 from nanobot.agent.tools.filesystem import (
+    DeleteLinesTool,
     EditFileTool,
+    FileHexTool,
+    GrepFileTool,
+    InsertLinesTool,
     ListDirTool,
     LoadImageTool,
     ReadFileTool,
@@ -190,7 +194,7 @@ class AgentLoop:
                 workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
             )
         )
-        for cls in (WriteFileTool, EditFileTool, ListDirTool):
+        for cls in (WriteFileTool, EditFileTool, ListDirTool, GrepFileTool, InsertLinesTool, DeleteLinesTool, FileHexTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(
             ExecTool(

@@ -1,12 +1,15 @@
 """Shell execution tool."""
 
 import asyncio
+import json
 import locale
 import logging
 import os
 import platform
 import re
 import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -90,38 +93,30 @@ class ExecTool(Tool):
         return "exec"
 
     _MAX_TIMEOUT = 600
-    _MAX_OUTPUT = 10_000
+    _MAX_OUTPUT = 4096
 
     @property
     def description(self) -> str:
         system = platform.system()
+        working_path = self.working_dir or os.getcwd()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        platform_policy = ""
         if system == "Windows":
-            platform_policy = """## Platform Policy
-- You are running on Windows.
-- If terminal output is garbled, retry with UTF-8 output enabled.
-"""
-            # tools like git may bring GNU tools to windows, that will be really good for LLM
-            if not all([shutil.which(x) for x in ["grep", "sed", "awk"]]):
-                platform_policy += "\n- Do not assume GNU tools like `grep`, `sed`, or `awk` exist."
-                platform_policy += (
-                    "\n- Prefer Windows-native commands or file tools when they are more reliable."
-                )
-            else:
-                platform_policy += (
-                    "\n- GNU tools like `grep`, `sed`, or `awk` are available in this system."
-                )
-                platform_policy += (
-                    "\n- Fallback to Windows-native commands or file tools when GNU tools failed."
-                )
+            gnu_available = all(shutil.which(x) for x in ["grep", "sed", "awk"])
+            gnu_note = (
+                "GNU tools (grep/sed/awk) available; fall back to Windows-native on failure."
+                if gnu_available
+                else "GNU tools not available; use Windows-native commands or file tools."
+            )
+            platform_policy = f"Windows: enable UTF-8 if output is garbled. {gnu_note}"
         else:
-            platform_policy = """## Platform Policy
-- You are running on a POSIX system. Prefer UTF-8 and standard shell tools.
-- Use file tools when they are simpler or more reliable than shell commands.
-"""
-        return f"Execute a shell command and return its output. \n\n##Runtime\n{runtime}\n\n{platform_policy}"
+            platform_policy = "POSIX: prefer UTF-8 and standard shell tools."
+
+        return (
+            f"Execute a shell command and return its output.\n"
+            f"Runtime: {runtime} | CWD: {working_path}\n"
+            f"{platform_policy}"
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -130,11 +125,11 @@ class ExecTool(Tool):
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute",
+                    "description": "Shell command to execute",
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Optional working directory for the command",
+                    "description": "Working directory for the command",
                 },
                 "timeout": {
                     "type": "integer",
@@ -171,6 +166,7 @@ class ExecTool(Tool):
         env.setdefault("PYTHONUTF8", "1")
 
         try:
+            t_start = time.monotonic()
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -192,34 +188,33 @@ class ExecTool(Tool):
                     pass
                 return f"Error: Command timed out after {effective_timeout} seconds"
 
-            output_parts = []
+            stdout_text = _decode_output(stdout) if stdout else ""
+            stderr_text = _decode_output(stderr) if stderr else ""
+            elapsed = round(time.monotonic() - t_start, 3)
 
-            if stdout:
-                output_parts.append(_decode_output(stdout))
+            result: dict[str, Any] = {
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "returncode": process.returncode,
+                "elapsed_s": elapsed,
+            }
 
-            if stderr:
-                stderr_text = _decode_output(stderr)
-                if stderr_text.strip():
-                    output_parts.append(f"STDERR:\n{stderr_text}")
-
-            output_parts.append(f"\nExit code: {process.returncode}")
-
-            result = "\n".join(output_parts) if output_parts else "(no output)"
-
-            # Head + tail truncation to preserve both start and end of output
-            max_len = self._MAX_OUTPUT
-            if len(result) > max_len:
-                half = max_len // 2
-                result = (
-                    result[:half]
-                    + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
-                    + result[-half:]
+            if len(stdout_text) > self._MAX_OUTPUT:
+                full_len = len(stdout_text)
+                tmp = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False, encoding="utf-8"
                 )
+                tmp.write(stdout_text)
+                tmp.close()
+                result["stdout"] = stdout_text[: self._MAX_OUTPUT]
+                result["stdout_truncated"] = True
+                result["stdout_full_length"] = full_len
+                result["stdout_full_path"] = tmp.name
 
-            return result
+            return json.dumps(result, ensure_ascii=False)
 
         except Exception as e:
-            return f"Error executing command: {str(e)}"
+            return json.dumps({"stdout": "", "stderr": str(e), "returncode": -1}, ensure_ascii=False)
 
     def _on_blocked(self, command: str, category: str, shell_type: str, reason: str) -> bool:
         """

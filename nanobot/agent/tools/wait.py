@@ -42,12 +42,10 @@ class WaitTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Wait for a specified number of seconds before continuing. "
-            "Use this tool in long-running pipelines and automated workflows to pause between steps "
-            "and synchronously report progress to the user. "
-            "When executing a multi-step continuous process, prefer calling this tool between stages "
-            "instead of interrupting the tool-calling flow to ask the user what to do next — "
-            "breaking the flow prevents the pipeline from completing as requested."
+            "Pause execution for N seconds, optionally notifying the user of progress. "
+            "Use between pipeline stages to wait for external actions to complete. "
+            "Prefer this over breaking the tool-calling flow to ask the user what to do next — "
+            "interrupting the flow stops the pipeline from completing."
         )
 
     @property
@@ -61,7 +59,7 @@ class WaitTool(Tool):
                 },
                 "message": {
                     "type": "string",
-                    "description": "Optional: reason for waiting / progress update to send to the user",
+                    "description": "Progress update / reason for waiting to send to the user",
                 },
             },
             "required": ["wait_s"],

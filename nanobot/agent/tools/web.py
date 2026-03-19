@@ -234,12 +234,17 @@ class WebFetchTool(Tool):
     """Fetch and extract content from a URL."""
 
     name = "web_fetch"
-    description = "Fetch URL and extract readable content (HTML → markdown/text)."
+    description = "Fetch URL and extract readable content."
     parameters = {
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "URL to fetch"},
-            "extract_mode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
+            "extract_mode": {
+                "type": "string",
+                "enum": ["markdown", "text", "raw"],
+                "default": "markdown",
+                "description": "raw HTML -> text / markdown",
+            },
             "max_chars": {"type": "integer", "minimum": 100},
         },
         "required": ["url"],
@@ -335,14 +340,20 @@ class WebFetchTool(Tool):
             if "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
-                doc = Document(r.text)
-                content = (
-                    self._to_markdown(doc.summary())
-                    if extract_mode == "markdown"
-                    else _strip_tags(doc.summary())
-                )
-                text = f"# {doc.title()}\n\n{content}" if doc.title() else content
-                extractor = "readability"
+                if extract_mode == "raw":
+                    import re
+
+                    text = re.sub(r"\s+", " ", r.text).strip()
+                    extractor = "raw"
+                else:
+                    doc = Document(r.text)
+                    content = (
+                        self._to_markdown(doc.summary())
+                        if extract_mode == "markdown"
+                        else _strip_tags(doc.summary())
+                    )
+                    text = f"# {doc.title()}\n\n{content}" if doc.title() else content
+                    extractor = "readability"
             else:
                 text, extractor = r.text, "raw"
 

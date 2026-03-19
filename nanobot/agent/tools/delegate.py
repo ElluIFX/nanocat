@@ -21,13 +21,9 @@ class DelegateTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Delegate one or more tasks to subagents that run concurrently. "
-            "Unlike spawn (which runs in the background and resumes the conversation later), "
-            "delegate BLOCKS until all subagents finish, then returns their results directly "
-            "in the current turn. Use this when you need the results now to decide the next "
-            "step, and want to offload work to avoid filling your own context. "
-            "Ideal for parallel information gathering, multi-step research, or any set of "
-            "independent subtasks whose outputs you need before proceeding."
+            "Run one or more subtasks concurrently in subagents and return all results inline. "
+            "BLOCKS until all finish — use when you need results before proceeding. "
+            "Prefer over spawn when results are required now; prefer over doing it yourself to save context."
         )
 
     @property
@@ -37,21 +33,18 @@ class DelegateTool(Tool):
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "description": (
-                        "List of subtasks to run concurrently. "
-                        "All tasks start at the same time; results are collected once all finish."
-                    ),
+                    "description": "Subtasks to run concurrently. All start simultaneously; results collected when all finish.",
                     "minItems": 1,
                     "items": {
                         "type": "object",
                         "properties": {
                             "task": {
                                 "type": "string",
-                                "description": "Full description of the task for the subagent",
+                                "description": "Full task description for the subagent",
                             },
                             "label": {
                                 "type": "string",
-                                "description": "Short label for this task (for readability)",
+                                "description": "Short display label",
                             },
                         },
                         "required": ["task"],

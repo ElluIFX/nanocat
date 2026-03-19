@@ -30,9 +30,9 @@ class SpawnTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done."
+            "Spawn a subagent to run a task in the background — returns immediately without waiting. "
+            "The subagent reports back when done. Use for fire-and-forget work that doesn't block the current turn. "
+            "Use delegate instead if you need the results now."
         )
 
     @property
@@ -42,11 +42,11 @@ class SpawnTool(Tool):
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "The task for the subagent to complete",
+                    "description": "Task for the subagent to complete",
                 },
                 "label": {
                     "type": "string",
-                    "description": "Optional short label for the task (for display)",
+                    "description": "Short display label",
                 },
             },
             "required": ["task"],
