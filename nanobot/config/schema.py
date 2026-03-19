@@ -32,10 +32,6 @@ class ChannelsConfig(Base):
 
     send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
-    on_start_message: str = ""  # message to send when a channel comes online (empty = disabled)
-    on_start_notify: dict[str, list[str]] = Field(
-        default_factory=dict
-    )  # {channel_name: [chat_id, ...]}
     command_auth: CommandAuthConfig = Field(default_factory=CommandAuthConfig)
 
 
