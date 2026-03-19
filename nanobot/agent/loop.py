@@ -370,7 +370,8 @@ class AgentLoop:
                 }
             )
         if cleaned:
-            logger.info(f"Auto-injected {len(cleaned)} memories to system prompt")
+            log = " / ".join(f"'{mem['title']}'" for mem in cleaned)
+            logger.info(f"Auto-injected {len(cleaned)} memories to system prompt ({log})")
         return cleaned or None
 
     async def _run_agent_loop(

@@ -34,6 +34,7 @@ _POWERSHELL = "powershell"
 _ANY = "any"
 _SYSTEM = "system"
 _FILE = "file"
+_POLICY = "policy"
 
 # (pattern, shell_type, danger_category)
 # Patterns are matched against the lowercased command string.
@@ -45,6 +46,8 @@ _DEFAULT_DENY_RULES: list[tuple[str, str, str]] = [
     # --- FILE danger: CMD ---
     (r"\bdel\b.*(?:/[fq])", _CMD, _FILE),
     (r"\brmdir\b.*(?:/s)", _CMD, _FILE),
+    # Listing / discovery via dir (no workspace carve-out; use file tools instead)
+    (r"\bdir\b", _CMD, _POLICY),
     # --- FILE danger: PowerShell ---
     (r"\bremove-item\b.*-(?:recurse|force|r)\b", _POWERSHELL, _FILE),
     (r"\bri\b.*-(?:recurse|force|r)\b", _POWERSHELL, _FILE),
@@ -231,7 +234,12 @@ class ExecTool(Tool):
                 continue
 
             allowed = False
-            reason = f"{'file' if category == _FILE else 'system'}-dangerous command [{shell_type}]"
+            if category == _FILE:
+                reason = f"file-dangerous command [{shell_type}]"
+            elif category == _POLICY:
+                reason = f"disallowed command [{shell_type}]"
+            else:
+                reason = f"system-dangerous command [{shell_type}]"
 
             if category == _FILE:
                 allowed = self._file_danger_in_workspace(cmd, cwd, workspace)
