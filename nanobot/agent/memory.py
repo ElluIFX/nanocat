@@ -768,7 +768,8 @@ class NowledgeThreadManager:
                     source=self._source,
                 )
                 if got_id != thread_id:
-                    logger.warning("Unmatched thread ID: got={}, expected={}", got_id, thread_id)
+                    logger.error("Unmatched thread ID: got={}, expected={}", got_id, thread_id)
+                    return
                 session.metadata["nowledge_thread_id"] = thread_id
                 self._sessions.save(session)
                 logger.info("Created Nowledge thread {} for session {}", thread_id, session.key)
