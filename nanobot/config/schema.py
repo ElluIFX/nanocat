@@ -131,6 +131,7 @@ class WebSearchConfig(Base):
 class WebToolsConfig(Base):
     """Web tools configuration."""
 
+    safety_check: bool = True  # If false, skip SSRF and URL validation checks
     proxy: str | None = (
         None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     )
@@ -140,8 +141,16 @@ class WebToolsConfig(Base):
 class ExecToolConfig(Base):
     """Shell exec tool configuration."""
 
+    safety_check: bool = True  # If false, skip command safety guard checks
     timeout: int = 60
     path_append: str = ""
+
+
+class FilesystemToolConfig(Base):
+    """Filesystem tool configuration."""
+
+    safety_check: bool = True  # If false, skip path restriction checks
+    restrict_to_workspace: bool = False  # If true, restrict file access to workspace directory
 
 
 class MCPServerConfig(Base):
@@ -164,7 +173,7 @@ class ToolsConfig(Base):
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
-    restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
+    filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 

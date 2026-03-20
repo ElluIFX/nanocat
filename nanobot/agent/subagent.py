@@ -21,7 +21,7 @@ from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import ExecToolConfig, WebSearchConfig
+from nanobot.config.schema import ExecToolConfig, FilesystemToolConfig, WebSearchConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.utils.helpers import build_assistant_message
 
@@ -37,8 +37,9 @@ class SubagentManager:
         model: str | None = None,
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
+        web_safety_check: bool = True,
         exec_config: ExecToolConfig | None = None,
-        restrict_to_workspace: bool = False,
+        filesystem_config: FilesystemToolConfig | None = None,
     ):
         self.provider = provider
         self.workspace = workspace
@@ -46,8 +47,9 @@ class SubagentManager:
         self.model = model or provider.get_default_model()
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
+        self.web_safety_check = web_safety_check
         self.exec_config = exec_config or ExecToolConfig()
-        self.restrict_to_workspace = restrict_to_workspace
+        self.filesystem_config = filesystem_config or FilesystemToolConfig()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -122,31 +124,52 @@ class SubagentManager:
     async def _execute_task(self, task_id: str, task: str, label: str) -> str:
         """Run a subagent to completion and return the final result string."""
         tools = ToolRegistry()
-        allowed_dir = self.workspace if self.restrict_to_workspace else None
+        fs_cfg = self.filesystem_config
+        allowed_dir = self.workspace if fs_cfg.restrict_to_workspace else None
+        fs_safety = fs_cfg.safety_check
         extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
         tools.register(
             ReadFileTool(
-                workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                extra_allowed_dirs=extra_read,
+                safety_check=fs_safety,
             )
         )
         tools.register(
             LoadImageTool(
-                workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                extra_allowed_dirs=extra_read,
+                safety_check=fs_safety,
             )
         )
-        tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-        tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-        tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        tools.register(
+            WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
+        )
+        tools.register(
+            EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
+        )
+        tools.register(
+            ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
+        )
         tools.register(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
+                restrict_to_workspace=fs_cfg.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
+                safety_check=self.exec_config.safety_check,
             )
         )
-        tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
-        tools.register(WebFetchTool(proxy=self.web_proxy))
+        tools.register(
+            WebSearchTool(
+                config=self.web_search_config,
+                proxy=self.web_proxy,
+                safety_check=self.web_safety_check,
+            )
+        )
+        tools.register(WebFetchTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
 
         system_prompt = self._build_subagent_prompt()
         messages: list[dict[str, Any]] = [

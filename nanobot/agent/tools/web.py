@@ -91,11 +91,12 @@ class WebSearchTool(Tool):
         "required": ["query"],
     }
 
-    def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None):
+    def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None, safety_check: bool = True):
         from nanobot.config.schema import WebSearchConfig
 
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
+        self.safety_check = safety_check
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         provider = self.config.provider.strip().lower() or "brave"
@@ -250,15 +251,19 @@ class WebFetchTool(Tool):
         "required": ["url"],
     }
 
-    def __init__(self, max_chars: int = 50000, proxy: str | None = None):
+    def __init__(self, max_chars: int = 50000, proxy: str | None = None, safety_check: bool = True):
         self.max_chars = max_chars
         self.proxy = proxy
+        self.safety_check = safety_check
 
     async def execute(
         self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any
     ) -> str:
         max_chars = max_chars or self.max_chars
-        is_valid, error_msg = _validate_url_safe(url)
+        if self.safety_check:
+            is_valid, error_msg = _validate_url_safe(url)
+        else:
+            is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps(
                 {"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False
@@ -329,11 +334,12 @@ class WebFetchTool(Tool):
 
             from nanobot.security.network import validate_resolved_url
 
-            redir_ok, redir_err = validate_resolved_url(str(r.url))
-            if not redir_ok:
-                return json.dumps(
-                    {"error": f"Redirect blocked: {redir_err}", "url": url}, ensure_ascii=False
-                )
+            if self.safety_check:
+                redir_ok, redir_err = validate_resolved_url(str(r.url))
+                if not redir_ok:
+                    return json.dumps(
+                        {"error": f"Redirect blocked: {redir_err}", "url": url}, ensure_ascii=False
+                    )
 
             ctype = r.headers.get("content-type", "")
 

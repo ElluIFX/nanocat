@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from nanobot.config.schema import (
         ChannelsConfig,
         ExecToolConfig,
+        FilesystemToolConfig,
         MemoryConfig,
         TipsConfig,
         WebSearchConfig,
@@ -91,16 +92,23 @@ class AgentLoop:
         context_window_tokens: int = 65_536,
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
+        web_safety_check: bool = True,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
-        restrict_to_workspace: bool = False,
+        filesystem_config: FilesystemToolConfig | None = None,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         tips_config: TipsConfig | None = None,
         memory_config: MemoryConfig | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, MemoryConfig, TipsConfig, WebSearchConfig
+        from nanobot.config.schema import (
+            ExecToolConfig,
+            FilesystemToolConfig,
+            MemoryConfig,
+            TipsConfig,
+            WebSearchConfig,
+        )
 
         self.bus = bus
         self.channels_config = channels_config
@@ -113,9 +121,10 @@ class AgentLoop:
         self.context_window_tokens = context_window_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
+        self.web_safety_check = web_safety_check
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
-        self.restrict_to_workspace = restrict_to_workspace
+        self.filesystem_config = filesystem_config or FilesystemToolConfig()
 
         _mem = memory_config or MemoryConfig()
         _nowledge_cfg = _mem.nowledge
@@ -134,8 +143,9 @@ class AgentLoop:
             model=self.model,
             web_search_config=self.web_search_config,
             web_proxy=web_proxy,
+            web_safety_check=self.web_safety_check,
             exec_config=self.exec_config,
-            restrict_to_workspace=restrict_to_workspace,
+            filesystem_config=self.filesystem_config,
         )
 
         self._running = False
@@ -188,16 +198,24 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        allowed_dir = self.workspace if self.restrict_to_workspace else None
+        fs_cfg = self.filesystem_config
+        allowed_dir = self.workspace if fs_cfg.restrict_to_workspace else None
+        fs_safety = fs_cfg.safety_check
         extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
         self.tools.register(
             ReadFileTool(
-                workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                extra_allowed_dirs=extra_read,
+                safety_check=fs_safety,
             )
         )
         self.tools.register(
             LoadImageTool(
-                workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                extra_allowed_dirs=extra_read,
+                safety_check=fs_safety,
             )
         )
         for cls in (
@@ -209,17 +227,26 @@ class AgentLoop:
             DeleteLinesTool,
             FileHexTool,
         ):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+            self.tools.register(
+                cls(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
+            )
         self.tools.register(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
+                restrict_to_workspace=fs_cfg.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
+                safety_check=self.exec_config.safety_check,
             )
         )
-        self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
-        self.tools.register(WebFetchTool(proxy=self.web_proxy))
+        self.tools.register(
+            WebSearchTool(
+                config=self.web_search_config,
+                proxy=self.web_proxy,
+                safety_check=self.web_safety_check,
+            )
+        )
+        self.tools.register(WebFetchTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(WaitTool(send_callback=self.bus.publish_outbound))
         self.tools.register(TodoTool(send_callback=self.bus.publish_outbound))
