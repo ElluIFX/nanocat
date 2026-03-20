@@ -301,32 +301,6 @@ class AgentLoop:
         # Telegram-style /cmd@botname support
         return token.split("@", 1)[0].strip().lower() or None
 
-    def _is_command_blocked(self, msg: InboundMessage, command: str | None) -> bool:
-        """Return True when a slash command should be blocked by command auth."""
-        if not command or msg.channel == "system":
-            return False
-        cfg = getattr(self.channels_config, "command_auth", None) if self.channels_config else None
-        if cfg is None:
-            return False
-        restricted = {c.strip().lstrip("/").lower() for c in (cfg.restricted_commands or []) if c}
-        if command not in restricted:
-            return False
-        allowed_map = cfg.authorized_chat_ids or {}
-        allowed = {str(cid) for cid in allowed_map.get(msg.channel, [])}
-        return str(msg.chat_id) not in allowed
-
-    def _build_command_denied(self, msg: InboundMessage, command: str) -> OutboundMessage:
-        """Build the standard blocked-command response."""
-        return OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content=self.tips.command_auth_denied.format(
-                command=f"/{command}",
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-            ),
-        )
-
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
@@ -572,11 +546,6 @@ class AgentLoop:
                 continue
             except Exception as e:
                 logger.warning("Error consuming inbound message: {}, continuing...", e)
-                continue
-
-            command = self._extract_slash_command(msg.content)
-            if self._is_command_blocked(msg, command):
-                await self.bus.publish_outbound(self._build_command_denied(msg, command))
                 continue
 
             cmd = msg.content.strip().lower()
@@ -946,11 +915,7 @@ class AgentLoop:
         session = self.sessions.get_or_create(key)
 
         # Slash commands
-        raw = msg.content.strip()
-        command = self._extract_slash_command(raw)
-        if self._is_command_blocked(msg, command):
-            return self._build_command_denied(msg, command)
-        cmd = raw.lower()
+        cmd = msg.content.strip().lower()
         if cmd == "/new":
             session.metadata.pop("nowledge_thread_id", None)
             session.clear()

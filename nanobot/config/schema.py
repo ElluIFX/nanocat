@@ -14,13 +14,6 @@ class Base(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class CommandAuthConfig(Base):
-    """Restricted command authorization by channel/chat_id."""
-
-    restricted_commands: list[str] = Field(default_factory=lambda: ["model"])
-    authorized_chat_ids: dict[str, list[str]] = Field(default_factory=dict)
-
-
 class ChannelsConfig(Base):
     """Configuration for chat channels.
 
@@ -32,7 +25,6 @@ class ChannelsConfig(Base):
 
     send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
-    command_auth: CommandAuthConfig = Field(default_factory=CommandAuthConfig)
 
 
 class AgentDefaults(Base):
@@ -273,8 +265,6 @@ class TipsConfig(Base):
     model_error: str = "Error updating model: {error}"
     # /model (choice invalid) — {choice_number}
     model_choice_invalid: str = "Invalid choice number: {choice_number}"
-    # command auth denied — {command}, {channel}, {chat_id}
-    command_auth_denied: str = "Not authorized: {command} (channel={channel}, chat_id={chat_id})"
     # /session — usage shown when subcommand is unknown or missing
     session_usage: str = (
         "Usage:\n"
