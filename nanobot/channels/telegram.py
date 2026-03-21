@@ -61,6 +61,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("sid", "Show current channel/chat IDs"),
         BotCommand("consolidate", "Consolidate the current conversation"),
         BotCommand("session", "Save, load, or list sessions"),
+        BotCommand("approve", "Approve safety check for N minutes"),
     ]
 
     @classmethod

@@ -17,6 +17,11 @@ from nanobot.agent.tools.base import Tool
 
 logger = logging.getLogger(__name__)
 
+_APPROVE_HINT = (
+    "\nIf you believe this action is necessary, explain the reason to the user "
+    "and ask them to use /approve to temporarily bypass this check."
+)
+
 
 def _decode_output(data: bytes) -> str:
     """Decode subprocess output bytes to str.
@@ -259,26 +264,26 @@ class ExecTool(Tool):
                 allowed = True
 
             if not allowed:
-                return f"Error: Command blocked by safety guard ({reason})"
+                return f"Error: Command blocked by safety guard ({reason})" + _APPROVE_HINT
 
         for pattern in self._extra_deny_patterns:
             if re.search(pattern, lower):
                 reason = "dangerous pattern [custom]"
                 if not self._on_blocked(cmd, _SYSTEM, _ANY, reason):
-                    return f"Error: Command blocked by safety guard ({reason})"
+                    return f"Error: Command blocked by safety guard ({reason})" + _APPROVE_HINT
 
         if self.allow_patterns:
             if not any(re.search(p, lower) for p in self.allow_patterns):
-                return "Error: Command blocked by safety guard (not in allowlist)"
+                return "Error: Command blocked by safety guard (not in allowlist)" + _APPROVE_HINT
 
         from nanobot.security.network import contains_internal_url
 
         if contains_internal_url(cmd):
-            return "Error: Command blocked by safety guard (internal/private URL detected)"
+            return "Error: Command blocked by safety guard (internal/private URL detected)" + _APPROVE_HINT
 
         if self.restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
-                return "Error: Command blocked by safety guard (path traversal detected)"
+                return "Error: Command blocked by safety guard (path traversal detected)" + _APPROVE_HINT
 
             cwd_path = Path(cwd).resolve()
             for raw in self._extract_absolute_paths(cmd):
@@ -288,7 +293,7 @@ class ExecTool(Tool):
                 except Exception:
                     continue
                 if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
-                    return "Error: Command blocked by safety guard (path outside working dir)"
+                    return "Error: Command blocked by safety guard (path outside working dir)" + _APPROVE_HINT
 
         return None
 

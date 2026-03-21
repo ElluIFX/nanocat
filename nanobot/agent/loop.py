@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 from contextlib import AsyncExitStack
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -464,6 +465,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        bypass_safety_check: bool = False,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
         messages = initial_messages
@@ -504,7 +506,9 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.debug(f"Tool call: {tool_call.name}({args_str})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await self.tools.execute(
+                        tool_call.name, tool_call.arguments, bypass_safety_check
+                    )
                     result = self._intercept_oversized_image(result)
                     result_str = str(result)
                     if len(result_str) > 512:
@@ -968,6 +972,28 @@ class AgentLoop:
             return await self._handle_ctx(msg, session)
         if cmd == "/sid":
             return await self._handle_sid(msg, key)
+        if msg.content.strip().lower().startswith("/approve"):
+            parts = msg.content.strip().split()
+            try:
+                duration = int(parts[1]) if len(parts) > 1 else 5
+            except (ValueError, IndexError):
+                duration = 5
+            until = datetime.now() + timedelta(minutes=duration)
+            session.metadata["approve_until"] = until.isoformat()
+            self.sessions.save(session)
+            msg = InboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
+                content=(
+                    f"[APPROVE] You have been granted a temporary safety-check bypass "
+                    f"for {duration} minute(s), expiring at {until.strftime('%H:%M:%S')}. "
+                    f"Please continue your task."
+                ),
+                metadata=msg.metadata,
+                media=msg.media,
+            )
+            # Fall through to normal message processing
         if msg.content.strip().lower().startswith("/model"):
             return await self._handle_model(msg)
         if msg.content.strip().lower().startswith("/session"):
@@ -1005,10 +1031,21 @@ class AgentLoop:
                 )
             )
 
+        # Check if a temporary safety-check bypass is active
+        _bypass = False
+        _approve_str = session.metadata.get("approve_until")
+        if _approve_str:
+            try:
+                if datetime.fromisoformat(_approve_str) > datetime.now():
+                    _bypass = True
+            except (ValueError, TypeError):
+                pass
+
         n_initial = len(initial_messages)
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
+            bypass_safety_check=_bypass,
         )
 
         _old_msg_count = len(session.messages)
@@ -1037,8 +1074,6 @@ class AgentLoop:
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
-        from datetime import datetime
-
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")

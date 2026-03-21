@@ -35,13 +35,21 @@ class ToolRegistry:
         """Get all tool definitions in OpenAI format."""
         return [tool.to_schema() for tool in self._tools.values()]
 
-    async def execute(self, name: str, params: dict[str, Any]) -> str:
+    async def execute(self, name: str, params: dict[str, Any], bypass_safety_check: bool = False) -> str:
         """Execute a tool by name with given parameters."""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
         if not tool:
             return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}. Check if it is a Skill, not a Tool."
+
+        # Temporarily disable safety checks if bypass is active
+        _saved: list[tuple[str, Any]] = []
+        if bypass_safety_check:
+            for attr in ("safety_check", "_safety_check"):
+                if hasattr(tool, attr):
+                    _saved.append((attr, getattr(tool, attr)))
+                    setattr(tool, attr, False)
 
         try:
             # Attempt to cast parameters to match schema types
@@ -57,6 +65,9 @@ class ToolRegistry:
             return result
         except Exception as e:
             return f"Error executing {name}: {str(e)}" + _HINT
+        finally:
+            for attr, val in _saved:
+                setattr(tool, attr, val)
 
     @property
     def tool_names(self) -> list[str]:

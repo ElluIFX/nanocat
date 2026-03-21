@@ -10,6 +10,11 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 from nanobot.utils.helpers import detect_image_mime
 
+_APPROVE_HINT = (
+    "\nIf you believe this action is necessary, explain the reason to the user "
+    "and ask them to use /approve to temporarily bypass this check."
+)
+
 
 def _resolve_path(
     path: str,
@@ -26,7 +31,9 @@ def _resolve_path(
     if safety_check and allowed_dir:
         all_dirs = [allowed_dir] + (extra_allowed_dirs or [])
         if not any(_is_under(resolved, d) for d in all_dirs):
-            raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
+            raise PermissionError(
+                f"Path {path} is outside allowed directory {allowed_dir}" + _APPROVE_HINT
+            )
     return resolved
 
 

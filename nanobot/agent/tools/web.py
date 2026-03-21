@@ -15,6 +15,11 @@ from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
+_APPROVE_HINT = (
+    "\nIf you believe this action is necessary, explain the reason to the user "
+    "and ask them to use /approve to temporarily bypass this check."
+)
+
 if TYPE_CHECKING:
     from nanobot.config.schema import WebSearchConfig
 
@@ -266,7 +271,8 @@ class WebFetchTool(Tool):
             is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps(
-                {"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False
+                {"error": f"URL validation failed: {error_msg}{_APPROVE_HINT}", "url": url},
+                ensure_ascii=False,
             )
 
         result = await self._fetch_jina(url, max_chars)
@@ -338,7 +344,8 @@ class WebFetchTool(Tool):
                 redir_ok, redir_err = validate_resolved_url(str(r.url))
                 if not redir_ok:
                     return json.dumps(
-                        {"error": f"Redirect blocked: {redir_err}", "url": url}, ensure_ascii=False
+                        {"error": f"Redirect blocked: {redir_err}{_APPROVE_HINT}", "url": url},
+                        ensure_ascii=False,
                     )
 
             ctype = r.headers.get("content-type", "")
