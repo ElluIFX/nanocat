@@ -127,7 +127,8 @@ class TodoTool(Tool):
             "to plan all steps BEFORE executing anything.\n"
             "- Mark each step INPROGRESS before starting it, and COMPLETED immediately after finishing.\n"
             "- Never interrupt the pipeline to ask the user what to do next — update the todo and keep going.\n"
-            "- Call action=complete when all tasks are finished to close the list.\n\n"
+            "- Call action=complete when all tasks are finished to close the list.\n"
+            "- Notify user when necessary, typically when create.\n\n"
             "Actions: create | check | update | append | complete"
         )
 
@@ -167,6 +168,11 @@ class TodoTool(Tool):
                     "type": "string",
                     "description": "append: task description to add",
                 },
+                "notify": {
+                    "type": "boolean",
+                    "description": "except check: send todo table to user",
+                    "default": False,
+                },
             },
             "required": ["action"],
         }
@@ -187,7 +193,13 @@ class TodoTool(Tool):
             return await self._complete(**kwargs)
         return f"Error: Unknown action '{action}'"
 
-    async def _create(self, name: str | None = None, tasks: list[str] | None = None, **_: Any) -> str:
+    async def _create(
+        self,
+        name: str | None = None,
+        tasks: list[str] | None = None,
+        notify: bool = False,
+        **_: Any,
+    ) -> str:
         if not name:
             return "Error: 'name' is required for create"
         if not tasks:
@@ -198,7 +210,8 @@ class TodoTool(Tool):
             tasks=[TodoItem(index=i + 1, task=t) for i, t in enumerate(tasks)],
         )
         _save(self._session, todo)
-        await self._notify(todo)
+        if notify:
+            await self._notify(todo)
         return f"Created todo list '{name}' with ID {todo.id} ({len(tasks)} tasks)"
 
     async def _check(self, id: str | None = None, **_: Any) -> str:
@@ -213,7 +226,12 @@ class TodoTool(Tool):
         )
 
     async def _update(
-        self, id: str | None = None, index: int | None = None, status: str | None = None, **_: Any
+        self,
+        id: str | None = None,
+        index: int | None = None,
+        status: str | None = None,
+        notify: bool = False,
+        **_: Any,
     ) -> str:
         if not id or index is None or not status:
             return "Error: 'id', 'index', and 'status' are required for update"
@@ -227,10 +245,13 @@ class TodoTool(Tool):
             return f"Error: Cannot downgrade status from {item.status} to {status}"
         item.status = status
         _save(self._session, todo)
-        await self._notify(todo)
+        if notify:
+            await self._notify(todo)
         return f"Task {index} updated to {status}"
 
-    async def _append(self, id: str | None = None, task: str | None = None, **_: Any) -> str:
+    async def _append(
+        self, id: str | None = None, task: str | None = None, notify: bool = False, **_: Any
+    ) -> str:
         if not id or not task:
             return "Error: 'id' and 'task' are required for append"
         todo = _load(self._session, id)
@@ -239,10 +260,11 @@ class TodoTool(Tool):
         new_index = max((t.index for t in todo.tasks), default=0) + 1
         todo.tasks.append(TodoItem(index=new_index, task=task))
         _save(self._session, todo)
-        await self._notify(todo)
+        if notify:
+            await self._notify(todo)
         return f"Appended task {new_index}: {task}"
 
-    async def _complete(self, id: str | None = None, **_: Any) -> str:
+    async def _complete(self, id: str | None = None, notify: bool = False, **_: Any) -> str:
         if not id:
             return "Error: 'id' is required for complete"
         todo = _load(self._session, id)
@@ -254,4 +276,6 @@ class TodoTool(Tool):
             return f"Error: {len(incomplete)} task(s) not completed: {names}"
         store = _get_store(self._session)
         store.pop(id, None)
+        if notify:
+            await self._notify(todo)
         return f"Todo list '{todo.name}' completed and removed"
