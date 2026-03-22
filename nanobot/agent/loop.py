@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import deque
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -157,6 +158,8 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._processing_lock = asyncio.Lock()
+        self._recent_logs: deque = deque(maxlen=10)
+        logger.add(lambda msg: self._recent_logs.append(msg), format="{time:HH:mm:ss} {message}")
 
         # Nowledge Mem integration (optional)
         self.nowledge_client: NowledgeClient | None = (
@@ -684,7 +687,8 @@ class AgentLoop:
 
         config = load_config()
 
-        if not parts or (len(parts) < 2 and not parts[0].isdigit()):
+        # No args or single digit: show list
+        if not parts or (len(parts) == 1 and parts[0].isdigit()):
             choices = "\n".join(
                 [
                     f" {i + 1}. {model}"
@@ -695,6 +699,44 @@ class AgentLoop:
             model_name = self.model
             if model_name.startswith(provider_name + "/"):
                 model_name = model_name[len(provider_name) + 1 :]
+
+            # If digit provided, switch model
+            if parts and parts[0].isdigit():
+                choice_number = int(parts[0])
+                if choice_number < 1 or choice_number > len(config.agents.defaults.model_choice):
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=self.tips.model_choice_invalid.format(choice_number=choice_number),
+                    )
+                full_model = config.agents.defaults.model_choice[choice_number - 1]
+                try:
+                    from nanobot.cli.commands import _make_provider
+
+                    new_provider = _make_provider(config, override_model=full_model)
+                    if self.assistant_model == self.model:
+                        self.assistant_model = full_model
+                    self.model = full_model
+                    self.provider = new_provider
+                    self.memory_consolidator.model = self.assistant_model
+                    self.memory_consolidator.provider = new_provider
+                    if self.nowledge_memory_manager is not None:
+                        self.nowledge_memory_manager.model = self.assistant_model
+                        self.nowledge_memory_manager.provider = new_provider
+
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=self.tips.model_updated.format(model_name=full_model),
+                    )
+                except Exception as e:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=self.tips.model_error.format(error=str(e)),
+                    )
+
+            # Just show list
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -704,17 +746,9 @@ class AgentLoop:
                     model_choice=choices,
                 ),
             )
-        if len(parts) == 1:
-            choice_number = int(parts[0])
-            if choice_number < 1 or choice_number > len(config.agents.defaults.model_choice):
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self.tips.model_choice_invalid.format(choice_number=choice_number),
-                )
-            full_model = config.agents.defaults.model_choice[choice_number - 1]
-        else:
-            full_model = f"{parts[0]}/{parts[1]}"
+
+        # Two args: provider + model
+        full_model = f"{parts[0]}/{parts[1]}"
         try:
             from nanobot.cli.commands import _make_provider
 
@@ -962,6 +996,15 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self.tips.help,
             )
+        if cmd == "/busy":
+            is_busy = self._processing_lock.locked()
+            status = "🔴 Busy" if is_busy else "🟢 Idle"
+            logs = "\n".join(list(self._recent_logs)[-5:]) if self._recent_logs else "(no recent logs)"
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"{status}\n\nRecent logs:\n{logs}",
+            )
         if cmd == "/consolidate":
             changed = await self.memory_consolidator.maybe_consolidate_by_tokens(
                 session, force=True
@@ -994,6 +1037,39 @@ class AgentLoop:
                 media=msg.media,
             )
             # Fall through to normal message processing
+        # Handle /max command
+        _max_restore = None
+        if msg.content.strip().lower().startswith("/max"):
+            from nanobot.config.loader import load_config
+
+            config = load_config()
+            max_model = config.agents.defaults.max_model
+            if max_model:
+                try:
+                    from nanobot.cli.commands import _make_provider
+
+                    _max_restore = (self.model, self.provider)
+                    self.model = max_model
+                    self.provider = _make_provider(config, override_model=max_model)
+                except Exception as e:
+                    return OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id, content=f"Error: {e}"
+                    )
+            # Rewrite message (remove /max prefix)
+            prompt = msg.content.strip()[4:].strip()
+            if not prompt:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content="Usage: /max <prompt>"
+                )
+            msg = InboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
+                content=prompt,
+                metadata=msg.metadata,
+                media=msg.media,
+            )
+            # Fall through to normal processing
         if msg.content.strip().lower().startswith("/model"):
             return await self._handle_model(msg)
         if msg.content.strip().lower().startswith("/session"):
@@ -1062,6 +1138,10 @@ class AgentLoop:
 
         if final_content is None:
             final_content = self.tips.no_response
+
+        # Restore model if /max was used
+        if _max_restore:
+            self.model, self.provider = _max_restore
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)

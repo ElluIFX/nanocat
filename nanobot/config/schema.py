@@ -32,6 +32,7 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "openai/gpt-4o"
+    max_model: str | None = None  # Optional high-capability model for /max command
     assistant_model: str | None = (
         None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
     )
