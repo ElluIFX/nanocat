@@ -329,6 +329,15 @@ class SessionManager:
             return []
         return sorted(p.stem for p in save_dir.glob("*.jsonl"))
 
+    def delete_named(self, key: str, name: str) -> bool:
+        """Delete a named session snapshot. Returns True if deleted, False if not found."""
+        save_dir = self._get_saved_dir(key)
+        path = save_dir / f"{name}.jsonl"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
     def list_sessions(self) -> list[dict[str, Any]]:
         """
         List all sessions.

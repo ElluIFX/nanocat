@@ -259,9 +259,10 @@ class TipsConfig(Base):
         "/sid — Show channel/chat identity\n"
         "/help — Show available commands\n"
         "/consolidate — Manually consolidate old session turns\n"
-        "/session — Save, load, or list sessions\n"
-        "/approve <N=5> - Approve safety check for N minutes\n"
-        "/max <model> - Use high-capability model for the next turn"
+        "/session — List saved sessions\n"
+        "/busy — Show agent status and recent logs\n"
+        "/approve <N=5> — Approve safety check for N minutes\n"
+        "/max <prompt> — Use high-capability model for this turn"
     )
     # /model (no args) — {model_name}, {provider_name}
     model_info: str = (
@@ -280,9 +281,10 @@ class TipsConfig(Base):
     # /session — usage shown when subcommand is unknown or missing
     session_usage: str = (
         "Usage:\n"
+        "  /session              — List saved sessions\n"
         "  /session save <name>  — Save current session\n"
         "  /session load <name>  — Load a saved session\n"
-        "  /session list         — List saved sessions"
+        "  /session delete <name> — Delete a saved session"
     )
     # /session save — success — {name}
     session_saved: str = "Session saved as '{name}'."

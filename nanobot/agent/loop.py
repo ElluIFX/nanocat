@@ -793,7 +793,7 @@ class AgentLoop:
         return None
 
     async def _handle_session(self, msg: InboundMessage, session: Session) -> OutboundMessage:
-        """Handle /session save|load|list commands."""
+        """Handle /session save|load|delete commands."""
 
         def _reply(content: str) -> OutboundMessage:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
@@ -802,7 +802,8 @@ class AgentLoop:
         sub = parts[1].lower() if len(parts) > 1 else ""
         name = parts[2].strip() if len(parts) > 2 else ""
 
-        if sub == "list":
+        # No subcommand or "list": show list
+        if not sub or sub == "list":
             names = self.sessions.list_named(session.key)
             if not names:
                 return _reply(self.tips.session_list_empty)
@@ -811,7 +812,6 @@ class AgentLoop:
         if sub == "save" and name:
             if reason := self._validate_session_name(name):
                 return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
-            # Flush in-memory state first so the snapshot is up-to-date.
             self.sessions.save(session)
             self.sessions.save_named(session, name)
             return _reply(self.tips.session_saved.format(name=name))
@@ -823,6 +823,14 @@ class AgentLoop:
             if loaded is None:
                 return _reply(self.tips.session_not_found.format(name=name))
             return _reply(self.tips.session_loaded.format(name=name))
+
+        if sub == "delete" and name:
+            if reason := self._validate_session_name(name):
+                return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
+            deleted = self.sessions.delete_named(session.key, name)
+            if not deleted:
+                return _reply(self.tips.session_not_found.format(name=name))
+            return _reply(f"Session '{name}' deleted.")
 
         return _reply(self.tips.session_usage)
 
