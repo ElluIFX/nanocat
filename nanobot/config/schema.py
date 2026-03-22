@@ -260,7 +260,8 @@ class TipsConfig(Base):
         "/help — Show available commands\n"
         "/consolidate — Manually consolidate old session turns\n"
         "/session — Save, load, or list sessions\n"
-        "/approve <N=5> - Approve safety check for N minutes"
+        "/approve <N=5> - Approve safety check for N minutes\n"
+        "/max <model> - Use high-capability model for the next turn"
     )
     # /model (no args) — {model_name}, {provider_name}
     model_info: str = (
