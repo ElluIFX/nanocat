@@ -159,7 +159,10 @@ class AgentLoop:
         self._background_tasks: list[asyncio.Task] = []
         self._processing_lock = asyncio.Lock()
         self._recent_logs: deque = deque(maxlen=10)
-        logger.add(lambda msg: self._recent_logs.append(msg), format="{time:HH:mm:ss} {message}")
+        logger.add(
+            lambda msg: self._recent_logs.append(msg.strip()),
+            format="[{time:HH:mm:ss}] [{level}] {message}",
+        )
 
         # Nowledge Mem integration (optional)
         self.nowledge_client: NowledgeClient | None = (
@@ -879,15 +882,15 @@ class AgentLoop:
         """Process a message under the global lock."""
         if msg.content.strip().lower() == "/busy":
             is_busy = self._processing_lock.locked()
-            status = "🔴 Busy" if is_busy else "🟢 Idle"
+            status = "🔴 **Busy**" if is_busy else "🟢 **Idle**"
             logs = (
-                "\n".join(list(self._recent_logs)[-5:]) if self._recent_logs else "(no recent logs)"
+                "\n".join(list(self._recent_logs)[-8:]) if self._recent_logs else "(no recent logs)"
             )
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content=f"{status}\n\nRecent logs:\n{logs}",
+                    content=f"NanoBot is {status}\n\n---\n\n```log\n{logs}\n```",
                 )
             )
             return
