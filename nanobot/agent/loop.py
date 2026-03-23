@@ -683,59 +683,17 @@ class AgentLoop:
 
     async def _handle_model(self, msg: InboundMessage) -> OutboundMessage:
         """Handle /model command — query or update the active model."""
-        from nanobot.config.loader import load_config
+        from nanobot.config.loader import load_config, save_config
 
         raw_args = msg.content.strip()[len("/model") :].strip()
         parts = raw_args.split() if raw_args else []
 
         config = load_config()
 
-        # No args or single digit: show list
-        if not parts or (len(parts) == 1 and parts[0].isdigit()):
-            choices = "\n".join(
-                [
-                    f" {i + 1}. {model}"
-                    for i, model in enumerate(config.agents.defaults.model_choice)
-                ]
-            )
+        def _format_choices(models: list[str]) -> str:
+            return "\n".join(f" {i + 1}. {model}" for i, model in enumerate(models)) or " (empty)"
 
-            # If digit provided, switch model
-            if parts and parts[0].isdigit():
-                choice_number = int(parts[0])
-                if choice_number < 1 or choice_number > len(config.agents.defaults.model_choice):
-                    return OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=self.tips.model_choice_invalid.format(choice_number=choice_number),
-                    )
-                full_model = config.agents.defaults.model_choice[choice_number - 1]
-                try:
-                    from nanobot.cli.commands import _make_provider
-
-                    new_provider = _make_provider(config, override_model=full_model)
-                    if self.assistant_model == self.model:
-                        self.assistant_model = full_model
-                    self.model = full_model
-                    self.provider = new_provider
-                    self.memory_consolidator.model = self.assistant_model
-                    self.memory_consolidator.provider = new_provider
-                    if self.nowledge_memory_manager is not None:
-                        self.nowledge_memory_manager.model = self.assistant_model
-                        self.nowledge_memory_manager.provider = new_provider
-
-                    return OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=self.tips.model_updated.format(model_name=full_model),
-                    )
-                except Exception as e:
-                    return OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=self.tips.model_error.format(error=str(e)),
-                    )
-
-            # Just show list
+        if not parts:
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -744,42 +702,126 @@ class AgentLoop:
                     max_model=config.agents.defaults.max_model,
                     assistant_model=self.assistant_model,
                     provider_name=self.provider.name,
-                    model_choice=choices,
+                    model_choice=_format_choices(config.agents.defaults.model_choice),
                 ),
             )
 
-        # Two args: provider + model
-        full_model = f"{parts[0]}/{parts[1]}"
-        try:
-            from nanobot.cli.commands import _make_provider
+        subcmd = parts[0].lower()
 
-            new_provider = _make_provider(config, override_model=full_model)
-            if self.assistant_model == self.model:
-                self.assistant_model = full_model
-            self.model = full_model
-            self.provider = new_provider
-            self.memory_consolidator.model = self.assistant_model
-            self.memory_consolidator.provider = new_provider
-            if self.nowledge_memory_manager is not None:
-                self.nowledge_memory_manager.model = self.assistant_model
-                self.nowledge_memory_manager.provider = new_provider
+        if subcmd == "add":
+            if len(parts) != 3:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(
+                        error="Must provide provider and model name"
+                    ),
+                )
+            full_model = f"{parts[1]}/{parts[2]}"
+            try:
+                # Re-read before write to avoid stale in-memory config.
+                config = load_config()
+                if full_model not in config.agents.defaults.model_choice:
+                    config.agents.defaults.model_choice.append(full_model)
+                save_config(config)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_added.format(model_name=full_model),
+                )
+            except Exception as e:
+                logger.error("Failed to add model: {}", e)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(error=str(e)),
+                )
 
-            await self.bus.publish_outbound(
-                OutboundMessage(
+        if subcmd == "delete":
+            if len(parts) != 2 or not parts[1].isdigit():
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(error="No delete number provided"),
+                )
+            choice_number = int(parts[1])
+            try:
+                # Re-read before write to avoid stale in-memory config.
+                config = load_config()
+                models = config.agents.defaults.model_choice
+                if choice_number < 1 or choice_number > len(models):
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=self.tips.model_choice_invalid.format(choice_number=choice_number),
+                    )
+                if len(models) <= 1:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=self.tips.model_error.format(error="Can't delete the last model"),
+                    )
+                deleted_model = models.pop(choice_number - 1)
+                save_config(config)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_deleted.format(model_name=deleted_model),
+                )
+            except Exception as e:
+                logger.error("Failed to delete model: {}", e)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(error=str(e)),
+                )
+
+        if subcmd == "use":
+            if len(parts) != 2 or not parts[1].isdigit():
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(error="No use number provided"),
+                )
+            choice_number = int(parts[1])
+            if choice_number < 1 or choice_number > len(config.agents.defaults.model_choice):
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_choice_invalid.format(choice_number=choice_number),
+                )
+            full_model = config.agents.defaults.model_choice[choice_number - 1]
+            try:
+                from nanobot.cli.commands import _make_provider
+
+                new_provider = _make_provider(config, override_model=full_model)
+                if self.assistant_model == self.model:
+                    self.assistant_model = full_model
+                self.model = full_model
+                self.provider = new_provider
+                self.memory_consolidator.model = self.assistant_model
+                self.memory_consolidator.provider = new_provider
+                if self.nowledge_memory_manager is not None:
+                    self.nowledge_memory_manager.model = self.assistant_model
+                    self.nowledge_memory_manager.provider = new_provider
+
+                return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=self.tips.model_updated.format(model_name=full_model),
                 )
-            )
-        except Exception as e:
-            logger.error("Failed to update model config: {}", e)
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=self.tips.model_error.format(error=e),
-            )
+            except Exception as e:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(error=str(e)),
+                )
 
-        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="")
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=self.tips.model_error.format(error="Invalid command"),
+        )
 
     def _validate_session_name(self, name: str) -> str | None:
         """Return an error reason string if *name* is not a valid save name, else None."""

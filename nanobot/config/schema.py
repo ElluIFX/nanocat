@@ -272,11 +272,15 @@ class TipsConfig(Base):
         "Assistant Model: {assistant_model}\n"
         "Provider: {provider_name}\n\n"
         "Available models:\n{model_choice}\n"
-        "Usage:\n/model <provider> <model_name>\n"
-        "/model <choice_number>"
+        "Usage:\n/model add <provider> <model_name>\n"
+        "/model use/delete <choice_number>"
     )
-    # /model (success) — {model_name}
+    # /model use (success) — {model_name}
     model_updated: str = "Model updated: {model_name}"
+    # /model delete (success) — {model_name}
+    model_deleted: str = "Model deleted: {model_name}"
+    # /model add (success) — {model_name}
+    model_added: str = "Model added: {model_name}"
     # /model (error) — {error}
     model_error: str = "Error updating model: {error}"
     # /model (choice invalid) — {choice_number}
