@@ -282,13 +282,6 @@ class TipsConfig(Base):
     # /model (choice invalid) — {choice_number}
     model_choice_invalid: str = "Invalid choice number: {choice_number}"
     # /session — usage shown when subcommand is unknown or missing
-    session_usage: str = (
-        "Usage:\n"
-        "  /session              — List saved sessions\n"
-        "  /session save <name>  — Save current session\n"
-        "  /session load <name>  — Load a saved session\n"
-        "  /session delete <name> — Delete a saved session"
-    )
     # /session save — success — {name}
     session_saved: str = "Session saved as '{name}'."
     # /session load — success — {name}
@@ -298,9 +291,9 @@ class TipsConfig(Base):
     # /session save/load — invalid name — {name}, {reason}
     session_invalid_name: str = "Invalid session name '{name}': {reason}."
     # /session list — no saves exist
-    session_list_empty: str = "No saved sessions."
+    session_list_empty: str = "No saved sessions.\nUsage:\n  /session save/load/delete <name>"
     # /session list — {items} (pre-formatted bullet list)
-    session_list: str = "Saved sessions:\n{items}"
+    session_list: str = "Saved sessions:\n{items}\n\nUsage:\n  /session save/load/delete <name>"
     # /sid — {channel}, {chat_id}, {session_key}
     sid_info: str = (
         "🐈 Session Identity\nChannel: {channel}\nChat ID: {chat_id}\nSession Key: {session_key}"
