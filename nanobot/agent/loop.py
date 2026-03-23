@@ -877,6 +877,19 @@ class AgentLoop:
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under the global lock."""
+        if msg.content.strip().lower() == "/busy":
+            is_busy = self._processing_lock.locked()
+            status = "🔴 Busy" if is_busy else "🟢 Idle"
+            logs = (
+                "\n".join(list(self._recent_logs)[-5:]) if self._recent_logs else "(no recent logs)"
+            )
+            await OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"{status}\n\nRecent logs:\n{logs}",
+            )
+            return
+
         async with self._processing_lock:
             try:
                 response = await self._process_message(msg)
@@ -1003,15 +1016,6 @@ class AgentLoop:
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self.tips.help,
-            )
-        if cmd == "/busy":
-            is_busy = self._processing_lock.locked()
-            status = "🔴 Busy" if is_busy else "🟢 Idle"
-            logs = "\n".join(list(self._recent_logs)[-5:]) if self._recent_logs else "(no recent logs)"
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=f"{status}\n\nRecent logs:\n{logs}",
             )
         if cmd == "/consolidate":
             changed = await self.memory_consolidator.maybe_consolidate_by_tokens(
