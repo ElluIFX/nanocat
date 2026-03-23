@@ -225,7 +225,7 @@ class LiteLLMProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
@@ -259,8 +259,10 @@ class LiteLLMProvider(LLMProvider):
                 self._sanitize_empty_content(messages), extra_keys=extra_msg_keys
             ),
             "max_tokens": max_tokens,
-            "temperature": temperature,
         }
+
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         if self._gateway:
             kwargs.update(self._gateway.litellm_kwargs)

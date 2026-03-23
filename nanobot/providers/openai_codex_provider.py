@@ -30,7 +30,7 @@ class OpenAICodexProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:

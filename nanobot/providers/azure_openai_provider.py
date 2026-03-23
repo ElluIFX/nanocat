@@ -86,7 +86,7 @@ class AzureOpenAIProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 4096,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -99,7 +99,7 @@ class AzureOpenAIProvider(LLMProvider):
             "max_completion_tokens": max(1, max_tokens),  # Azure API 2024-10-21 uses max_completion_tokens
         }
 
-        if self._supports_temperature(deployment_name, reasoning_effort):
+        if temperature is not None and self._supports_temperature(deployment_name, reasoning_effort):
             payload["temperature"] = temperature
 
         if reasoning_effort:
@@ -117,7 +117,7 @@ class AzureOpenAIProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:

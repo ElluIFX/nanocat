@@ -61,7 +61,7 @@ class GenerationSettings:
     passing explicit keyword arguments to chat() / chat_with_retry().
     """
 
-    temperature: float = 0.7
+    temperature: float | None = 0.7
     max_tokens: int = 4096
     reasoning_effort: str | None = None
 
@@ -168,7 +168,7 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
