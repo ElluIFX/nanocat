@@ -883,10 +883,12 @@ class AgentLoop:
             logs = (
                 "\n".join(list(self._recent_logs)[-5:]) if self._recent_logs else "(no recent logs)"
             )
-            await OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=f"{status}\n\nRecent logs:\n{logs}",
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"{status}\n\nRecent logs:\n{logs}",
+                )
             )
             return
 
