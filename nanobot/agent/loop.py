@@ -831,7 +831,7 @@ class AgentLoop:
             deleted = self.sessions.delete_named(session.key, name)
             if not deleted:
                 return _reply(self.tips.session_not_found.format(name=name))
-            return _reply(f"Session '{name}' deleted.")
+            return _reply(self.tips.session_deleted.format(name=name))
 
         return _reply(self.tips.session_usage)
 

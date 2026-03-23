@@ -286,6 +286,8 @@ class TipsConfig(Base):
     session_saved: str = "Session saved as '{name}'."
     # /session load — success — {name}
     session_loaded: str = "Session '{name}' loaded."
+    # /session delete — success — {name}
+    session_deleted: str = "Session '{name}' deleted."
     # /session load — not found — {name}
     session_not_found: str = "No saved session named '{name}'."
     # /session save/load — invalid name — {name}, {reason}
