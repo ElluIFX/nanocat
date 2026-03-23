@@ -698,10 +698,6 @@ class AgentLoop:
                     for i, model in enumerate(config.agents.defaults.model_choice)
                 ]
             )
-            provider_name = self.provider.name
-            model_name = self.model
-            if model_name.startswith(provider_name + "/"):
-                model_name = model_name[len(provider_name) + 1 :]
 
             # If digit provided, switch model
             if parts and parts[0].isdigit():
@@ -744,8 +740,10 @@ class AgentLoop:
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self.tips.model_info.format(
-                    model_name=model_name,
-                    provider_name=provider_name,
+                    main_model=self.model,
+                    max_model=config.agents.defaults.max_model,
+                    assistant_model=self.assistant_model,
+                    provider_name=self.provider.name,
                     model_choice=choices,
                 ),
             )

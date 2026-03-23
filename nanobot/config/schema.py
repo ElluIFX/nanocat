@@ -266,7 +266,10 @@ class TipsConfig(Base):
     )
     # /model (no args) — {model_name}, {provider_name}
     model_info: str = (
-        "🐈 Current model: {model_name}\n"
+        "🐈 Model info\n"
+        "Main Model: {main_model}\n"
+        "Max Model: {max_model}\n"
+        "Assistant Model: {assistant_model}\n"
         "Provider: {provider_name}\n\n"
         "Available models:\n{model_choice}\n"
         "Usage:\n/model <provider> <model_name>\n"
