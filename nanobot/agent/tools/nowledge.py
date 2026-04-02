@@ -336,7 +336,7 @@ class ReadWorkingMemoryTool(Tool):
             "properties": {
                 "timeout": {
                     "type": "integer",
-                    "description": "Just set to 5, unused",
+                    "description": "Just set to 5",
                     "default": 5,
                 },
             },
