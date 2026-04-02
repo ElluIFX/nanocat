@@ -331,9 +331,17 @@ class ReadWorkingMemoryTool(Tool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {}
+        return {
+            "type": "object",
+            "properties": {
+                "timeout": {
+                    "type": "integer",
+                    "description": "Just set to 5, unused",
+                }
+            },
+        }
 
-    async def execute(self, **_: Any) -> str:
+    async def execute(self, timeout: int, **_: Any) -> str:
         content = await self._client.get_working_memory()
         if not content:
             return "Working memory is empty."
