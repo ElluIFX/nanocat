@@ -331,10 +331,7 @@ class ReadWorkingMemoryTool(Tool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {},
-        }
+        return {}
 
     async def execute(self, **_: Any) -> str:
         content = await self._client.get_working_memory()
