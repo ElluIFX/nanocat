@@ -527,7 +527,6 @@ class NowledgeClient:
                 return r.json() or []
         except Exception:
             logger.warning("Nowledge memory search failed")
-            logger.error(traceback.format_exc())
             return []
 
     async def get_memory(self, memory_id: str) -> dict:

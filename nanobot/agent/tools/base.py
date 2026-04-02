@@ -128,6 +128,8 @@ class Tool(ABC):
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         """Validate tool parameters against JSON schema. Returns error list (empty if valid)."""
+        if params is None:
+            params = {}
         if not isinstance(params, dict):
             return [f"parameters must be an object, got {type(params).__name__}"]
         schema = self.parameters or {}
