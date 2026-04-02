@@ -337,11 +337,13 @@ class ReadWorkingMemoryTool(Tool):
                 "timeout": {
                     "type": "integer",
                     "description": "Just set to 5, unused",
-                }
+                    "default": 5,
+                },
             },
+            "required": ["timeout"],
         }
 
-    async def execute(self, timeout: int, **_: Any) -> str:
+    async def execute(self, timeout: int = 5, **_: Any) -> str:
         content = await self._client.get_working_memory()
         if not content:
             return "Working memory is empty."
