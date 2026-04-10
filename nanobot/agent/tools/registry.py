@@ -1,11 +1,9 @@
 """Tool registry for dynamic tool management."""
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from nanobot.agent.skills import SkillsLoader
 from nanobot.agent.tools.base import Tool
-
-if TYPE_CHECKING:
-    from nanobot.agent.skills import SkillsLoader
 
 
 class ToolRegistry:
@@ -43,7 +41,7 @@ class ToolRegistry:
         name: str,
         params: dict[str, Any],
         bypass_safety_check: bool = False,
-        fallback_skill_loader: "SkillsLoader" | None = None,
+        fallback_skill_loader: SkillsLoader | None = None,
     ) -> str:
         """Execute a tool by name with given parameters."""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
