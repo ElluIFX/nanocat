@@ -51,7 +51,7 @@ class ToolRegistry:
             if fallback_skill_loader:
                 skill = fallback_skill_loader.load_skill(name)
                 if skill:
-                    return f"Error: You can't execute a skill as a tool. The description of the skill is:\n{skill}"
+                    return f"Error: You can't execute the skill `{name}` as a tool. The description of the skill is:\n{skill}"
             return f"Error: Tool '{name}' not found."
 
         # Temporarily disable safety checks if bypass is active
