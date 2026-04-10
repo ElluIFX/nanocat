@@ -3,7 +3,9 @@
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
-
+from typing import TYPE_CHECKING
+if TYPE_CHECKING：
+ from nanobot.agent.skills import SkillsLoader
 
 class ToolRegistry:
     """
@@ -35,13 +37,17 @@ class ToolRegistry:
         """Get all tool definitions in OpenAI format."""
         return [tool.to_schema() for tool in self._tools.values()]
 
-    async def execute(self, name: str, params: dict[str, Any], bypass_safety_check: bool = False) -> str:
+    async def execute(self, name: str, params: dict[str, Any], bypass_safety_check: bool = False, fallback_skill_loader: "SkillsLoader" | None = None) -> str:
         """Execute a tool by name with given parameters."""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
         if not tool:
-            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}. Check if it is a Skill, not a Tool."
+            if fallback_skill_loader:
+                skill = fallback_skill_loader.load_skill(name)
+                if skill:
+                    return f"Error: You can't execute a skill as a tool. The description of the skill is:\n{skill}"
+            return f"Error: Tool '{name}' not found."
 
         # Temporarily disable safety checks if bypass is active
         _saved: list[tuple[str, Any]] = []

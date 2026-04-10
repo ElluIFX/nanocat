@@ -513,7 +513,7 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.debug(f"Tool call: {tool_call.name}({args_str})")
                     result = await self.tools.execute(
-                        tool_call.name, tool_call.arguments, bypass_safety_check
+                        tool_call.name, tool_call.arguments, bypass_safety_check, self.context.skills
                     )
                     result = self._intercept_oversized_image(result)
                     result_str = str(result)
