@@ -247,7 +247,11 @@ class TodoTool(Tool):
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
-        return f"Task {index} updated to {status}"
+        if status != "COMPLETED":
+            return f"Task {index} updated to {status}"
+        if index + 1 >= len(todo.tasks):
+            return f"Task {index} updated to COMPLETED, all tasks completed"
+        return f"Task {index} updated to COMPLETED, next task is #{index + 1} {todo.tasks[index + 1].task}"
 
     async def _append(
         self, id: str | None = None, task: str | None = None, notify: bool = False, **_: Any
