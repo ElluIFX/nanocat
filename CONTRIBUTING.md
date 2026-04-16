@@ -77,9 +77,6 @@ cd nanobot
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
-pytest
-
 # Lint code
 ruff check nanobot/
 
@@ -104,7 +101,7 @@ In practice:
 - Line length: 100 characters (`ruff`)
 - Target: Python 3.11+
 - Linting: `ruff` with rules E, F, I, N, W (E501 ignored)
-- Async: uses `asyncio` throughout; pytest with `asyncio_mode = "auto"`
+- Async: uses `asyncio` throughout
 - Prefer readable code over magical code
 - Prefer focused patches over broad rewrites
 - If a new abstraction is introduced, it should clearly reduce complexity rather than move it around

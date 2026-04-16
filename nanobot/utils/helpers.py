@@ -208,8 +208,6 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     (workspace / "skills").mkdir(exist_ok=True)
 
     if added and not silent:
-        from rich.console import Console
-
         for name in added:
-            Console().print(f"  [dim]Created {name}[/dim]")
+            print(f"Created {name}")
     return added

@@ -100,7 +100,7 @@
 - [Agent Social Network](#-agent-social-network)
 - [Configuration](#️-configuration)
 - [Multiple Instances](#-multiple-instances)
-- [CLI Reference](#-cli-reference)
+- [Runtime Reference](#runtime-reference)
 - [Docker](#-docker)
 - [Linux Service](#-linux-service)
 - [Project Structure](#-project-structure)
@@ -158,21 +158,14 @@ pip install nanobot-ai
 
 ```bash
 pip install -U nanobot-ai
-nanobot --version
+nanobot
 ```
 
 **uv**
 
 ```bash
 uv tool upgrade nanobot-ai
-nanobot --version
-```
-
-**Using WhatsApp?** Rebuild the local bridge after upgrading:
-
-```bash
-rm -rf ~/.nanobot/bridge
-nanobot channels login
+nanobot
 ```
 
 ## 🚀 Quick Start
@@ -184,14 +177,12 @@ nanobot channels login
 > For other LLM providers, please see the [Providers](#providers) section.
 >
 > For web search capability setup, please see [Web Search](#web-search).
+>
+> Create `~/.nanobot/config.json` and `~/.nanobot/workspace/` manually before first run.
+>
+> The runtime launcher reads the default config path directly; this repository no longer provides CLI setup commands.
 
-**1. Initialize**
-
-```bash
-nanobot onboard
-```
-
-**2. Configure** (`~/.nanobot/config.json`)
+**1. Configure** (`~/.nanobot/config.json`)
 
 Add or merge these **two parts** into your config (other options have defaults).
 
@@ -218,10 +209,10 @@ Add or merge these **two parts** into your config (other options have defaults).
 }
 ```
 
-**3. Chat**
+**2. Run**
 
 ```bash
-nanobot agent
+nanobot
 ```
 
 That's it! You have a working AI assistant in 2 minutes.
@@ -274,7 +265,7 @@ Connect nanobot to your favorite chat platform. Want to build your own? See the 
 **3. Run**
 
 ```bash
-nanobot gateway
+nanobot
 ```
 
 </details>
@@ -294,10 +285,10 @@ Read https://raw.githubusercontent.com/HKUDS/MoChat/refs/heads/main/skills/nanob
 
 nanobot will automatically register, configure `~/.nanobot/config.json`, and connect to Mochat.
 
-**2. Restart gateway**
+**2. Start runtime**
 
 ```bash
-nanobot gateway
+nanobot
 ```
 
 That's it — nanobot handles the rest!
@@ -457,14 +448,7 @@ nanobot gateway
 
 Requires **Node.js ≥18**.
 
-**1. Link device**
-
-```bash
-nanobot channels login
-# Scan QR with WhatsApp → Settings → Linked Devices
-```
-
-**2. Configure**
+Configure the WhatsApp channel in `~/.nanobot/config.json` and make sure the external bridge is already installed and linked before starting the runtime.
 
 ```json
 {
@@ -477,19 +461,7 @@ nanobot channels login
 }
 ```
 
-**3. Run** (two terminals)
-
-```bash
-# Terminal 1
-nanobot channels login
-
-# Terminal 2
-nanobot gateway
-```
-
-> WhatsApp bridge updates are not applied automatically for existing installations.
-> After upgrading nanobot, rebuild the local bridge with:
-> `rm -rf ~/.nanobot/bridge && nanobot channels login`
+> This repository no longer provides a built-in CLI flow for bridge login or QR linking.
 
 </details>
 
@@ -532,7 +504,7 @@ Uses **WebSocket** long connection — no public IP required.
 **3. Run**
 
 ```bash
-nanobot gateway
+nanobot
 ```
 
 > [!TIP]
@@ -619,7 +591,7 @@ Uses **Stream Mode** — no public IP required.
 **3. Run**
 
 ```bash
-nanobot gateway
+nanobot
 ```
 
 </details>
@@ -712,7 +684,7 @@ Give nanobot its own email account. It polls **IMAP** for incoming mail and repl
 **3. Run**
 
 ```bash
-nanobot gateway
+nanobot
 ```
 
 </details>
@@ -802,20 +774,15 @@ Config file: `~/.nanobot/config.json`
 | `zhipu` | LLM (Zhipu GLM) | [open.bigmodel.cn](https://open.bigmodel.cn) |
 | `ollama` | LLM (local, Ollama) | — |
 | `vllm` | LLM (local, any OpenAI-compatible server) | — |
-| `openai_codex` | LLM (Codex, OAuth) | `nanobot provider login openai-codex` |
-| `github_copilot` | LLM (GitHub Copilot, OAuth) | `nanobot provider login github-copilot` |
+| `openai_codex` | LLM (Codex, OAuth) | external OAuth token flow |
+| `github_copilot` | LLM (GitHub Copilot, OAuth) | external OAuth token flow |
 
 <details>
 <summary><b>OpenAI Codex (OAuth)</b></summary>
 
 Codex uses OAuth instead of API keys. Requires a ChatGPT Plus or Pro account.
 
-**1. Login:**
-```bash
-nanobot provider login openai-codex
-```
-
-**2. Set model** (merge into `~/.nanobot/config.json`):
+Set the model in `~/.nanobot/config.json` after completing an external OAuth token flow compatible with `oauth_cli_kit`:
 ```json
 {
   "agents": {
@@ -826,18 +793,7 @@ nanobot provider login openai-codex
 }
 ```
 
-**3. Chat:**
-```bash
-nanobot agent -m "Hello!"
-
-# Target a specific workspace/config locally
-nanobot agent -c ~/.nanobot-telegram/config.json -m "Hello!"
-
-# One-off workspace override on top of that config
-nanobot agent -c ~/.nanobot-telegram/config.json -w /tmp/nanobot-telegram-test -m "Hello!"
-```
-
-> Docker users: use `docker run -it` for interactive OAuth login.
+> This repository no longer provides a built-in CLI login command for Codex OAuth.
 
 </details>
 
@@ -1167,72 +1123,13 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 
 ## 🧩 Multiple Instances
 
-Run multiple nanobot instances simultaneously with separate configs and runtime data. Use `--config` as the main entrypoint. Optionally pass `--workspace` during `onboard` when you want to initialize or update the saved workspace for a specific instance.
-
-### Quick Start
-
-If you want each instance to have its own dedicated workspace from the start, pass both `--config` and `--workspace` during onboarding.
-
-**Initialize instances:**
-
-```bash
-# Create separate instance configs and workspaces
-nanobot onboard --config ~/.nanobot-telegram/config.json --workspace ~/.nanobot-telegram/workspace
-nanobot onboard --config ~/.nanobot-discord/config.json --workspace ~/.nanobot-discord/workspace
-nanobot onboard --config ~/.nanobot-feishu/config.json --workspace ~/.nanobot-feishu/workspace
-```
-
-**Configure each instance:**
-
-Edit `~/.nanobot-telegram/config.json`, `~/.nanobot-discord/config.json`, etc. with different channel settings. The workspace you passed during `onboard` is saved into each config as that instance's default workspace.
-
-**Run instances:**
-
-```bash
-# Instance A - Telegram bot
-nanobot gateway --config ~/.nanobot-telegram/config.json
-
-# Instance B - Discord bot  
-nanobot gateway --config ~/.nanobot-discord/config.json
-
-# Instance C - Feishu bot with custom port
-nanobot gateway --config ~/.nanobot-feishu/config.json --port 18792
-```
-
-### Path Resolution
-
-When using `--config`, nanobot derives its runtime data directory from the config file location. The workspace still comes from `agents.defaults.workspace` unless you override it with `--workspace`.
-
-To open a CLI session against one of these instances locally:
-
-```bash
-nanobot agent -c ~/.nanobot-telegram/config.json -m "Hello from Telegram instance"
-nanobot agent -c ~/.nanobot-discord/config.json -m "Hello from Discord instance"
-
-# Optional one-off workspace override
-nanobot agent -c ~/.nanobot-telegram/config.json -w /tmp/nanobot-telegram-test
-```
-
-> `nanobot agent` starts a local CLI agent using the selected workspace/config. It does not attach to or proxy through an already running `nanobot gateway` process.
-
-| Component | Resolved From | Example |
-|-----------|---------------|---------|
-| **Config** | `--config` path | `~/.nanobot-A/config.json` |
-| **Workspace** | `--workspace` or config | `~/.nanobot-A/workspace/` |
-| **Cron Jobs** | config directory | `~/.nanobot-A/cron/` |
-| **Media / runtime state** | config directory | `~/.nanobot-A/media/` |
-
-### How It Works
-
-- `--config` selects which config file to load
-- By default, the workspace comes from `agents.defaults.workspace` in that config
-- If you pass `--workspace`, it overrides the workspace from the config file
+This repository now ships a single default runtime entrypoint. If you want multiple isolated instances, use separate config directories and provide your own wrapper around `nanobot.runtime.launcher`.
 
 ### Minimal Setup
 
-1. Copy your base config into a new instance directory.
-2. Set a different `agents.defaults.workspace` for that instance.
-3. Start the instance with `--config`.
+1. Create a separate config directory for each instance.
+2. Set a different `agents.defaults.workspace` in each config.
+3. Launch each instance through your own wrapper or environment-specific entrypoint.
 
 Example config:
 
@@ -1256,19 +1153,6 @@ Example config:
 }
 ```
 
-Start separate instances:
-
-```bash
-nanobot gateway --config ~/.nanobot-telegram/config.json
-nanobot gateway --config ~/.nanobot-discord/config.json
-```
-
-Override workspace for one-off runs when needed:
-
-```bash
-nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobot-telegram-test
-```
-
 ### Common Use Cases
 
 - Run separate bots for Telegram, Discord, Feishu, and other platforms
@@ -1278,37 +1162,23 @@ nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobo
 
 ### Notes
 
-- Each instance must use a different port if they run at the same time
+- Each instance should use a separate config directory if they run at the same time
 - Use a different workspace per instance if you want isolated memory, sessions, and skills
-- `--workspace` overrides the workspace defined in the config file
 - Cron jobs and runtime media/state are derived from the config directory
 
-## 💻 CLI Reference
+## Runtime Reference
 
-| Command | Description |
-|---------|-------------|
-| `nanobot onboard` | Initialize config & workspace at `~/.nanobot/` |
-| `nanobot onboard -c <config> -w <workspace>` | Initialize or refresh a specific instance config and workspace |
-| `nanobot agent -m "..."` | Chat with the agent |
-| `nanobot agent -w <workspace>` | Chat against a specific workspace |
-| `nanobot agent -w <workspace> -c <config>` | Chat against a specific workspace/config |
-| `nanobot agent` | Interactive chat mode |
-| `nanobot agent --no-markdown` | Show plain-text replies |
-| `nanobot agent --logs` | Show runtime logs during chat |
-| `nanobot gateway` | Start the gateway |
-| `nanobot status` | Show status |
-| `nanobot provider login openai-codex` | OAuth login for providers |
-| `nanobot channels login` | Link WhatsApp (scan QR) |
-| `nanobot channels status` | Show channel status |
-
-Interactive mode exits: `exit`, `quit`, `/exit`, `/quit`, `:q`, or `Ctrl+D`.
+| Command             | Description                                 |
+|---------------------|---------------------------------------------|
+| `nanobot`           | Start the runtime                           |
+| `python -m nanobot` | Start the same runtime via module execution |
 
 <details>
 <summary><b>Heartbeat (Periodic Tasks)</b></summary>
 
-The gateway wakes up every 30 minutes and checks `HEARTBEAT.md` in your workspace (`~/.nanobot/workspace/HEARTBEAT.md`). If the file has tasks, the agent executes them and delivers results to your most recently active chat channel.
+The runtime wakes up every 30 minutes and checks `HEARTBEAT.md` in your workspace (`~/.nanobot/workspace/HEARTBEAT.md`). If the file has tasks, the agent executes them and delivers results to your most recently active chat channel.
 
-**Setup:** edit `~/.nanobot/workspace/HEARTBEAT.md` (created automatically by `nanobot onboard`):
+**Setup:** edit `~/.nanobot/workspace/HEARTBEAT.md`:
 
 ```markdown
 ## Periodic Tasks
@@ -1319,7 +1189,7 @@ The gateway wakes up every 30 minutes and checks `HEARTBEAT.md` in your workspac
 
 The agent can also manage this file itself — ask it to "add a periodic task" and it will update `HEARTBEAT.md` for you.
 
-> **Note:** The gateway must be running (`nanobot gateway`) and you must have chatted with the bot at least once so it knows which channel to deliver to.
+> **Note:** The runtime must be running (`nanobot`) and you must have chatted with the bot at least once so it knows which channel to deliver to.
 
 </details>
 
@@ -1328,38 +1198,17 @@ The agent can also manage this file itself — ask it to "add a periodic task" a
 > [!TIP]
 > The `-v ~/.nanobot:/root/.nanobot` flag mounts your local config directory into the container, so your config and workspace persist across container restarts.
 
-### Docker Compose
-
-```bash
-docker compose run --rm nanobot-cli onboard   # first-time setup
-vim ~/.nanobot/config.json                     # add API keys
-docker compose up -d nanobot-gateway           # start gateway
-```
-
-```bash
-docker compose run --rm nanobot-cli agent -m "Hello!"   # run CLI
-docker compose logs -f nanobot-gateway                   # view logs
-docker compose down                                      # stop
-```
-
 ### Docker
 
 ```bash
 # Build the image
 docker build -t nanobot .
 
-# Initialize config (first time only)
-docker run -v ~/.nanobot:/root/.nanobot --rm nanobot onboard
-
-# Edit config on host to add API keys
+# Edit config on host to add API keys and workspace path
 vim ~/.nanobot/config.json
 
-# Run gateway (connects to enabled channels, e.g. Telegram/Discord/Mochat)
-docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 nanobot gateway
-
-# Or run a single command
-docker run -v ~/.nanobot:/root/.nanobot --rm nanobot agent -m "Hello!"
-docker run -v ~/.nanobot:/root/.nanobot --rm nanobot status
+# Run runtime (connects to enabled channels, e.g. Telegram/Discord/Mochat)
+docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 nanobot
 ```
 
 ## 🐧 Linux Service
@@ -1381,7 +1230,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/nanobot gateway
+ExecStart=%h/.local/bin/nanobot
 Restart=always
 RestartSec=10
 NoNewPrivileges=yes
@@ -1434,7 +1283,7 @@ nanobot/
 ├── providers/      # 🤖 LLM providers (OpenRouter, etc.)
 ├── session/        # 💬 Conversation sessions
 ├── config/         # ⚙️ Configuration
-└── cli/            # 🖥️ Commands
+└── runtime/        # 🚀 Non-CLI runtime bootstrap
 ```
 
 ## 🤝 Contribute & Roadmap

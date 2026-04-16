@@ -792,9 +792,9 @@ class AgentLoop:
                 )
             full_model = config.agents.defaults.model_choice[choice_number - 1]
             try:
-                from nanobot.cli.commands import _make_provider
+                from nanobot.runtime.launcher import make_provider
 
-                new_provider = _make_provider(config, override_model=full_model)
+                new_provider = make_provider(config, override_model=full_model)
                 if self.assistant_model == self.model:
                     self.assistant_model = full_model
                 self.model = full_model
@@ -1103,11 +1103,11 @@ class AgentLoop:
             max_model = config.agents.defaults.max_model
             if max_model:
                 try:
-                    from nanobot.cli.commands import _make_provider
+                    from nanobot.runtime.launcher import make_provider
 
                     _max_restore = (self.model, self.provider)
                     self.model = max_model
-                    self.provider = _make_provider(config, override_model=max_model)
+                    self.provider = make_provider(config, override_model=max_model)
                 except Exception as e:
                     return OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id, content=f"Error: {e}"

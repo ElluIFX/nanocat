@@ -8,6 +8,7 @@ from typing import Any, Literal
 from loguru import logger
 from pydantic import Field
 from telegram import BotCommand, InputFile, MessageEntity, ReplyParameters, Update
+from telegram.error import NetworkError, TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 from telegramify_markdown import convert, split_entities, telegramify
@@ -172,6 +173,7 @@ class TelegramChannel(BaseChannel):
         await self._app.updater.start_polling(
             allowed_updates=["message"],
             drop_pending_updates=True,  # Ignore old messages on startup
+            error_callback=self._on_polling_error,
         )
 
         # Keep running until stopped
@@ -715,8 +717,22 @@ class TelegramChannel(BaseChannel):
             logger.debug("Typing indicator stopped for {}: {}", chat_id, e)
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log polling / handler errors instead of silently swallowing them."""
-        logger.error("Telegram error: {}", context.error)
+        """Log handler errors without dumping tracebacks to the terminal."""
+        error = context.error
+        if isinstance(error, NetworkError):
+            logger.warning("Telegram handler network error: {}", error)
+            return
+        if isinstance(error, TelegramError):
+            logger.warning("Telegram handler error: {}", error)
+            return
+        logger.warning("Telegram handler unexpected error: {}", error)
+
+    def _on_polling_error(self, error: TelegramError) -> None:
+        """Handle updater polling errors without PTB's default traceback logging."""
+        if isinstance(error, NetworkError):
+            logger.debug("Telegram polling network error: {}", error)
+            return
+        logger.warning("Telegram polling error: {}", error)
 
     def _get_extension(
         self,

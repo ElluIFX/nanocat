@@ -513,7 +513,6 @@ class ListDirTool(_FsTool):
         "build",
         ".tox",
         ".mypy_cache",
-        ".pytest_cache",
         ".ruff_cache",
         ".coverage",
         "htmlcov",

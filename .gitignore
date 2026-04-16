@@ -18,7 +18,6 @@ build/
 venv/
 __pycache__/
 poetry.lock
-.pytest_cache/
 botpy.log
 nano.*.save
 .DS_Store
