@@ -41,6 +41,9 @@ class AgentDefaults(Base):
     subagent_model: str | None = (
         None  # model for subagents (spawn / delegate); None → assistant_model → model
     )
+    vision_model: str | None = (
+        None  # model for ParseImageTool / adaptive image loading; None → assistant_model → model
+    )
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     max_tokens: int | None = 8192
     context_window_tokens: int = 65_536

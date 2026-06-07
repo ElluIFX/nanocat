@@ -43,6 +43,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.todo import TodoTool
+from nanobot.agent.tools.vision import ParseImageTool
 from nanobot.agent.tools.wait import WaitTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -240,6 +241,7 @@ class AgentLoop:
                 safety_check=fs_safety,
             )
         )
+        self.tools.register(ParseImageTool(workspace=str(self.workspace)))
         for cls in (
             WriteFileTool,
             EditFileTool,

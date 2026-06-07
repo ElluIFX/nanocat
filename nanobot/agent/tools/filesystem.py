@@ -166,9 +166,21 @@ class ReadFileTool(_FsTool):
 
 
 class LoadImageTool(_FsTool):
-    """Load image content from file and include EXIF metadata."""
+    """Load image content from file and include EXIF metadata.
+
+    When the currently-active model lacks native vision (e.g. DeepSeek) the
+    tool delegates to a vision-capable model via ParseImageTool's backend.
+    """
 
     _MAX_BYTES = 12 * 1024 * 1024  # 12MB
+
+    @staticmethod
+    def _is_vision_lacking_model() -> bool:
+        """Return True when the active main model cannot process images natively."""
+        from nanobot.config.loader import get_runtime_config
+
+        model = get_runtime_config().agents.defaults.model.lower()
+        return "deepseek" in model
 
     @property
     def name(self) -> str:
@@ -201,12 +213,21 @@ class LoadImageTool(_FsTool):
     async def execute(
         self, path: str, compress: bool = False, **kwargs: Any
     ) -> str | list[dict[str, Any]]:
+        from nanobot.agent.tools.vision import parse_image_via_model
+
+        fp = self._resolve(path)
+        if not fp.exists():
+            return f"Error: File not found: {path}"
+        if not fp.is_file():
+            return f"Error: Not a file: {path}"
+
+        # When the current model lacks native vision, delegate to a vision model.
+        if self._is_vision_lacking_model():
+            return await parse_image_via_model(
+                str(fp), str(self._workspace) if self._workspace else None
+            )
+
         try:
-            fp = self._resolve(path)
-            if not fp.exists():
-                return f"Error: File not found: {path}"
-            if not fp.is_file():
-                return f"Error: Not a file: {path}"
 
             raw = fp.read_bytes()
             if not raw:
