@@ -143,9 +143,8 @@ class Session:
 class SessionManager:
     """Manages per-channel multi-session storage under {workspace}/sessions/."""
 
-    def __init__(self, workspace: Path):
-        self.workspace = workspace
-        self.sessions_dir = ensure_dir(self.workspace / "sessions")
+    def __init__(self, sessions_root: Path):
+        self.sessions_dir = ensure_dir(sessions_root)
         self._system_dir = ensure_dir(self.sessions_dir / "_system")
         self._cache: dict[str, Session] = {}
         self._name_generator: NameGenerator | None = None

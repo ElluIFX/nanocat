@@ -15,7 +15,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager
 from nanobot.config.loader import load_config, set_config_path
-from nanobot.config.paths import get_cron_dir
+from nanobot.config.paths import get_cron_dir, get_sessions_dir
 from nanobot.config.schema import Config
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob
@@ -74,7 +74,7 @@ def build_runtime(
     sync_workspace_templates(config.workspace_path, silent=True)
 
     bus = MessageBus()
-    session_manager = SessionManager(config.workspace_path)
+    session_manager = SessionManager(get_sessions_dir())
     cron = CronService(get_cron_dir() / "jobs.json")
 
     agent = AgentLoop(

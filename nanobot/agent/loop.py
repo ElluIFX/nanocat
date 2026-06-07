@@ -101,7 +101,9 @@ class AgentLoop:
             config.workspace_path,
             nowledge_enabled=_nowledge_cfg.enabled,
         )
-        self.sessions = session_manager or SessionManager(config.workspace_path)
+        from nanobot.config.paths import get_sessions_dir
+
+        self.sessions = session_manager or SessionManager(get_sessions_dir())
         self.sessions.set_name_generator(self._generate_session_name)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(

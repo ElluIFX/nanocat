@@ -45,6 +45,11 @@ def get_restart_notify_path() -> Path:
     return get_data_dir() / ".pending_restart_notify.json"
 
 
+def get_sessions_dir() -> Path:
+    """Return the sessions storage directory."""
+    return get_runtime_subdir("sessions")
+
+
 def get_legacy_sessions_dir() -> Path:
     """Return the legacy global session directory used for migration fallback."""
     return Path.home() / ".nanobot" / "sessions"
