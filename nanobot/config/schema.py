@@ -39,7 +39,7 @@ class AgentDefaults(Base):
         None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
     )
     subagent_model: str | None = (
-        None  # model for subagents (spawn / delegate); None → assistant_model → model
+        None  # model for subagents (spawn / gather); None → assistant_model → model
     )
     vision_model: str | None = (
         None  # model for ParseImageTool / adaptive image loading; None → assistant_model → model

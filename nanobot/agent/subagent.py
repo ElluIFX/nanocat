@@ -18,7 +18,7 @@ from nanobot.utils.helpers import build_assistant_message
 # scheduling, and Nowledge memory operations.
 _SUBAGENT_EXCLUDED = frozenset({
     "spawn",
-    "delegate",
+    "gather",
     "message",
     "cron",
     "memory_search",

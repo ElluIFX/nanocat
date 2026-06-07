@@ -1,4 +1,4 @@
-"""Delegate tool for inline subagent execution with result collection."""
+"""Gather tool for inline subagent execution with result collection."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -8,15 +8,15 @@ if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
 
 
-class DelegateTool(Tool):
-    """Tool to delegate tasks to subagents and collect their results inline."""
+class GatherTool(Tool):
+    """Tool to gather results from concurrent subagents — blocks until all finish."""
 
     def __init__(self, manager: "SubagentManager"):
         self._manager = manager
 
     @property
     def name(self) -> str:
-        return "delegate"
+        return "gather"
 
     @property
     def description(self) -> str:
@@ -59,7 +59,7 @@ class DelegateTool(Tool):
         task_tuples = [(t["task"], t.get("label")) for t in tasks]
         results = await self._manager.run_and_collect(task_tuples)
 
-        parts = [f"Delegate results ({len(results)} task{'s' if len(results) != 1 else ''}):"]
+        parts = [f"Gather results ({len(results)} task{'s' if len(results) != 1 else ''}):"]
         for i, r in enumerate(results, 1):
             status_tag = "OK" if r["status"] == "ok" else "ERROR"
             parts.append(f"\n[{i}] {r['label']} — {status_tag}\n{r['result']}")

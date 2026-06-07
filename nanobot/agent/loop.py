@@ -27,7 +27,7 @@ from nanobot.agent.memory import (
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
-from nanobot.agent.tools.delegate import DelegateTool
+from nanobot.agent.tools.gather import GatherTool
 from nanobot.agent.tools.filesystem import (
     DeleteLinesTool,
     EditFileTool,
@@ -268,7 +268,7 @@ class AgentLoop:
         self.tools.register(WaitTool(send_callback=self.bus.publish_outbound))
         self.tools.register(TodoTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
-        self.tools.register(DelegateTool(manager=self.subagents))
+        self.tools.register(GatherTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
         if self.nowledge_client:

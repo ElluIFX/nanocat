@@ -32,7 +32,7 @@ class SpawnTool(Tool):
         return (
             "Spawn a subagent to run a task in the background — returns immediately without waiting. "
             "The subagent reports back when done. Use for fire-and-forget work that doesn't block the current turn. "
-            "Use delegate instead if you need the results now."
+            "Use gather instead if you need the results now."
         )
 
     @property
