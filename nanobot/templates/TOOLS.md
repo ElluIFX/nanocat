@@ -3,28 +3,17 @@
 Tool signatures are provided automatically via function calling.
 This file documents non-obvious constraints and usage patterns.
 
-## exec — Safety Limits
+## exec
 
-- Commands have a configurable timeout (default 60s)
-- Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)
-- Output is truncated at 10,000 characters
+- Blocked: `rm -rf`, `shutdown`, `format`, `dd`, fork bombs, `curl|sh`, and similar dangerous patterns.
 
-## cron — Scheduled Reminders
+## cron
 
 - Please refer to cron skill for usage.
 
-## spawn — Background Subagent
+## gather
 
-- Starts a subagent in the background and returns immediately; the main agent continues its work.
-- When the subagent finishes, the result is injected as a new message that re-invokes the main agent.
-- Use when: the result is not needed right away and the task can run independently.
-
-## gather — Inline Subagents
-
-- Launches a set of subagents concurrently and blocks until all finish, returning their results directly as the tool call response.
 - The subagents' full execution context (tool call history) never enters the main agent's context — only the final results are returned.
-- Use when: you need the results before deciding the next step, want to parallelize independent subtasks, and want to keep the main context lean.
-- Key difference from spawn: spawn is async fire-and-forget (result arrives later as a new message); gather is synchronous aggregation (results returned in the current turn).
 
 ## Subagent Task Prompt Best Practices
 
