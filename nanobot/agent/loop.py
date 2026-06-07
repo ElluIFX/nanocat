@@ -90,6 +90,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         assistant_model: str | None = None,
+        subagent_model: str | None = None,
         max_iterations: int = 40,
         context_window_tokens: int = 65_536,
         web_search_config: WebSearchConfig | None = None,
@@ -119,6 +120,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.assistant_model = assistant_model or self.model
+        self.subagent_model = subagent_model or self.assistant_model
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
@@ -143,7 +145,7 @@ class AgentLoop:
             workspace=workspace,
             bus=bus,
             tools=self.tools,
-            model=self.model,
+            model=self.subagent_model,
         )
 
         self._running = False
@@ -770,6 +772,7 @@ class AgentLoop:
                     main_model=self.model,
                     max_model=config.agents.defaults.max_model,
                     assistant_model=self.assistant_model,
+                    subagent_model=self.subagent_model,
                     provider_name=self.provider.name,
                     model_choice=_format_choices(config.agents.defaults.model_choice),
                 ),
@@ -863,13 +866,17 @@ class AgentLoop:
             try:
                 from nanobot.runtime.launcher import make_provider
 
+                old_model = self.model
                 new_provider = make_provider(config, override_model=full_model)
-                if self.assistant_model == self.model:
+                if self.assistant_model == old_model:
                     self.assistant_model = full_model
+                if self.subagent_model == old_model:
+                    self.subagent_model = full_model
                 self.model = full_model
                 self.provider = new_provider
                 self.memory_consolidator.model = self.assistant_model
                 self.memory_consolidator.provider = new_provider
+                self.subagents.model = self.subagent_model
                 if self.nowledge_memory_manager is not None:
                     self.nowledge_memory_manager.model = self.assistant_model
                     self.nowledge_memory_manager.provider = new_provider

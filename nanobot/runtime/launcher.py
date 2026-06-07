@@ -157,6 +157,7 @@ def build_runtime(
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
         assistant_model=config.agents.defaults.assistant_model,
+        subagent_model=config.agents.defaults.subagent_model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         context_window_tokens=config.agents.defaults.context_window_tokens,
         web_search_config=config.tools.web.search,

@@ -38,6 +38,9 @@ class AgentDefaults(Base):
     assistant_model: str | None = (
         None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
     )
+    subagent_model: str | None = (
+        None  # model for subagents (spawn / delegate); None → assistant_model → model
+    )
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     max_tokens: int | None = 8192
     context_window_tokens: int = 65_536
@@ -269,6 +272,7 @@ class TipsConfig(Base):
         "Main Model: {main_model}\n"
         "Max Model: {max_model}\n"
         "Assistant Model: {assistant_model}\n"
+        "Subagent Model: {subagent_model}\n"
         "Provider: {provider_name}\n\n"
         "Available models:\n{model_choice}\n"
         "Usage:\n/model add <provider> <model_name>\n"
