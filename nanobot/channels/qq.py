@@ -32,6 +32,30 @@ except ImportError:
 if TYPE_CHECKING:
     from botpy.message import C2CMessage, GroupMessage
 
+
+def _bridge_botpy_logging() -> None:
+    """Bridge botpy stdlib logs into Loguru (idempotent)."""
+    import logging
+
+    class _BotpyLoguruHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            frame, depth = logging.currentframe(), 2
+            while frame and frame.f_code.co_filename == logging.__file__:
+                frame, depth = frame.f_back, depth + 1
+            logger.opt(depth=depth, exception=record.exc_info).log(
+                level, record.getMessage()
+            )
+
+    botpy_logger = logging.getLogger("botpy")
+    if not any(isinstance(h, _BotpyLoguruHandler) for h in botpy_logger.handlers):
+        botpy_logger.handlers = [_BotpyLoguruHandler()]
+        botpy_logger.propagate = False
+
+
 _T = TypeVar("_T")
 
 
@@ -113,9 +137,9 @@ class QQChannel(BaseChannel):
         self.config: QQConfig = config
         self._client: "botpy.Client | None" = None
         self._processed_ids: deque = deque(maxlen=1000)
-        self._msg_seq: int = 1  # 消息序列号，避免被 QQ API 去重
+        self._msg_seq: int = 1
         self._chat_type_cache: dict[str, str] = {}
-
+        _bridge_botpy_logging()
     async def start(self) -> None:
         """Start the QQ bot."""
         if not QQ_AVAILABLE:
