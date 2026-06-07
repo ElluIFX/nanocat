@@ -35,14 +35,17 @@ class CustomProvider(LLMProvider):
         )
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-                   model: str | None = None, max_tokens: int = 4096, temperature: float | None = 0.7,
+                   model: str | None = None, max_tokens: int | None = 4096, temperature: float | None = 0.7,
                    reasoning_effort: str | None = None,
                    tool_choice: str | dict[str, Any] | None = None) -> LLMResponse:
+        resolved = model or self.default_model
+        resolved = resolved.split("/")[-1] if "/" in resolved else resolved
         kwargs: dict[str, Any] = {
-            "model": model or self.default_model,
+            "model": resolved,
             "messages": self._sanitize_empty_content(messages),
-            "max_tokens": max(1, max_tokens),
         }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max(1, max_tokens)
         if temperature is not None:
             kwargs["temperature"] = temperature
         if reasoning_effort:

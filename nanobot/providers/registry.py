@@ -292,20 +292,21 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
         is_oauth=True,  # OAuth-based authentication
     ),
-    # DeepSeek: needs "deepseek/" prefix for LiteLLM routing.
+    # DeepSeek: direct provider (bypasses LiteLLM) for full thinking-mode control.
     ProviderSpec(
         name="deepseek",
-        keywords=("deepseek",),
+        keywords=("deepseek", "deepseek-v4"),
         env_key="DEEPSEEK_API_KEY",
         display_name="DeepSeek",
-        litellm_prefix="deepseek",  # deepseek-chat → deepseek/deepseek-chat
-        skip_prefixes=("deepseek/",),  # avoid double-prefix
+        litellm_prefix="",
+        skip_prefixes=(),
         env_extras=(),
         is_gateway=False,
         is_local=False,
+        is_direct=True,  # Uses DeepSeekProvider, not LiteLLM
         detect_by_key_prefix="",
         detect_by_base_keyword="",
-        default_api_base="",
+        default_api_base="https://api.deepseek.com",
         strip_model_prefix=False,
         model_overrides=(),
     ),

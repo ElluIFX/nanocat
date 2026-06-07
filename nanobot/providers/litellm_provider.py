@@ -224,7 +224,7 @@ class LiteLLMProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = 4096,
         temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -251,15 +251,19 @@ class LiteLLMProvider(LLMProvider):
 
         # Clamp max_tokens to at least 1 — negative or zero values cause
         # LiteLLM to reject the request with "max_tokens must be at least 1".
-        max_tokens = max(1, max_tokens)
+        # When max_tokens is None, omit it to let the API use its default.
+        if max_tokens is not None:
+            max_tokens = max(1, max_tokens)
 
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self._sanitize_messages(
                 self._sanitize_empty_content(messages), extra_keys=extra_msg_keys
             ),
-            "max_tokens": max_tokens,
         }
+
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
 
         if temperature is not None:
             kwargs["temperature"] = temperature

@@ -47,7 +47,16 @@ def make_provider(config: Config, override_model: str | None = None):
     provider_name = config.get_provider_name(model)
     provider_cfg = config.get_provider(model)
 
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
+    if provider_name == "deepseek":
+        from nanobot.providers.deepseek_provider import DeepSeekProvider
+
+        provider = DeepSeekProvider(
+            api_key=provider_cfg.api_key if provider_cfg else None,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=provider_cfg.extra_headers if provider_cfg else None,
+        )
+    elif provider_name == "openai_codex" or model.startswith("openai-codex/"):
         provider = OpenAICodexProvider(default_model=model)
     elif provider_name == "custom":
         from nanobot.providers.custom_provider import CustomProvider

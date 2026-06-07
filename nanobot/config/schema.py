@@ -30,6 +30,8 @@ class ChannelsConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
+    model_config = ConfigDict(extra="ignore")
+
     workspace: str = "~/.nanobot/workspace"
     model: str = "openai/gpt-4o"
     max_model: str | None = None  # Optional high-capability model for /max command
@@ -37,10 +39,7 @@ class AgentDefaults(Base):
         None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
     )
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
-    provider: str = (
-        "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
-    )
-    max_tokens: int = 8192
+    max_tokens: int | None = 8192
     context_window_tokens: int = 65_536
     temperature: float | None = None
     max_tool_iterations: int = 40
@@ -339,13 +338,8 @@ class Config(BaseSettings):
     def _match_provider(
         self, model: str | None = None
     ) -> tuple["ProviderConfig | None", str | None]:
-        """Match provider config and its registry name. Returns (config, spec_name)."""
+        """Match provider config and its registry name from the model identifier alone."""
         from nanobot.providers.registry import PROVIDERS
-
-        forced = self.agents.defaults.provider
-        if forced != "auto":
-            p = getattr(self.providers, forced, None)
-            return (p, forced) if p else (None, None)
 
         model_lower = (model or self.agents.defaults.model).lower()
         model_normalized = model_lower.replace("-", "_")

@@ -29,19 +29,20 @@ class OpenAICodexProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = 4096,
         temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         model = model or self.default_model
+        model = model.split("/")[-1] if "/" in model else model
         system_prompt, input_items = _convert_messages(messages)
 
         token = await asyncio.to_thread(get_codex_token)
         headers = _build_headers(token.account_id, token.access)
 
         body: dict[str, Any] = {
-            "model": _strip_model_prefix(model),
+            "model": model,
             "store": False,
             "stream": True,
             "instructions": system_prompt,
@@ -90,10 +91,6 @@ class OpenAICodexProvider(LLMProvider):
         return self.default_model
 
 
-def _strip_model_prefix(model: str) -> str:
-    if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
-        return model.split("/", 1)[1]
-    return model
 
 
 def _build_headers(account_id: str, token: str) -> dict[str, str]:

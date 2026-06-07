@@ -85,7 +85,7 @@ class AzureOpenAIProvider(LLMProvider):
         deployment_name: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = 4096,
         temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -96,8 +96,10 @@ class AzureOpenAIProvider(LLMProvider):
                 self._sanitize_empty_content(messages),
                 _AZURE_MSG_KEYS,
             ),
-            "max_completion_tokens": max(1, max_tokens),  # Azure API 2024-10-21 uses max_completion_tokens
         }
+
+        if max_tokens is not None:
+            payload["max_completion_tokens"] = max(1, max_tokens)
 
         if temperature is not None and self._supports_temperature(deployment_name, reasoning_effort):
             payload["temperature"] = temperature
@@ -116,7 +118,7 @@ class AzureOpenAIProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = 4096,
         temperature: float | None = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -136,6 +138,7 @@ class AzureOpenAIProvider(LLMProvider):
             LLMResponse with content and/or tool calls.
         """
         deployment_name = model or self.default_model
+        deployment_name = deployment_name.split("/")[-1] if "/" in deployment_name else deployment_name
         url = self._build_chat_url(deployment_name)
         headers = self._build_headers()
         payload = self._prepare_request_payload(
