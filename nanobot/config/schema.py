@@ -263,12 +263,12 @@ class TipsConfig(Base):
         "/stop — Stop the current task\n"
         "/restart — Restart the bot\n"
         "/model — View or configure models\n"
-        "/ctx — Show current context info\n"
-        "/sid — Show channel/chat identity\n"
+        "/context — Show current context info\n"
+        "/whoami — Show channel/chat identity\n"
         "/help — Show available commands\n"
-        "/consolidate — Manually consolidate old session turns\n"
+        "/compact — Manually consolidate old session turns\n"
         "/session — List saved sessions\n"
-        "/busy — Show agent status and recent logs\n"
+        "/status — Show agent status and recent logs\n"
         "/approve <N=5> — Approve safety check for N minutes\n"
         "/max <prompt> — Use high-capability model for this turn"
     )
@@ -283,7 +283,7 @@ class TipsConfig(Base):
         "Available models:\n{model_choice}\n"
         "Usage:\n"
         "/model add <provider> <model_name>\n"
-        "/model set agent|subagent|assistant|max <N>\n"
+        "/model agent|subagent|assistant|max <N>\n"
         "/model delete <N>"
     )
     # /model set (success) — {target}, {model_name}
@@ -297,6 +297,7 @@ class TipsConfig(Base):
     # /model (choice invalid) — {choice_number}
     model_choice_invalid: str = "Invalid choice number: {choice_number}"
     # /session — usage shown when subcommand is unknown or missing
+    session_usage: str = "Usage:\n  /session save/load/delete <name>\n  /session list"
     # /session save — success — {name}
     session_saved: str = "Session saved as '{name}'."
     # /session load — success — {name}
@@ -311,12 +312,12 @@ class TipsConfig(Base):
     session_list_empty: str = "No saved sessions.\nUsage:\n  /session save/load/delete <name>"
     # /session list — {items} (pre-formatted bullet list)
     session_list: str = "Saved sessions:\n{items}\n\nUsage:\n  /session save/load/delete <name>"
-    # /sid — {channel}, {chat_id}, {session_key}
-    sid_info: str = (
+    # /whoami — {channel}, {chat_id}, {session_key}
+    whoami_info: str = (
         "🐈 Session Identity\nChannel: {channel}\nChat ID: {chat_id}\nSession Key: {session_key}"
     )
-    # /ctx panel body
-    ctx_panel: str = (
+    # /context panel body
+    context_panel: str = (
         "🐈 Context Usage ({model_name})\n"
         "prompt={estimated_prompt_tokens}/{context_window_tokens} ({context_usage_percent}%)\n"
         "overflow={overflow_tokens}/{context_window_tokens} ({overflow_percent}%)\n"
@@ -326,8 +327,8 @@ class TipsConfig(Base):
     # agent loop finished with no content
     no_response: str = "I've completed processing but have no response to give."
     # Consolidation tips
-    consolidate_completed: str = "Session consolidation completed."
-    consolidate_failed: str = "No completed turns are eligible for consolidation."
+    compact_completed: str = "Session consolidation completed."
+    compact_failed: str = "No completed turns are eligible for consolidation."
 
 
 class Config(BaseSettings):

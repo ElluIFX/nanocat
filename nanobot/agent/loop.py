@@ -245,9 +245,7 @@ class AgentLoop:
             DeleteLinesTool,
             FileHexTool,
         ):
-            self.tools.register(
-                cls(workspace=self.workspace, extra_allowed_dirs=extra_read)
-            )
+            self.tools.register(cls(workspace=self.workspace, extra_allowed_dirs=extra_read))
         self.tools.register(
             ExecTool(
                 working_dir=str(self.workspace),
@@ -361,7 +359,7 @@ class AgentLoop:
     # Slash commands that are independent queries and should NOT trigger
     # cancellation of an in-flight LLM turn.
     _STANDALONE_CMDS = frozenset(
-        {"/busy", "/help", "/new", "/stop", "/restart", "/ctx", "/sid", "/consolidate"}
+        {"/status", "/help", "/new", "/stop", "/restart", "/context", "/whoami", "/compact"}
     )
     _STANDALONE_PREFIXES = ("/model", "/session")
 
@@ -519,9 +517,7 @@ class AgentLoop:
         """Run the agent iteration loop."""
         from nanobot.security import safety_bypass
 
-        _bypass_token = (
-            safety_bypass.set(bypass_safety_check) if bypass_safety_check else None
-        )
+        _bypass_token = safety_bypass.set(bypass_safety_check) if bypass_safety_check else None
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -565,9 +561,7 @@ class AgentLoop:
                 for i, tc in enumerate(response.tool_calls):
                     tools_used.append(tc.name)
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
-                    logger.debug(
-                        "[{}] Tool call: {}({})", _log_ids[i], tc.name, args_str
-                    )
+                    logger.debug("[{}] Tool call: {}({})", _log_ids[i], tc.name, args_str)
 
                 async def _run_one(idx: int, tc: Any) -> tuple[int, Any, Any]:
                     result = await self.tools.execute(
@@ -588,9 +582,7 @@ class AgentLoop:
                             + f"...[TRUNCATED {len(result_str) - 512} CHARS]..."
                             + result_str[-256:]
                         )
-                    logger.debug(
-                        "[{}] Tool {} result: {}", _log_ids[idx], tc.name, result_str
-                    )
+                    logger.debug("[{}] Tool {} result: {}", _log_ids[idx], tc.name, result_str)
                     if bridged := self._bridge_image_tool_result(tc.name, result):
                         tool_text, user_blocks = bridged
                         logger.info(
@@ -598,9 +590,7 @@ class AgentLoop:
                             tc.id,
                             tc.name,
                         )
-                        messages = self.context.add_tool_result(
-                            messages, tc.id, tc.name, tool_text
-                        )
+                        messages = self.context.add_tool_result(messages, tc.id, tc.name, tool_text)
                         messages.append({"role": "user", "content": user_blocks})
                         logger.debug(
                             "Injected synthetic user image message from tool {}",
@@ -626,12 +616,13 @@ class AgentLoop:
                             )
                             logger.info(
                                 "[{}] Tool {} result truncated: {} → {}",
-                                _log_ids[idx], tc.name, len(_str), tmp.name,
+                                _log_ids[idx],
+                                tc.name,
+                                len(_str),
+                                tmp.name,
                             )
 
-                    messages = self.context.add_tool_result(
-                        messages, tc.id, tc.name, result
-                    )
+                    messages = self.context.add_tool_result(messages, tc.id, tc.name, result)
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -684,7 +675,7 @@ class AgentLoop:
             elif cmd == "/restart":
                 await self._handle_restart(msg)
             elif self._is_standalone_cmd(msg):
-                # Standalone commands (e.g. /busy, /model, /ctx): queue normally,
+                # Standalone commands (e.g. /status, /model, /context): queue normally,
                 # do NOT interrupt an in-flight LLM turn.
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
@@ -901,17 +892,16 @@ class AgentLoop:
                     content=self.tips.model_error.format(error=str(e)),
                 )
 
-        if subcmd == "set":
-            if len(parts) < 3 or not parts[2].isdigit():
+        if subcmd in ("agent", "subagent", "assistant", "max"):
+            if len(parts) < 2 or not parts[1].isdigit():
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=self.tips.model_error.format(
-                        error="Usage: /model set agent|subagent|assistant|max <N>"
+                        error="Usage: /model agent|subagent|assistant|max <N>"
                     ),
                 )
-            target = parts[1].lower()
-            choice_number = int(parts[2])
+            choice_number = int(parts[1])
             if choice_number < 1 or choice_number > len(self._config.agents.defaults.model_choice):
                 return OutboundMessage(
                     channel=msg.channel,
@@ -925,22 +915,14 @@ class AgentLoop:
                 "assistant": "Assistant",
                 "max": "Max",
             }
-            if target not in _targets:
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self.tips.model_error.format(
-                        error=f"Unknown target '{target}'. Use: agent, subagent, assistant, max"
-                    ),
-                )
             try:
-                if target == "agent":
+                if subcmd == "agent":
                     self._config.agents.defaults.model = full_model
-                elif target == "subagent":
+                elif subcmd == "subagent":
                     self._config.agents.defaults.subagent_model = full_model
-                elif target == "assistant":
+                elif subcmd == "assistant":
                     self._config.agents.defaults.assistant_model = full_model
-                elif target == "max":
+                elif subcmd == "max":
                     self._config.agents.defaults.max_model = full_model
                 save_config(self._config)
                 clear_provider_cache()
@@ -949,7 +931,7 @@ class AgentLoop:
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=self.tips.model_set.format(
-                        target=_targets[target], model_name=full_model
+                        target=_targets[subcmd], model_name=full_model
                     ),
                 )
             except Exception as e:
@@ -1019,8 +1001,8 @@ class AgentLoop:
 
         return _reply(self.tips.session_usage)
 
-    async def _handle_ctx(self, msg: InboundMessage, session: Session) -> OutboundMessage:
-        """Handle /ctx command — show compact numeric context panel."""
+    async def _handle_context(self, msg: InboundMessage, session: Session) -> OutboundMessage:
+        """Handle /context command — show compact numeric context panel."""
         estimated_tokens, _ = self.memory_consolidator.estimate_session_prompt_tokens(session)
         context_window = max(0, self.context_window_tokens)
         usage_percent = (estimated_tokens / context_window) * 100 if context_window > 0 else 0.0
@@ -1034,7 +1016,7 @@ class AgentLoop:
             (messages_unconsolidated / messages_total) * 100 if messages_total > 0 else 0.0
         )
 
-        content = self.tips.ctx_panel.format(
+        content = self.tips.context_panel.format(
             model_name=self.model,
             estimated_prompt_tokens=estimated_tokens,
             context_window_tokens=context_window,
@@ -1048,12 +1030,12 @@ class AgentLoop:
         )
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-    async def _handle_sid(self, msg: InboundMessage, session_key: str) -> OutboundMessage:
-        """Handle /sid command — show channel and chat routing IDs."""
+    async def _handle_whoami(self, msg: InboundMessage, session_key: str) -> OutboundMessage:
+        """Handle /whoami command — show channel and chat routing IDs."""
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=self.tips.sid_info.format(
+            content=self.tips.whoami_info.format(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 session_key=session_key,
@@ -1067,11 +1049,13 @@ class AgentLoop:
         that if a newer message arrived during processing (interrupt) this
         task can discard its results transparently.
         """
-        if msg.content.strip().lower() == "/busy":
+        if msg.content.strip().lower() == "/status":
             is_busy = self._processing_lock.locked()
             status = "🔴 **Busy**" if is_busy else "🟢 **Idle**"
             logs = (
-                "\n".join(list(self._recent_logs)[-8:]) if self._recent_logs else "(no recent logs)"
+                "\n".join(list(self._recent_logs)[-12:])
+                if self._recent_logs
+                else "(no recent logs)"
             )
             await self.bus.publish_outbound(
                 OutboundMessage(
@@ -1222,16 +1206,16 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self.tips.help,
             )
-        if cmd == "/consolidate":
+        if cmd == "/compact":
             changed = await self.memory_consolidator.maybe_consolidate_by_tokens(
                 session, force=True
             )
-            content = self.tips.consolidate_completed if changed else self.tips.consolidate_failed
+            content = self.tips.compact_completed if changed else self.tips.compact_failed
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-        if cmd == "/ctx":
-            return await self._handle_ctx(msg, session)
-        if cmd == "/sid":
-            return await self._handle_sid(msg, key)
+        if cmd == "/context":
+            return await self._handle_context(msg, session)
+        if cmd == "/whoami":
+            return await self._handle_whoami(msg, key)
         if msg.content.strip().lower().startswith("/approve"):
             parts = msg.content.strip().split()
             if len(parts) > 1:
@@ -1241,9 +1225,7 @@ class AgentLoop:
                     duration = 5
                 until = datetime.now() + timedelta(minutes=duration)
                 session.metadata["approve_until"] = until.isoformat()
-                approve_text = (
-                    f"for {duration} minute(s), expiring at {until.strftime('%H:%M:%S')}"
-                )
+                approve_text = f"for {duration} minute(s), expiring at {until.strftime('%H:%M:%S')}"
             else:
                 session.metadata["approve_once"] = True
                 approve_text = "for this turn only"
