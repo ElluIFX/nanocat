@@ -858,14 +858,17 @@ class AgentLoop:
                     content=self.tips.model_error.format(error=str(e)),
                 )
 
-        if subcmd == "use":
-            if len(parts) != 2 or not parts[1].isdigit():
+        if subcmd == "set":
+            if len(parts) < 3 or not parts[2].isdigit():
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content=self.tips.model_error.format(error="No use number provided"),
+                    content=self.tips.model_error.format(
+                        error="Usage: /model set agent|subagent|assistant|max <N>"
+                    ),
                 )
-            choice_number = int(parts[1])
+            target = parts[1].lower()
+            choice_number = int(parts[2])
             if choice_number < 1 or choice_number > len(self._config.agents.defaults.model_choice):
                 return OutboundMessage(
                     channel=msg.channel,
@@ -873,20 +876,38 @@ class AgentLoop:
                     content=self.tips.model_choice_invalid.format(choice_number=choice_number),
                 )
             full_model = self._config.agents.defaults.model_choice[choice_number - 1]
+            _targets: dict[str, str] = {
+                "agent": "Main",
+                "subagent": "Subagent",
+                "assistant": "Assistant",
+                "max": "Max",
+            }
+            if target not in _targets:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(
+                        error=f"Unknown target '{target}'. Use: agent, subagent, assistant, max"
+                    ),
+                )
             try:
-                old_model = self._config.agents.defaults.model
-                self._config.agents.defaults.model = full_model
-                if self._config.agents.defaults.assistant_model == old_model:
-                    self._config.agents.defaults.assistant_model = full_model
-                if self._config.agents.defaults.subagent_model == old_model:
+                if target == "agent":
+                    self._config.agents.defaults.model = full_model
+                elif target == "subagent":
                     self._config.agents.defaults.subagent_model = full_model
+                elif target == "assistant":
+                    self._config.agents.defaults.assistant_model = full_model
+                elif target == "max":
+                    self._config.agents.defaults.max_model = full_model
                 save_config(self._config)
                 clear_provider_cache()
 
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content=self.tips.model_updated.format(model_name=full_model),
+                    content=self.tips.model_set.format(
+                        target=_targets[target], model_name=full_model
+                    ),
                 )
             except Exception as e:
                 return OutboundMessage(

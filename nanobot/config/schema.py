@@ -256,7 +256,7 @@ class TipsConfig(Base):
         "/new — Start a new conversation\n"
         "/stop — Stop the current task\n"
         "/restart — Restart the bot\n"
-        "/model — View or switch the active model\n"
+        "/model — View or configure models\n"
         "/ctx — Show current context info\n"
         "/sid — Show channel/chat identity\n"
         "/help — Show available commands\n"
@@ -275,11 +275,13 @@ class TipsConfig(Base):
         "Subagent Model: {subagent_model}\n"
         "Provider: {provider_name}\n\n"
         "Available models:\n{model_choice}\n"
-        "Usage:\n/model add <provider> <model_name>\n"
-        "/model use/delete <choice_number>"
+        "Usage:\n"
+        "/model add <provider> <model_name>\n"
+        "/model set agent|subagent|assistant|max <N>\n"
+        "/model delete <N>"
     )
-    # /model use (success) — {model_name}
-    model_updated: str = "Model updated: {model_name}"
+    # /model set (success) — {target}, {model_name}
+    model_set: str = "{target} model set: {model_name}"
     # /model delete (success) — {model_name}
     model_deleted: str = "Model deleted: {model_name}"
     # /model add (success) — {model_name}
