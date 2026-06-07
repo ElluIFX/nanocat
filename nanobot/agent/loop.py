@@ -154,6 +154,8 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._processing_lock = asyncio.Lock()
+        self._session_gen: dict[str, int] = {}  # per-session monotonic generation counter
+        self._pending_buf: dict[str, InboundMessage] = {}  # accumulated msg for interrupt/merge
         self._recent_logs: deque = deque(maxlen=10)
         logger.add(
             lambda msg: self._recent_logs.append(msg.strip()),
@@ -343,6 +345,39 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    # Slash commands that are independent queries and should NOT trigger
+    # cancellation of an in-flight LLM turn.
+    _STANDALONE_CMDS = frozenset(
+        {"/busy", "/help", "/new", "/stop", "/restart", "/ctx", "/sid", "/consolidate"}
+    )
+    _STANDALONE_PREFIXES = ("/model", "/session")
+
+    @staticmethod
+    def _is_standalone_cmd(msg: InboundMessage) -> bool:
+        """Return True if *msg* is an independent command that must not interrupt LLM turns."""
+        cmd = msg.content.strip().lower()
+        if cmd in AgentLoop._STANDALONE_CMDS:
+            return True
+        return cmd.startswith(AgentLoop._STANDALONE_PREFIXES)
+
+    @staticmethod
+    def _merge_messages(prev: InboundMessage, new: InboundMessage) -> InboundMessage:
+        """Merge two inbound messages into one — concatenate text, combine media."""
+        merged_media: list[str] = []
+        if prev.media:
+            merged_media.extend(prev.media)
+        if new.media:
+            merged_media.extend(new.media)
+        return InboundMessage(
+            channel=new.channel,
+            sender_id=new.sender_id,
+            chat_id=new.chat_id,
+            content=f"{prev.content}\n\n{new.content}",
+            media=merged_media,
+            metadata=new.metadata or prev.metadata,
+            session_key_override=new.session_key_override or prev.session_key_override,
+        )
 
     def _intercept_oversized_image(self, result: Any) -> Any:
         """Intercept base64 image blobs in tool results.
@@ -584,13 +619,51 @@ class AgentLoop:
             cmd = msg.content.strip().lower()
             if cmd == "/stop":
                 await self._handle_stop(msg)
+                self._pending_buf.pop(msg.session_key, None)
+                self._session_gen.pop(msg.session_key, None)
             elif cmd == "/restart":
                 await self._handle_restart(msg)
-            else:
+            elif self._is_standalone_cmd(msg):
+                # Standalone commands (e.g. /busy, /model, /ctx): queue normally,
+                # do NOT interrupt an in-flight LLM turn.
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(
                     lambda t, k=msg.session_key: (
+                        self._active_tasks.get(k, []) and self._active_tasks[k].remove(t)
+                        if t in self._active_tasks.get(k, [])
+                        else None
+                    )
+                )
+            else:
+                # Interruptible message: if a task is already running for this
+                # session, hard-cancel it, merge the pending content, and
+                # re-dispatch so that split messages (e.g. QQ text + image)
+                # are processed as a single turn.
+                sk = msg.session_key
+                live = [t for t in self._active_tasks.get(sk, []) if not t.done()]
+
+                if live:
+                    for t in live:
+                        t.cancel()
+                    for t in live:
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+
+                    prev = self._pending_buf.get(sk)
+                    if prev:
+                        msg = self._merge_messages(prev, msg)
+
+                self._pending_buf[sk] = msg
+                gen = self._session_gen.get(sk, 0) + 1
+                self._session_gen[sk] = gen
+
+                task = asyncio.create_task(self._dispatch(msg, gen=gen))
+                self._active_tasks.setdefault(sk, []).append(task)
+                task.add_done_callback(
+                    lambda t, k=sk: (
                         self._active_tasks.get(k, []) and self._active_tasks[k].remove(t)
                         if t in self._active_tasks.get(k, [])
                         else None
@@ -914,8 +987,13 @@ class AgentLoop:
             ),
         )
 
-    async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message under the global lock."""
+    async def _dispatch(self, msg: InboundMessage, gen: int = 0) -> None:
+        """Process a message under the global lock.
+
+        When *gen* is non-zero, it carries the session generation number so
+        that if a newer message arrived during processing (interrupt) this
+        task can discard its results transparently.
+        """
         if msg.content.strip().lower() == "/busy":
             is_busy = self._processing_lock.locked()
             status = "🔴 **Busy**" if is_busy else "🟢 **Idle**"
@@ -934,6 +1012,12 @@ class AgentLoop:
         async with self._processing_lock:
             try:
                 response = await self._process_message(msg)
+
+                # Discard if a newer message for the same session arrived
+                # during processing (hard interrupt / merge).
+                if gen and self._session_gen.get(msg.session_key, 0) != gen:
+                    return
+
                 if response is not None:
                     await self.bus.publish_outbound(response)
                 elif msg.channel == "cli":
@@ -945,6 +1029,11 @@ class AgentLoop:
                             metadata=msg.metadata or {},
                         )
                     )
+
+                # Clear the pending buffer so the next message starts fresh.
+                if gen and self._session_gen.get(msg.session_key, 0) == gen:
+                    self._pending_buf.pop(msg.session_key, None)
+
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
                 raise
@@ -1048,6 +1137,8 @@ class AgentLoop:
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
+            self._pending_buf.pop(key, None)
+            self._session_gen.pop(key, None)
 
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=self.tips.new_session
