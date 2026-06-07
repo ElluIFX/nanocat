@@ -6,12 +6,7 @@ LLM call to decide whether the result warrants notifying the user.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from loguru import logger
-
-if TYPE_CHECKING:
-    from nanobot.providers.base import LLMProvider
 
 _EVALUATE_TOOL = [
     {
@@ -53,8 +48,6 @@ _SYSTEM_PROMPT = (
 async def evaluate_response(
     response: str,
     task_context: str,
-    provider: LLMProvider,
-    model: str,
 ) -> bool:
     """Decide whether a background-task result should be delivered to the user.
 
@@ -62,6 +55,13 @@ async def evaluate_response(
     ``_decide()``).  Falls back to ``True`` (notify) on any failure so
     that important messages are never silently dropped.
     """
+    from nanobot.config.loader import get_runtime_config
+    from nanobot.providers.manager import get_provider
+
+    cfg = get_runtime_config().agents.defaults
+    model = cfg.assistant_model or cfg.model
+    provider = get_provider(model)
+
     try:
         llm_response = await provider.chat_with_retry(
             messages=[

@@ -8,6 +8,9 @@ from nanobot.config.schema import Config
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
 
+# Global runtime config — set once at startup, then read by all subsystems.
+_runtime_config: Config | None = None
+
 
 def set_config_path(path: Path) -> None:
     """Set the current config path (used to derive data directory)."""
@@ -20,6 +23,23 @@ def get_config_path() -> Path:
     if _current_config_path:
         return _current_config_path
     return Path.home() / ".nanobot" / "config.json"
+
+
+def set_runtime_config(config: Config) -> None:
+    """Store the active runtime configuration for global access."""
+    global _runtime_config
+    _runtime_config = config
+
+
+def get_runtime_config() -> Config:
+    """Return the active runtime configuration.
+
+    Loads from disk if not yet set (lazy init for early imports).
+    """
+    global _runtime_config
+    if _runtime_config is None:
+        _runtime_config = load_config()
+    return _runtime_config
 
 
 def load_config(config_path: Path | None = None) -> Config:

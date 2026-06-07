@@ -12,7 +12,6 @@ import tempfile
 from collections import deque
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
@@ -48,18 +47,10 @@ from nanobot.agent.tools.wait import WaitTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import (
-        ChannelsConfig,
-        ExecToolConfig,
-        FilesystemToolConfig,
-        MemoryConfig,
-        TipsConfig,
-        WebSearchConfig,
-    )
+    from nanobot.config.schema import Config
     from nanobot.cron.service import CronService
 
 
@@ -86,78 +77,40 @@ class AgentLoop:
     def __init__(
         self,
         bus: MessageBus,
-        provider: LLMProvider,
-        workspace: Path,
-        model: str | None = None,
-        assistant_model: str | None = None,
-        subagent_model: str | None = None,
-        max_iterations: int = 40,
-        context_window_tokens: int = 65_536,
-        web_search_config: WebSearchConfig | None = None,
-        web_proxy: str | None = None,
-        web_safety_check: bool = True,
-        exec_config: ExecToolConfig | None = None,
-        cron_service: CronService | None = None,
-        filesystem_config: FilesystemToolConfig | None = None,
+        config: "Config",
         session_manager: SessionManager | None = None,
-        mcp_servers: dict | None = None,
-        channels_config: ChannelsConfig | None = None,
-        tips_config: TipsConfig | None = None,
-        memory_config: MemoryConfig | None = None,
+        cron_service: "CronService | None" = None,
     ):
-        from nanobot.config.schema import (
-            ExecToolConfig,
-            FilesystemToolConfig,
-            MemoryConfig,
-            TipsConfig,
-            WebSearchConfig,
-        )
+        from nanobot.config.loader import set_runtime_config
 
         self.bus = bus
-        self.channels_config = channels_config
-        self.tips = tips_config or TipsConfig()
-        self.provider = provider
-        self.workspace = workspace
-        self.model = model or provider.get_default_model()
-        self.assistant_model = assistant_model or self.model
-        self.subagent_model = subagent_model or self.assistant_model
-        self.max_iterations = max_iterations
-        self.context_window_tokens = context_window_tokens
-        self.web_search_config = web_search_config or WebSearchConfig()
-        self.web_proxy = web_proxy
-        self.web_safety_check = web_safety_check
-        self.exec_config = exec_config or ExecToolConfig()
-        self.cron_service = cron_service
-        self.filesystem_config = filesystem_config or FilesystemToolConfig()
+        self._config = config
+        set_runtime_config(config)
 
-        _mem = memory_config or MemoryConfig()
+        _mem = config.memory
         _nowledge_cfg = _mem.nowledge
-        self._nowledge_auto_inject = _nowledge_cfg.auto_inject
 
+        self.cron_service = cron_service
         self.context = ContextBuilder(
-            workspace,
+            config.workspace_path,
             nowledge_enabled=_nowledge_cfg.enabled,
         )
-        self.sessions = session_manager or SessionManager(workspace)
+        self.sessions = session_manager or SessionManager(config.workspace_path)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
-            provider=provider,
-            workspace=workspace,
             bus=bus,
             tools=self.tools,
-            model=self.subagent_model,
         )
 
         self._running = False
-        self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._active_tasks: dict[str, list[asyncio.Task]] = {}
         self._background_tasks: list[asyncio.Task] = []
         self._processing_lock = asyncio.Lock()
-        self._session_gen: dict[str, int] = {}  # per-session monotonic generation counter
-        self._pending_buf: dict[str, InboundMessage] = {}  # accumulated msg for interrupt/merge
+        self._session_gen: dict[str, int] = {}
+        self._pending_buf: dict[str, InboundMessage] = {}
         self._recent_logs: deque = deque(maxlen=10)
         logger.add(
             lambda msg: self._recent_logs.append(msg.strip()),
@@ -180,21 +133,13 @@ class AgentLoop:
             else None
         )
         self.nowledge_memory_manager: NowledgeMemoryManager | None = (
-            NowledgeMemoryManager(
-                client=self.nowledge_client,
-                provider=provider,
-                model=self.assistant_model,
-            )
+            NowledgeMemoryManager(client=self.nowledge_client)
             if self.nowledge_client and _nowledge_cfg.auto_extract_memories
             else None
         )
 
         self.memory_consolidator = MemoryConsolidator(
-            workspace=workspace,
-            provider=provider,
-            model=self.assistant_model,
             sessions=self.sessions,
-            context_window_tokens=context_window_tokens,
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
             threshold=_mem.consolidation_threshold,
@@ -202,6 +147,76 @@ class AgentLoop:
             nowledge_manager=self.nowledge_memory_manager,
         )
         self._register_default_tools()
+
+    # ------------------------------------------------------------------
+    # Config-derived properties (single source of truth)
+    # ------------------------------------------------------------------
+
+    @property
+    def model(self) -> str:
+        return self._config.agents.defaults.model
+
+    @property
+    def assistant_model(self) -> str:
+        return self._config.agents.defaults.assistant_model or self.model
+
+    @property
+    def subagent_model(self) -> str:
+        return self._config.agents.defaults.subagent_model or self.assistant_model
+
+    @property
+    def provider(self):
+        from nanobot.providers.manager import get_provider
+
+        return get_provider(self.model)
+
+    @property
+    def workspace(self):
+        return self._config.workspace_path
+
+    @property
+    def max_iterations(self) -> int:
+        return self._config.agents.defaults.max_tool_iterations
+
+    @property
+    def context_window_tokens(self) -> int:
+        return self._config.agents.defaults.context_window_tokens
+
+    @property
+    def web_search_config(self):
+        return self._config.tools.web.search
+
+    @property
+    def web_proxy(self):
+        return self._config.tools.web.proxy
+
+    @property
+    def web_safety_check(self) -> bool:
+        return self._config.tools.web.safety_check
+
+    @property
+    def exec_config(self):
+        return self._config.tools.exec
+
+    @property
+    def filesystem_config(self):
+        return self._config.tools.filesystem
+
+    @property
+    def tips(self):
+        return self._config.tips
+
+    @property
+    def channels_config(self):
+        return self._config.channels
+
+    @property
+    def _nowledge_auto_inject(self):
+        return self._config.memory.nowledge.auto_inject
+
+    @property
+    def _mcp_servers(self):
+        return self._config.tools.mcp_servers or {}
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -754,12 +769,11 @@ class AgentLoop:
 
     async def _handle_model(self, msg: InboundMessage) -> OutboundMessage:
         """Handle /model command — query or update the active model."""
-        from nanobot.config.loader import load_config, save_config
+        from nanobot.config.loader import save_config
+        from nanobot.providers.manager import clear_provider_cache
 
         raw_args = msg.content.strip()[len("/model") :].strip()
         parts = raw_args.split() if raw_args else []
-
-        config = load_config()
 
         def _format_choices(models: list[str]) -> str:
             return "\n".join(f" {i + 1}. {model}" for i, model in enumerate(models)) or " (empty)"
@@ -770,11 +784,11 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self.tips.model_info.format(
                     main_model=self.model,
-                    max_model=config.agents.defaults.max_model,
+                    max_model=self._config.agents.defaults.max_model,
                     assistant_model=self.assistant_model,
                     subagent_model=self.subagent_model,
                     provider_name=self.provider.name,
-                    model_choice=_format_choices(config.agents.defaults.model_choice),
+                    model_choice=_format_choices(self._config.agents.defaults.model_choice),
                 ),
             )
 
@@ -791,11 +805,9 @@ class AgentLoop:
                 )
             full_model = f"{parts[1]}/{parts[2]}"
             try:
-                # Re-read before write to avoid stale in-memory config.
-                config = load_config()
-                if full_model not in config.agents.defaults.model_choice:
-                    config.agents.defaults.model_choice.append(full_model)
-                save_config(config)
+                if full_model not in self._config.agents.defaults.model_choice:
+                    self._config.agents.defaults.model_choice.append(full_model)
+                save_config(self._config)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
@@ -818,9 +830,7 @@ class AgentLoop:
                 )
             choice_number = int(parts[1])
             try:
-                # Re-read before write to avoid stale in-memory config.
-                config = load_config()
-                models = config.agents.defaults.model_choice
+                models = self._config.agents.defaults.model_choice
                 if choice_number < 1 or choice_number > len(models):
                     return OutboundMessage(
                         channel=msg.channel,
@@ -834,7 +844,7 @@ class AgentLoop:
                         content=self.tips.model_error.format(error="Can't delete the last model"),
                     )
                 deleted_model = models.pop(choice_number - 1)
-                save_config(config)
+                save_config(self._config)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
@@ -856,30 +866,22 @@ class AgentLoop:
                     content=self.tips.model_error.format(error="No use number provided"),
                 )
             choice_number = int(parts[1])
-            if choice_number < 1 or choice_number > len(config.agents.defaults.model_choice):
+            if choice_number < 1 or choice_number > len(self._config.agents.defaults.model_choice):
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=self.tips.model_choice_invalid.format(choice_number=choice_number),
                 )
-            full_model = config.agents.defaults.model_choice[choice_number - 1]
+            full_model = self._config.agents.defaults.model_choice[choice_number - 1]
             try:
-                from nanobot.runtime.launcher import make_provider
-
-                old_model = self.model
-                new_provider = make_provider(config, override_model=full_model)
-                if self.assistant_model == old_model:
-                    self.assistant_model = full_model
-                if self.subagent_model == old_model:
-                    self.subagent_model = full_model
-                self.model = full_model
-                self.provider = new_provider
-                self.memory_consolidator.model = self.assistant_model
-                self.memory_consolidator.provider = new_provider
-                self.subagents.model = self.subagent_model
-                if self.nowledge_memory_manager is not None:
-                    self.nowledge_memory_manager.model = self.assistant_model
-                    self.nowledge_memory_manager.provider = new_provider
+                old_model = self._config.agents.defaults.model
+                self._config.agents.defaults.model = full_model
+                if self._config.agents.defaults.assistant_model == old_model:
+                    self._config.agents.defaults.assistant_model = full_model
+                if self._config.agents.defaults.subagent_model == old_model:
+                    self._config.agents.defaults.subagent_model = full_model
+                save_config(self._config)
+                clear_provider_cache()
 
                 return OutboundMessage(
                     channel=msg.channel,
@@ -1189,19 +1191,16 @@ class AgentLoop:
             )
             # Fall through to normal message processing
         # Handle /max command
-        _max_restore = None
+        _max_restore: str | None = None
         if msg.content.strip().lower().startswith("/max"):
-            from nanobot.config.loader import load_config
-
-            config = load_config()
-            max_model = config.agents.defaults.max_model
+            max_model = self._config.agents.defaults.max_model
             if max_model:
                 try:
-                    from nanobot.runtime.launcher import make_provider
+                    from nanobot.providers.manager import clear_provider_cache
 
-                    _max_restore = (self.model, self.provider)
-                    self.model = max_model
-                    self.provider = make_provider(config, override_model=max_model)
+                    _max_restore = self._config.agents.defaults.model
+                    self._config.agents.defaults.model = max_model
+                    clear_provider_cache()
                 except Exception as e:
                     return OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id, content=f"Error: {e}"
@@ -1291,8 +1290,11 @@ class AgentLoop:
             final_content = self.tips.no_response
 
         # Restore model if /max was used
-        if _max_restore:
-            self.model, self.provider = _max_restore
+        if _max_restore is not None:
+            from nanobot.providers.manager import clear_provider_cache
+
+            self._config.agents.defaults.model = _max_restore
+            clear_provider_cache()
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)

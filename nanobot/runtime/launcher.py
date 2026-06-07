@@ -6,7 +6,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
@@ -29,83 +28,11 @@ from nanobot.utils.helpers import sync_workspace_templates
 class RuntimeContext:
     config: Config
     bus: MessageBus
-    provider: Any
     session_manager: SessionManager
     cron: CronService
     agent: AgentLoop
     channels: ChannelManager
     heartbeat: HeartbeatService
-
-
-def make_provider(config: Config, override_model: str | None = None):
-    """Create the appropriate LLM provider from config."""
-    from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-    from nanobot.providers.base import GenerationSettings
-    from nanobot.providers.openai_codex_provider import OpenAICodexProvider
-
-    model = override_model or config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    provider_cfg = config.get_provider(model)
-
-    if provider_name == "deepseek":
-        from nanobot.providers.deepseek_provider import DeepSeekProvider
-
-        provider = DeepSeekProvider(
-            api_key=provider_cfg.api_key if provider_cfg else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=provider_cfg.extra_headers if provider_cfg else None,
-        )
-    elif provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        provider = OpenAICodexProvider(default_model=model)
-    elif provider_name == "custom":
-        from nanobot.providers.custom_provider import CustomProvider
-
-        provider = CustomProvider(
-            api_key=provider_cfg.api_key if provider_cfg else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-            default_model=model,
-            extra_headers=provider_cfg.extra_headers if provider_cfg else None,
-        )
-    elif provider_name == "azure_openai":
-        if not provider_cfg or not provider_cfg.api_key or not provider_cfg.api_base:
-            raise RuntimeError(
-                "Azure OpenAI requires api_key and api_base in providers.azure_openai."
-            )
-        provider = AzureOpenAIProvider(
-            api_key=provider_cfg.api_key,
-            api_base=provider_cfg.api_base,
-            default_model=model,
-        )
-    else:
-        from nanobot.providers.litellm_provider import LiteLLMProvider
-        from nanobot.providers.registry import find_by_name
-
-        spec = find_by_name(provider_name)
-        if (
-            not model.startswith("bedrock/")
-            and not (provider_cfg and provider_cfg.api_key)
-            and not (spec and (spec.is_oauth or spec.is_local))
-        ):
-            raise RuntimeError(
-                f"No API key configured for provider '{provider_name}'. "
-                "Set it in ~/.nanobot/config.json under providers."
-            )
-        provider = LiteLLMProvider(
-            api_key=provider_cfg.api_key if provider_cfg else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=provider_cfg.extra_headers if provider_cfg else None,
-            provider_name=provider_name,
-        )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
-    )
-    return provider
 
 
 def load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
@@ -147,30 +74,14 @@ def build_runtime(
     sync_workspace_templates(config.workspace_path, silent=True)
 
     bus = MessageBus()
-    provider = make_provider(config)
     session_manager = SessionManager(config.workspace_path)
     cron = CronService(get_cron_dir() / "jobs.json")
 
     agent = AgentLoop(
         bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        assistant_model=config.agents.defaults.assistant_model,
-        subagent_model=config.agents.defaults.subagent_model,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        context_window_tokens=config.agents.defaults.context_window_tokens,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy or None,
-        web_safety_check=config.tools.web.safety_check,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        filesystem_config=config.tools.filesystem,
+        config=config,
         session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-        tips_config=config.tips,
-        memory_config=config.memory,
+        cron_service=cron,
     )
 
     async def on_cron_job(job: CronJob) -> str | None:
@@ -209,12 +120,7 @@ def build_runtime(
             if notify_mode == "always":
                 should_notify = True
             elif notify_mode == "smart":
-                should_notify = await evaluate_response(
-                    response,
-                    job.payload.message,
-                    provider,
-                    agent.assistant_model,
-                )
+                should_notify = await evaluate_response(response, job.payload.message)
             else:
                 should_notify = False
 
@@ -263,23 +169,18 @@ def build_runtime(
         channel, chat_id = pick_heartbeat_target()
         if channel == "system":
             return
-        await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
+        await bus.publish_outbound(
+            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+        )
 
-    hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        provider=provider,
-        model=agent.assistant_model,
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
-        interval_s=hb_cfg.interval_s,
-        enabled=hb_cfg.enabled,
     )
 
     return RuntimeContext(
         config=config,
         bus=bus,
-        provider=provider,
         session_manager=session_manager,
         cron=cron,
         agent=agent,

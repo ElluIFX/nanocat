@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine
 
 from loguru import logger
-
-if TYPE_CHECKING:
-    from nanobot.providers.base import LLMProvider
 
 _HEARTBEAT_TOOL = [
     {
@@ -52,23 +49,44 @@ class HeartbeatService:
 
     def __init__(
         self,
-        workspace: Path,
-        provider: LLMProvider,
-        model: str,
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
-        interval_s: int = 30 * 60,
-        enabled: bool = True,
     ):
-        self.workspace = workspace
-        self.provider = provider
-        self.model = model
         self.on_execute = on_execute
         self.on_notify = on_notify
-        self.interval_s = interval_s
-        self.enabled = enabled
         self._running = False
         self._task: asyncio.Task | None = None
+
+    @property
+    def workspace(self):
+        from nanobot.config.loader import get_runtime_config
+
+        return get_runtime_config().workspace_path
+
+    @property
+    def interval_s(self) -> int:
+        from nanobot.config.loader import get_runtime_config
+
+        return get_runtime_config().gateway.heartbeat.interval_s
+
+    @property
+    def enabled(self) -> bool:
+        from nanobot.config.loader import get_runtime_config
+
+        return get_runtime_config().gateway.heartbeat.enabled
+
+    @property
+    def model(self) -> str:
+        from nanobot.config.loader import get_runtime_config
+
+        cfg = get_runtime_config().agents.defaults
+        return cfg.assistant_model or cfg.model
+
+    @property
+    def provider(self):
+        from nanobot.providers.manager import get_provider
+
+        return get_provider(self.model)
 
     @property
     def heartbeat_file(self) -> Path:

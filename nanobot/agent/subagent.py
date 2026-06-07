@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -13,7 +12,6 @@ from loguru import logger
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider
 from nanobot.utils.helpers import build_assistant_message
 
 # Tools excluded from subagents: nesting prevention, message sending,
@@ -36,19 +34,33 @@ class SubagentManager:
 
     def __init__(
         self,
-        provider: LLMProvider,
-        workspace: Path,
         bus: MessageBus,
         tools: ToolRegistry,
-        model: str | None = None,
     ):
-        self.provider = provider
-        self.workspace = workspace
         self.bus = bus
         self._tools = tools
-        self.model = model or provider.get_default_model()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+
+    @property
+    def model(self) -> str:
+        """Subagent model — resolved from the global runtime config."""
+        from nanobot.config.loader import get_runtime_config
+
+        cfg = get_runtime_config().agents.defaults
+        return cfg.subagent_model or cfg.assistant_model or cfg.model
+
+    @property
+    def provider(self):
+        from nanobot.providers.manager import get_provider
+
+        return get_provider(self.model)
+
+    @property
+    def workspace(self):
+        from nanobot.config.loader import get_runtime_config
+
+        return get_runtime_config().workspace_path
 
     @staticmethod
     def _bridge_image_tool_result(

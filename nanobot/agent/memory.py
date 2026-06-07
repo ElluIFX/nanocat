@@ -16,7 +16,6 @@ from loguru import logger
 from nanobot.utils.helpers import estimate_prompt_tokens_chain
 
 if TYPE_CHECKING:
-    from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
 
 
@@ -152,15 +151,21 @@ class MemoryStore:
 class NowledgeMemoryManager:
     """Owns LLM-based extraction of durable memories and writes them to Nowledge."""
 
-    def __init__(
-        self,
-        client: NowledgeClient,
-        provider: LLMProvider,
-        model: str,
-    ):
+    def __init__(self, client: NowledgeClient):
         self.client = client
-        self.provider = provider
-        self.model = model
+
+    @property
+    def model(self) -> str:
+        from nanobot.config.loader import get_runtime_config
+
+        cfg = get_runtime_config().agents.defaults
+        return cfg.assistant_model or cfg.model
+
+    @property
+    def provider(self):
+        from nanobot.providers.manager import get_provider
+
+        return get_provider(self.model)
 
     async def extract_and_store(self, messages: list[dict[str, object]]) -> None:
         """Extract durable memories from raw messages and store them in Nowledge."""
@@ -256,22 +261,17 @@ class MemoryConsolidator:
 
     def __init__(
         self,
-        workspace: Path,
-        provider: LLMProvider,
-        model: str,
         sessions: SessionManager,
-        context_window_tokens: int,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         threshold: float = 0.5,
         no_consolidate_turns: int = 3,
         nowledge_manager: NowledgeMemoryManager | None = None,
     ):
-        self.store = MemoryStore(workspace)
-        self.provider = provider
-        self.model = model
+        from nanobot.config.loader import get_runtime_config
+
+        self.store = MemoryStore(get_runtime_config().workspace_path)
         self.sessions = sessions
-        self.context_window_tokens = context_window_tokens
         self.threshold = threshold
         self.no_consolidate_turns = max(0, no_consolidate_turns)
         self.nowledge_manager = nowledge_manager
@@ -279,6 +279,31 @@ class MemoryConsolidator:
         self._get_tool_definitions = get_tool_definitions
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._consecutive_failures = 0
+
+    @property
+    def model(self) -> str:
+        from nanobot.config.loader import get_runtime_config
+
+        cfg = get_runtime_config().agents.defaults
+        return cfg.assistant_model or cfg.model
+
+    @property
+    def provider(self):
+        from nanobot.providers.manager import get_provider
+
+        return get_provider(self.model)
+
+    @property
+    def workspace(self):
+        from nanobot.config.loader import get_runtime_config
+
+        return get_runtime_config().workspace_path
+
+    @property
+    def context_window_tokens(self) -> int:
+        from nanobot.config.loader import get_runtime_config
+
+        return get_runtime_config().agents.defaults.context_window_tokens
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
