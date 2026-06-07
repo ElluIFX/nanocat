@@ -152,7 +152,7 @@ class ExecToolConfig(Base):
     path_append: str = ""
     deny_patterns: list[str] = Field(default_factory=list)
     allow_patterns: list[str] = Field(default_factory=list)
-    restrict_to_workspace: bool = False  # Block shell access to paths outside the working dir
+    restrict_to_workspace: bool = True  # Block shell access to paths outside the working dir
 
 
 class FilesystemToolConfig(Base):
