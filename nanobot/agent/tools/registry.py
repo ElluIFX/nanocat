@@ -1,5 +1,7 @@
 """Tool registry for dynamic tool management."""
 
+from __future__ import annotations
+
 from typing import Any
 
 from nanobot.agent.skills import SkillsLoader
@@ -84,6 +86,14 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         """Get list of registered tool names."""
         return list(self._tools.keys())
+
+    def filtered(self, exclude: frozenset[str] | set[str]) -> ToolRegistry:
+        """Return a new registry with the same tool instances except those in *exclude*."""
+        clone = ToolRegistry()
+        for name, tool in self._tools.items():
+            if name not in exclude:
+                clone._tools[name] = tool
+        return clone
 
     def __len__(self) -> int:
         return len(self._tools)

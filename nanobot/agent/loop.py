@@ -142,12 +142,8 @@ class AgentLoop:
             provider=provider,
             workspace=workspace,
             bus=bus,
+            tools=self.tools,
             model=self.model,
-            web_search_config=self.web_search_config,
-            web_proxy=web_proxy,
-            web_safety_check=self.web_safety_check,
-            exec_config=self.exec_config,
-            filesystem_config=self.filesystem_config,
         )
 
         self._running = False

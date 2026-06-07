@@ -1,5 +1,7 @@
 """Subagent manager for background task execution."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import uuid
@@ -8,22 +10,25 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.agent.skills import BUILTIN_SKILLS_DIR
-from nanobot.agent.tools.filesystem import (
-    EditFileTool,
-    ListDirTool,
-    LoadImageTool,
-    ReadFileTool,
-    WriteFileTool,
-)
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import ExecToolConfig, FilesystemToolConfig, WebSearchConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.utils.helpers import build_assistant_message
+
+# Tools excluded from subagents: nesting prevention, message sending,
+# scheduling, and Nowledge memory operations.
+_SUBAGENT_EXCLUDED = frozenset({
+    "spawn",
+    "delegate",
+    "message",
+    "cron",
+    "memory_search",
+    "memory_add",
+    "memory_update",
+    "memory_delete",
+    "read_working_memory",
+})
 
 
 class SubagentManager:
@@ -34,22 +39,14 @@ class SubagentManager:
         provider: LLMProvider,
         workspace: Path,
         bus: MessageBus,
+        tools: ToolRegistry,
         model: str | None = None,
-        web_search_config: WebSearchConfig | None = None,
-        web_proxy: str | None = None,
-        web_safety_check: bool = True,
-        exec_config: ExecToolConfig | None = None,
-        filesystem_config: FilesystemToolConfig | None = None,
     ):
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
+        self._tools = tools
         self.model = model or provider.get_default_model()
-        self.web_search_config = web_search_config or WebSearchConfig()
-        self.web_proxy = web_proxy
-        self.web_safety_check = web_safety_check
-        self.exec_config = exec_config or ExecToolConfig()
-        self.filesystem_config = filesystem_config or FilesystemToolConfig()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -66,11 +63,6 @@ class SubagentManager:
             if isinstance(block, dict) and block.get("type") in {"image_url", "text"}
         ]
         if not any(block.get("type") == "image_url" for block in image_blocks):
-            logger.debug(
-                "Subagent image bridge skipped for {}: missing image_url block (result_type={})",
-                tool_name,
-                type(result).__name__,
-            )
             return None
 
         tool_text = (
@@ -78,17 +70,9 @@ class SubagentManager:
             "from this tool, then analyze it."
         )
         user_blocks = [
-            {
-                "type": "text",
-                "text": "[Tool Return Value] Auto-forwarded image payload from load_image.",
-            },
+            {"type": "text", "text": "[Tool Return Value] Auto-forwarded image payload from load_image."},
             *image_blocks,
         ]
-        logger.info(
-            "Subagent image bridge prepared for {} with {} content blocks",
-            tool_name,
-            len(user_blocks),
-        )
         return tool_text, user_blocks
 
     async def spawn(
@@ -123,53 +107,7 @@ class SubagentManager:
 
     async def _execute_task(self, task_id: str, task: str, label: str) -> str:
         """Run a subagent to completion and return the final result string."""
-        tools = ToolRegistry()
-        fs_cfg = self.filesystem_config
-        allowed_dir = self.workspace if fs_cfg.restrict_to_workspace else None
-        fs_safety = fs_cfg.safety_check
-        extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
-        tools.register(
-            ReadFileTool(
-                workspace=self.workspace,
-                allowed_dir=allowed_dir,
-                extra_allowed_dirs=extra_read,
-                safety_check=fs_safety,
-            )
-        )
-        tools.register(
-            LoadImageTool(
-                workspace=self.workspace,
-                allowed_dir=allowed_dir,
-                extra_allowed_dirs=extra_read,
-                safety_check=fs_safety,
-            )
-        )
-        tools.register(
-            WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
-        )
-        tools.register(
-            EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
-        )
-        tools.register(
-            ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
-        )
-        tools.register(
-            ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                restrict_to_workspace=fs_cfg.restrict_to_workspace,
-                path_append=self.exec_config.path_append,
-                safety_check=self.exec_config.safety_check,
-            )
-        )
-        tools.register(
-            WebSearchTool(
-                config=self.web_search_config,
-                proxy=self.web_proxy,
-                safety_check=self.web_safety_check,
-            )
-        )
-        tools.register(WebFetchTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
+        tools = self._tools.filtered(_SUBAGENT_EXCLUDED)
 
         system_prompt = self._build_subagent_prompt()
         messages: list[dict[str, Any]] = [
@@ -201,22 +139,14 @@ class SubagentManager:
                     )
                 )
                 for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.debug(
                         "Subagent [{}] executing: {} with arguments: {}",
-                        task_id,
-                        tool_call.name,
-                        args_str,
+                        task_id, tool_call.name,
+                        json.dumps(tool_call.arguments, ensure_ascii=False),
                     )
                     result = await tools.execute(tool_call.name, tool_call.arguments)
                     if bridged := self._bridge_image_tool_result(tool_call.name, result):
                         tool_text, user_blocks = bridged
-                        logger.info(
-                            "Subagent [{}] applying image bridge for tool_call_id={} ({})",
-                            task_id,
-                            tool_call.id,
-                            tool_call.name,
-                        )
                         messages.append(
                             {
                                 "role": "tool",
@@ -226,11 +156,6 @@ class SubagentManager:
                             }
                         )
                         messages.append({"role": "user", "content": user_blocks})
-                        logger.debug(
-                            "Subagent [{}] injected synthetic user image message from tool {}",
-                            task_id,
-                            tool_call.name,
-                        )
                         continue
                     messages.append(
                         {
@@ -247,11 +172,7 @@ class SubagentManager:
         return final_result or "Task completed but no final response was generated."
 
     async def _run_subagent(
-        self,
-        task_id: str,
-        task: str,
-        label: str,
-        origin: dict[str, str],
+        self, task_id: str, task: str, label: str, origin: dict[str, str],
     ) -> None:
         """Execute the subagent task and announce the result via the message bus."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -260,29 +181,20 @@ class SubagentManager:
             logger.info("Subagent [{}] completed successfully", task_id)
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
         except Exception as e:
-            error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            await self._announce_result(task_id, label, task, str(e), origin, "error")
 
     async def run_and_collect(
-        self,
-        tasks: list[tuple[str, str | None]],
+        self, tasks: list[tuple[str, str | None]],
     ) -> list[dict[str, Any]]:
-        """Run multiple subagents concurrently and return all results inline.
-
-        Each task is a (task_text, label) tuple. Results are returned as a list
-        of dicts with keys: label, result, status ("ok" | "error").
-        """
+        """Run multiple subagents concurrently and return all results inline."""
 
         async def _run_one(task_text: str, label: str) -> dict[str, Any]:
             task_id = str(uuid.uuid4())[:8]
-            logger.info("Delegate subagent [{}] starting: {}", task_id, label)
             try:
                 result = await self._execute_task(task_id, task_text, label)
-                logger.info("Delegate subagent [{}] completed", task_id)
                 return {"label": label, "result": result, "status": "ok"}
             except Exception as e:
-                logger.error("Delegate subagent [{}] failed: {}", task_id, e)
                 return {"label": label, "result": str(e), "status": "error"}
 
         coros = [
@@ -292,13 +204,7 @@ class SubagentManager:
         return list(await asyncio.gather(*coros))
 
     async def _announce_result(
-        self,
-        task_id: str,
-        label: str,
-        task: str,
-        result: str,
-        origin: dict[str, str],
-        status: str,
+        self, task_id: str, label: str, task: str, result: str, origin: dict[str, str], status: str,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
@@ -312,17 +218,16 @@ Result:
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
 
-        # Inject as system message to trigger main agent
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
         )
-
         await self.bus.publish_inbound(msg)
         logger.debug(
-            "Subagent [{}] announced result to {}:{}", task_id, origin["channel"], origin["chat_id"]
+            "Subagent [{}] announced result to {}:{}",
+            task_id, origin["channel"], origin["chat_id"],
         )
 
     def _build_subagent_prompt(self) -> str:
