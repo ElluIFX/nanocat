@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+import uuid
 from collections import deque
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
@@ -558,14 +559,31 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
 
-                for tool_call in response.tool_calls:
-                    tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.debug(f"Tool call: {tool_call.name}({args_str})")
-                    result = await self.tools.execute(
-                        tool_call.name, tool_call.arguments, bypass_safety_check, self.context.skills
+                # Attach short correlation ids for log tracing.
+                _log_ids: dict[int, str] = {}
+                for i, tc in enumerate(response.tool_calls):
+                    _log_ids[i] = uuid.uuid4().hex[:4]
+
+                # Log invocations before firing.
+                for i, tc in enumerate(response.tool_calls):
+                    tools_used.append(tc.name)
+                    args_str = json.dumps(tc.arguments, ensure_ascii=False)
+                    logger.debug(
+                        "[%s] Tool call: %s(%s)", _log_ids[i], tc.name, args_str
                     )
-                    result = self._intercept_oversized_image(result)
+
+                async def _run_one(idx: int, tc: Any) -> tuple[int, Any, Any]:
+                    result = await self.tools.execute(
+                        tc.name, tc.arguments, bypass_safety_check, self.context.skills
+                    )
+                    return idx, tc, self._intercept_oversized_image(result)
+
+                _results = await asyncio.gather(
+                    *[_run_one(i, tc) for i, tc in enumerate(response.tool_calls)]
+                )
+
+                # Replay results in original order so messages are deterministic.
+                for idx, tc, result in sorted(_results, key=lambda r: r[0]):
                     result_str = str(result)
                     if len(result_str) > 512:
                         result_str = (
@@ -573,25 +591,27 @@ class AgentLoop:
                             + f"...[TRUNCATED {len(result_str) - 512} CHARS]..."
                             + result_str[-256:]
                         )
-                    logger.debug(f"Tool {tool_call.name} result: {result_str}")
-                    if bridged := self._bridge_image_tool_result(tool_call.name, result):
+                    logger.debug(
+                        "[%s] Tool %s result: %s", _log_ids[idx], tc.name, result_str
+                    )
+                    if bridged := self._bridge_image_tool_result(tc.name, result):
                         tool_text, user_blocks = bridged
                         logger.info(
                             "Applying image bridge for tool_call_id={} ({})",
-                            tool_call.id,
-                            tool_call.name,
+                            tc.id,
+                            tc.name,
                         )
                         messages = self.context.add_tool_result(
-                            messages, tool_call.id, tool_call.name, tool_text
+                            messages, tc.id, tc.name, tool_text
                         )
                         messages.append({"role": "user", "content": user_blocks})
                         logger.debug(
                             "Injected synthetic user image message from tool {}",
-                            tool_call.name,
+                            tc.name,
                         )
                         continue
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tc.id, tc.name, result
                     )
             else:
                 clean = self._strip_think(response.content)
