@@ -1,74 +1,30 @@
 """Shell execution tool."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import locale
 import os
 import platform
-import re
 import shutil
 import signal
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
-_APPROVE_HINT = (
-    "\nIf you believe this action is necessary, explain the reason to the user "
-    "and ask them to use /approve to temporarily bypass this check."
-)
-
 
 def _decode_output(data: bytes) -> str:
-    """Decode subprocess output bytes to str.
-
-    Tries UTF-8 first; on failure falls back to the system's preferred
-    encoding (e.g. GBK/CP936 on Chinese Windows) so that non-UTF-8
-    tool output is still rendered legibly instead of being replaced.
-    """
+    """Decode subprocess output to str.  UTF-8 first; fall back to system encoding."""
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         system_enc = locale.getpreferredencoding(False) or "utf-8"
         return data.decode(system_enc, errors="replace")
-
-
-_UNIX = "unix"
-_CMD = "cmd"
-_POWERSHELL = "powershell"
-_ANY = "any"
-_SYSTEM = "system"
-_FILE = "file"
-_POLICY = "policy"
-
-# (pattern, shell_type, danger_category)
-# Patterns are matched against the lowercased command string.
-_DEFAULT_DENY_RULES: list[tuple[str, str, str]] = [
-    # --- FILE danger: Unix shell ---
-    (r"\brm\b.*-[a-zA-Z]*[rf]", _UNIX, _FILE),
-    (r"\bdd\b.*\bof=", _UNIX, _FILE),
-    (r">\s*/dev/sd[a-z]", _UNIX, _FILE),
-    # --- FILE danger: CMD ---
-    (r"\bdel\b.*(?:/[fq])", _CMD, _FILE),
-    (r"\brmdir\b.*(?:/s)", _CMD, _FILE),
-    # Listing / discovery via dir (no workspace carve-out; use file tools instead)
-    (r"\bdir\b", _CMD, _POLICY),
-    # --- FILE danger: PowerShell ---
-    (r"\bremove-item\b.*-(?:recurse|force|r)\b", _POWERSHELL, _FILE),
-    (r"\bri\b.*-(?:recurse|force|r)\b", _POWERSHELL, _FILE),
-    # --- SYSTEM danger: Unix shell ---
-    (r":\(\)\s*\{.*?\};\s*:", _UNIX, _SYSTEM),
-    (r"\b(?:mkfs|fdisk)\b", _UNIX, _SYSTEM),
-    # --- SYSTEM danger: CMD ---
-    (r"(?:^|[;&|]\s*)format\s+[a-zA-Z]:", _CMD, _SYSTEM),
-    # --- SYSTEM danger: Any ---
-    (r"\bdiskpart\b", _ANY, _SYSTEM),
-    (r"\b(?:shutdown|reboot|poweroff|halt)\b", _ANY, _SYSTEM),
-]
 
 
 class ExecTool(Tool):
@@ -83,17 +39,20 @@ class ExecTool(Tool):
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
         path_append: str = "",
-        safety_check: bool = True,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
         self.workspace_dir = workspace_dir or working_dir
-        self._deny_rules: list[tuple[str, str, str]] = list(_DEFAULT_DENY_RULES)
-        self._extra_deny_patterns: list[str] = deny_patterns or []
-        self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
-        self.safety_check = safety_check
+
+        # Wire extra security patterns into the central command guard.
+        from nanobot.security.command import set_allow_always, set_extra_deny
+
+        if deny_patterns:
+            set_extra_deny(deny_patterns)
+        if allow_patterns:
+            set_allow_always(allow_patterns)
 
     @property
     def name(self) -> str:
@@ -105,7 +64,10 @@ class ExecTool(Tool):
     def description(self) -> str:
         system = platform.system()
         working_path = self.working_dir or os.getcwd()
-        runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
+        runtime = (
+            f"{'macOS' if system == 'Darwin' else system} "
+            f"{platform.machine()}, Python {platform.python_version()}"
+        )
 
         if system == "Windows":
             gnu_available = all(shutil.which(x) for x in ["grep", "sed", "awk"])
@@ -157,11 +119,21 @@ class ExecTool(Tool):
         timeout: int | None = None,
         **kwargs: Any,
     ) -> str:
+        from nanobot.security import safety_bypass
+        from nanobot.security.command import guard_command
+
         cwd = working_dir or self.working_dir or os.getcwd()
-        if self.safety_check:
-            guard_error = self._guard_command(command, cwd)
-            if guard_error:
-                return guard_error
+
+        if not safety_bypass.get():
+            error = guard_command(
+                command,
+                cwd=cwd,
+                workspace=self.workspace_dir or cwd,
+                restrict_to_workspace=self.restrict_to_workspace,
+                on_blocked=self._on_blocked,
+            )
+            if error:
+                return error
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
 
@@ -210,14 +182,15 @@ class ExecTool(Tool):
             )
 
         except Exception as e:
-            return json.dumps({"stdout": "", "stderr": str(e), "returncode": -1}, ensure_ascii=False)
+            return json.dumps(
+                {"stdout": "", "stderr": str(e), "returncode": -1}, ensure_ascii=False
+            )
 
     @staticmethod
     def _kill_tree(process: asyncio.subprocess.Process) -> None:
         """Kill *process* and all its children (cross-platform best-effort)."""
         try:
             if sys.platform == "win32":
-                # taskkill /T kills the tree; /F forces.
                 subprocess = __import__("subprocess")
                 subprocess.run(
                     ["taskkill", "/T", "/F", "/PID", str(process.pid)],
@@ -235,133 +208,18 @@ class ExecTool(Tool):
             except Exception:
                 pass
 
-    def _on_blocked(self, command: str, category: str, shell_type: str, reason: str) -> bool:
-        """
-        Hook called when a command is about to be blocked.
+    def _on_blocked(
+        self, command: str, category: str, shell_type: str, reason: str
+    ) -> bool:
+        """Hook called when a command is about to be blocked.
+
         Return True to temporarily allow the command.
-        Override or replace this method to implement custom allow logic.
         """
         logger.warning(
-            "[SHELL BLOCKED] category=%s shell=%s reason=%s | command: %r",
+            "[SHELL BLOCKED] category={} shell={} reason={} | command: {!r}",
             category,
             shell_type,
             reason,
             command,
         )
         return False
-
-    def _guard_command(self, command: str, cwd: str) -> str | None:
-        """Best-effort safety guard for potentially destructive commands."""
-        cmd = command.strip()
-        lower = cmd.lower()
-        workspace = Path(self.workspace_dir or cwd).resolve()
-
-        for pattern, shell_type, category in self._deny_rules:
-            if not re.search(pattern, lower, re.DOTALL):
-                continue
-
-            allowed = False
-            if category == _FILE:
-                reason = f"file-dangerous command [{shell_type}]"
-            elif category == _POLICY:
-                reason = f"disallowed command [{shell_type}]"
-            else:
-                reason = f"system-dangerous command [{shell_type}]"
-
-            if category == _FILE:
-                allowed = self._file_danger_in_workspace(cmd, cwd, workspace)
-
-            if not allowed and self._on_blocked(cmd, category, shell_type, reason):
-                allowed = True
-
-            if not allowed:
-                return f"Error: Command blocked by safety guard ({reason})" + _APPROVE_HINT
-
-        for pattern in self._extra_deny_patterns:
-            if re.search(pattern, lower):
-                reason = "dangerous pattern [custom]"
-                if not self._on_blocked(cmd, _SYSTEM, _ANY, reason):
-                    return f"Error: Command blocked by safety guard ({reason})" + _APPROVE_HINT
-
-        if self.allow_patterns:
-            if not any(re.search(p, lower) for p in self.allow_patterns):
-                return "Error: Command blocked by safety guard (not in allowlist)" + _APPROVE_HINT
-
-        from nanobot.security.network import contains_internal_url
-
-        if contains_internal_url(cmd):
-            return "Error: Command blocked by safety guard (internal/private URL detected)" + _APPROVE_HINT
-
-        if self.restrict_to_workspace:
-            if "..\\" in cmd or "../" in cmd:
-                return "Error: Command blocked by safety guard (path traversal detected)" + _APPROVE_HINT
-
-            cwd_path = Path(cwd).resolve()
-            for raw in self._extract_absolute_paths(cmd):
-                try:
-                    expanded = os.path.expandvars(raw.strip())
-                    p = Path(expanded).expanduser().resolve()
-                except Exception:
-                    continue
-                if p.is_absolute() and not p.is_relative_to(cwd_path):
-                    return "Error: Command blocked by safety guard (path outside working dir)" + _APPROVE_HINT
-
-        return None
-
-    def _file_danger_in_workspace(self, command: str, cwd: str, workspace: Path) -> bool:
-        """
-        Return True if every extracted path argument in a file-dangerous command
-        resolves to a path within the workspace directory.
-        Returns False if any path is outside the workspace or resolution fails.
-        """
-        paths = self._extract_path_args(command)
-        if not paths:
-            return False
-
-        cwd_path = Path(cwd).resolve()
-        for raw in paths:
-            try:
-                expanded = os.path.expandvars(raw.strip("\"'"))
-                p = Path(expanded).expanduser()
-                if not p.is_absolute():
-                    p = cwd_path / p
-                p = p.resolve()
-            except Exception:
-                return False
-
-            if not p.is_relative_to(workspace):
-                return False
-
-        return True
-
-    @staticmethod
-    def _extract_path_args(command: str) -> list[str]:
-        """
-        Extract non-flag token arguments from a shell command as potential path targets.
-        Skips the command verb and option flags (-x, --flag, /F).
-        For key=value tokens (e.g. dd's of=...), extracts the value part.
-        """
-        tokens = re.split(r"\s+", command.strip())
-        result = []
-        for i, tok in enumerate(tokens):
-            if i == 0:
-                continue
-            clean = tok.strip("\"'")
-            if not clean:
-                continue
-            if re.match(r"^-{1,2}[a-zA-Z]", clean) or re.match(r"^/[a-zA-Z]{1,2}$", clean):
-                continue
-            if "=" in clean:
-                _, _, val = clean.partition("=")
-                if val:
-                    result.append(val)
-            else:
-                result.append(clean)
-        return result
-
-    @staticmethod
-    def _extract_absolute_paths(command: str) -> list[str]:
-        win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)
-        posix_paths = re.findall(r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command)
-        home_paths = re.findall(r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command)
-        return win_paths + posix_paths + home_paths

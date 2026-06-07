@@ -179,7 +179,7 @@ class MCPServerConfig(Base):
 class ToolsConfig(Base):
     """Tools configuration."""
 
-    max_return_chars: int = 16000  # Truncate tool results exceeding this; 0 = no limit
+    max_return_chars: int = 10000  # Truncate tool results exceeding this; 0 = no limit
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)

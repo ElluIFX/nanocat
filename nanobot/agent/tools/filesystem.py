@@ -21,28 +21,35 @@ def _resolve_path(
     workspace: Path | None = None,
     allowed_dir: Path | None = None,
     extra_allowed_dirs: list[Path] | None = None,
-    safety_check: bool = True,
 ) -> Path:
-    """Resolve path against workspace (if relative) and enforce directory restriction."""
+    """Resolve path against workspace (if relative) and enforce directory restriction.
+
+    The workspace is always the default containment boundary.  *allowed_dir*
+    and *extra_allowed_dirs* grant ADDITIONAL access beyond the workspace.
+    """
+    from nanobot.security import safety_bypass
+    from nanobot.security.path import is_under
+
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
     resolved = p.resolve()
-    if safety_check and allowed_dir:
-        all_dirs = [allowed_dir] + (extra_allowed_dirs or [])
-        if not any(_is_under(resolved, d) for d in all_dirs):
+
+    if not safety_bypass.get():
+        boundaries: list[Path] = []
+        if workspace:
+            boundaries.append(workspace.resolve())
+        if allowed_dir:
+            boundaries.append(allowed_dir.resolve())
+        if extra_allowed_dirs:
+            boundaries.extend(d.resolve() for d in extra_allowed_dirs)
+        if boundaries and not any(is_under(resolved, d) for d in boundaries):
             raise PermissionError(
-                f"Path {path} is outside allowed directory {allowed_dir}" + _APPROVE_HINT
+                f"Path '{path}' is outside the workspace directory.\n"
+                "Explain to the user that this path is restricted and ask them "
+                "to use /approve to temporarily bypass this check."
             )
     return resolved
-
-
-def _is_under(path: Path, directory: Path) -> bool:
-    try:
-        path.relative_to(directory.resolve())
-        return True
-    except ValueError:
-        return False
 
 
 class _FsTool(Tool):
@@ -53,16 +60,14 @@ class _FsTool(Tool):
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
-        safety_check: bool = True,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
         self._extra_allowed_dirs = extra_allowed_dirs
-        self._safety_check = safety_check
 
     def _resolve(self, path: str) -> Path:
         return _resolve_path(
-            path, self._workspace, self._allowed_dir, self._extra_allowed_dirs, self._safety_check
+            path, self._workspace, self._allowed_dir, self._extra_allowed_dirs
         )
 
 

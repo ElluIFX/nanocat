@@ -56,13 +56,9 @@ class ToolRegistry:
                     return f"Error: You can't execute the skill `{name}` as a tool. The description of the skill is:\n{skill}"
             return f"Error: Tool '{name}' not found."
 
-        # Temporarily disable safety checks if bypass is active
-        _saved: list[tuple[str, Any]] = []
-        if bypass_safety_check:
-            for attr in ("safety_check", "_safety_check"):
-                if hasattr(tool, attr):
-                    _saved.append((attr, getattr(tool, attr)))
-                    setattr(tool, attr, False)
+        from nanobot.security import safety_bypass
+
+        token = safety_bypass.set(bypass_safety_check) if bypass_safety_check else None
 
         try:
             # Attempt to cast parameters to match schema types
@@ -79,8 +75,8 @@ class ToolRegistry:
         except Exception as e:
             return f"Error executing {name}: {str(e)}" + _HINT
         finally:
-            for attr, val in _saved:
-                setattr(tool, attr, val)
+            if token is not None:
+                safety_bypass.reset(token)
 
     @property
     def tool_names(self) -> list[str]:

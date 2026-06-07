@@ -96,12 +96,11 @@ class WebSearchTool(Tool):
         "required": ["query"],
     }
 
-    def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None, safety_check: bool = True):
+    def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None):
         from nanobot.config.schema import WebSearchConfig
 
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
-        self.safety_check = safety_check
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         provider = self.config.provider.strip().lower() or "brave"
@@ -170,7 +169,10 @@ class WebSearchTool(Tool):
             logger.warning("SEARXNG_BASE_URL not set, falling back to DuckDuckGo")
             return await self._search_duckduckgo(query, n)
         endpoint = f"{base_url.rstrip('/')}/search"
-        is_valid, error_msg = _validate_url(endpoint)
+        from nanobot.security import safety_bypass
+
+        check = _validate_url_safe if not safety_bypass.get() else _validate_url
+        is_valid, error_msg = check(endpoint)
         if not is_valid:
             return f"Error: invalid SearXNG URL: {error_msg}"
         try:
@@ -256,16 +258,17 @@ class WebFetchTool(Tool):
         "required": ["url"],
     }
 
-    def __init__(self, max_chars: int = 50000, proxy: str | None = None, safety_check: bool = True):
+    def __init__(self, max_chars: int = 50000, proxy: str | None = None):
         self.max_chars = max_chars
         self.proxy = proxy
-        self.safety_check = safety_check
 
     async def execute(
         self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any
     ) -> str:
+        from nanobot.security import safety_bypass
+
         max_chars = max_chars or self.max_chars
-        if self.safety_check:
+        if not safety_bypass.get():
             is_valid, error_msg = _validate_url_safe(url)
         else:
             is_valid, error_msg = _validate_url(url)
@@ -338,9 +341,10 @@ class WebFetchTool(Tool):
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
 
+            from nanobot.security import safety_bypass
             from nanobot.security.network import validate_resolved_url
 
-            if self.safety_check:
+            if not safety_bypass.get():
                 redir_ok, redir_err = validate_resolved_url(str(r.url))
                 if not redir_ok:
                     return json.dumps(

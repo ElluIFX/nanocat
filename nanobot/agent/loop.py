@@ -224,14 +224,12 @@ class AgentLoop:
         """Register the default set of tools."""
         fs_cfg = self.filesystem_config
         allowed_dir = self.workspace if fs_cfg.restrict_to_workspace else None
-        fs_safety = fs_cfg.safety_check
         extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
         self.tools.register(
             ReadFileTool(
                 workspace=self.workspace,
                 allowed_dir=allowed_dir,
                 extra_allowed_dirs=extra_read,
-                safety_check=fs_safety,
             )
         )
         self.tools.register(
@@ -239,7 +237,6 @@ class AgentLoop:
                 workspace=self.workspace,
                 allowed_dir=allowed_dir,
                 extra_allowed_dirs=extra_read,
-                safety_check=fs_safety,
             )
         )
         self.tools.register(ParseImageTool(workspace=str(self.workspace)))
@@ -253,7 +250,7 @@ class AgentLoop:
             FileHexTool,
         ):
             self.tools.register(
-                cls(workspace=self.workspace, allowed_dir=allowed_dir, safety_check=fs_safety)
+                cls(workspace=self.workspace, allowed_dir=allowed_dir)
             )
         self.tools.register(
             ExecTool(
@@ -261,7 +258,6 @@ class AgentLoop:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=fs_cfg.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
-                safety_check=self.exec_config.safety_check,
                 deny_patterns=self.exec_config.deny_patterns or None,
                 allow_patterns=self.exec_config.allow_patterns or None,
             )
@@ -270,10 +266,9 @@ class AgentLoop:
             WebSearchTool(
                 config=self.web_search_config,
                 proxy=self.web_proxy,
-                safety_check=self.web_safety_check,
             )
         )
-        self.tools.register(WebFetchTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
+        self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(WaitTool(send_callback=self.bus.publish_outbound))
         self.tools.register(TodoTool(send_callback=self.bus.publish_outbound))
@@ -527,6 +522,11 @@ class AgentLoop:
         bypass_safety_check: bool = False,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
+        from nanobot.security import safety_bypass
+
+        _bypass_token = (
+            safety_bypass.set(bypass_safety_check) if bypass_safety_check else None
+        )
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -571,7 +571,7 @@ class AgentLoop:
                     tools_used.append(tc.name)
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
                     logger.debug(
-                        "[%s] Tool call: %s(%s)", _log_ids[i], tc.name, args_str
+                        "[{}] Tool call: {}({})", _log_ids[i], tc.name, args_str
                     )
 
                 async def _run_one(idx: int, tc: Any) -> tuple[int, Any, Any]:
@@ -594,7 +594,7 @@ class AgentLoop:
                             + result_str[-256:]
                         )
                     logger.debug(
-                        "[%s] Tool %s result: %s", _log_ids[idx], tc.name, result_str
+                        "[{}] Tool {} result: {}", _log_ids[idx], tc.name, result_str
                     )
                     if bridged := self._bridge_image_tool_result(tc.name, result):
                         tool_text, user_blocks = bridged
@@ -630,7 +630,7 @@ class AgentLoop:
                                 f"Use appropriate tools to read this file selectively."
                             )
                             logger.info(
-                                "[%s] Tool %s result truncated: %d → %s",
+                                "[{}] Tool {} result truncated: {} → {}",
                                 _log_ids[idx], tc.name, len(_str), tmp.name,
                             )
 
@@ -661,6 +661,8 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
+        if _bypass_token is not None:
+            safety_bypass.reset(_bypass_token)
         return final_content, tools_used, messages
 
     async def run(self) -> None:
@@ -1237,12 +1239,19 @@ class AgentLoop:
             return await self._handle_sid(msg, key)
         if msg.content.strip().lower().startswith("/approve"):
             parts = msg.content.strip().split()
-            try:
-                duration = int(parts[1]) if len(parts) > 1 else 5
-            except (ValueError, IndexError):
-                duration = 5
-            until = datetime.now() + timedelta(minutes=duration)
-            session.metadata["approve_until"] = until.isoformat()
+            if len(parts) > 1:
+                try:
+                    duration = int(parts[1])
+                except ValueError:
+                    duration = 5
+                until = datetime.now() + timedelta(minutes=duration)
+                session.metadata["approve_until"] = until.isoformat()
+                approve_text = (
+                    f"for {duration} minute(s), expiring at {until.strftime('%H:%M:%S')}"
+                )
+            else:
+                session.metadata["approve_once"] = True
+                approve_text = "for this turn only"
             self.sessions.save(session)
             msg = InboundMessage(
                 channel=msg.channel,
@@ -1250,8 +1259,7 @@ class AgentLoop:
                 sender_id=msg.sender_id,
                 content=(
                     f"[APPROVE] You have been granted a temporary safety-check bypass "
-                    f"for {duration} minute(s), expiring at {until.strftime('%H:%M:%S')}. "
-                    f"Please continue your task."
+                    f"{approve_text}. Please continue your task."
                 ),
                 metadata=msg.metadata,
                 media=msg.media,
@@ -1326,13 +1334,16 @@ class AgentLoop:
 
         # Check if a temporary safety-check bypass is active
         _bypass = False
-        _approve_str = session.metadata.get("approve_until")
-        if _approve_str:
-            try:
-                if datetime.fromisoformat(_approve_str) > datetime.now():
-                    _bypass = True
-            except (ValueError, TypeError):
-                pass
+        if session.metadata.pop("approve_once", None):
+            _bypass = True
+        else:
+            _approve_str = session.metadata.get("approve_until")
+            if _approve_str:
+                try:
+                    if datetime.fromisoformat(_approve_str) > datetime.now():
+                        _bypass = True
+                except (ValueError, TypeError):
+                    pass
 
         n_initial = len(initial_messages)
         final_content, _, all_msgs = await self._run_agent_loop(
