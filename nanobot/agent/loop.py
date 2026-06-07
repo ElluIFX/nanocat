@@ -74,7 +74,11 @@ class AgentLoop:
     # e.g.  data='iVBORw0KGgo...'  or  data="iVBORw0KGgo..."
     _B64_BLOB_RE = re.compile(r"""data=['\"]([A-Za-z0-9+/=\n]{1024,})['\"]""")
     _MIME_IN_BLOB_RE = re.compile(r"""mimeType=['\"]([^'\"]+)['\"]""")
-    _SESSION_NAME_UNSAFE = re.compile(r'[<>:"/\\|?*\t\r\n]')
+    _NAME_GEN_PROMPT = (
+        "Summarize this conversation in 10 characters or fewer. "
+        "Output ONLY the title. No punctuation, no special symbols. "
+        "Language must match the conversation."
+    )
 
     def __init__(
         self,
@@ -98,6 +102,7 @@ class AgentLoop:
             nowledge_enabled=_nowledge_cfg.enabled,
         )
         self.sessions = session_manager or SessionManager(config.workspace_path)
+        self.sessions.set_name_generator(self._generate_session_name)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             bus=bus,
@@ -947,59 +952,123 @@ class AgentLoop:
             content=self.tips.model_error.format(error="Invalid command"),
         )
 
-    def _validate_session_name(self, name: str) -> str | None:
-        """Return an error reason string if *name* is not a valid save name, else None."""
-        if not name:
-            return "name is empty"
-        if len(name) > 64:
-            return "name too long (max 64 characters)"
-        if self._SESSION_NAME_UNSAFE.search(name):
-            return 'contains invalid characters (/ \\ : * ? " < > | and whitespace are not allowed)'
-        if name in (".", ".."):
-            return "name is reserved"
-        return None
+    async def _generate_session_name(self, session: Session, _channel: str) -> str | None:
+        """Generate a ≤10-char session name from text-only conversation history."""
+        from nanobot.providers.manager import get_provider
+
+        # Extract text-only messages (user + assistant, no tool calls/results)
+        text_lines = []
+        for msg in session.messages:
+            role = msg.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = msg.get("content", "")
+            if not content:
+                continue
+            if role == "assistant" and msg.get("tool_calls"):
+                continue
+            # Truncate each message to avoid token waste
+            text_lines.append(content[:200])
+        if not text_lines:
+            return None
+
+        history_text = "\n".join(text_lines)
+        messages = [
+            {"role": "system", "content": self._NAME_GEN_PROMPT},
+            {"role": "user", "content": f"Conversation:\n{history_text}"},
+        ]
+        try:
+            provider = get_provider(self.assistant_model)
+            resp = await provider.chat(messages, model=self.assistant_model, max_tokens=32)
+            name = (resp.content or "").strip()
+            # Clean: remove quotes, punctuation, extra whitespace
+            name = name.strip("\"'\"'").strip()
+            if not name:
+                return None
+            return name[:10]
+        except Exception:
+            return None
 
     async def _handle_session(self, msg: InboundMessage, session: Session) -> OutboundMessage:
-        """Handle /session save|load|delete commands."""
+        """Handle /session list|view|switch commands."""
 
         def _reply(content: str) -> OutboundMessage:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         parts = msg.content.strip().split(maxsplit=2)
         sub = parts[1].lower() if len(parts) > 1 else ""
-        name = parts[2].strip() if len(parts) > 2 else ""
+        arg = parts[2].strip() if len(parts) > 2 else ""
 
-        # No subcommand or "list": show list
+        # /session list [N=10]
         if not sub or sub == "list":
-            names = self.sessions.list_named(session.key)
-            if not names:
+            try:
+                limit = int(arg) if arg else 10
+            except ValueError:
+                limit = 10
+            items = self.sessions.list_sessions(msg.channel, min_turns=3, limit=limit)
+            if not items:
                 return _reply(self.tips.session_list_empty)
-            return _reply(self.tips.session_list.format(items="\n".join(f"• {n}" for n in names)))
+            lines = []
+            for item in items:
+                sid = item["id"]
+                name = item["name"] or "Unnamed session"
+                last = item.get("last_active", "")[:16].replace("T", " ")
+                lines.append(f"`{sid}` · {name} · {last}")
+            return _reply(self.tips.session_list.format(items="\n".join(lines)))
 
-        if sub == "save" and name:
-            if reason := self._validate_session_name(name):
-                return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
-            self.sessions.save(session)
-            self.sessions.save_named(session, name)
-            return _reply(self.tips.session_saved.format(name=name))
+        # /session view [id]
+        if sub == "view" and arg:
+            s = self.sessions.get_session(msg.channel, arg)
+            if s is None:
+                return _reply(self.tips.session_not_found.format(session_id=arg))
+            turns_text = self._format_session_turns(s)
+            return _reply(
+                self.tips.session_view.format(
+                    name=s.name or "Unnamed session",
+                    id=s.id,
+                    turns=turns_text,
+                )
+            )
 
-        if sub == "load" and name:
-            if reason := self._validate_session_name(name):
-                return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
-            loaded = self.sessions.load_named(session.key, name)
-            if loaded is None:
-                return _reply(self.tips.session_not_found.format(name=name))
-            return _reply(self.tips.session_loaded.format(name=name))
-
-        if sub == "delete" and name:
-            if reason := self._validate_session_name(name):
-                return _reply(self.tips.session_invalid_name.format(name=name, reason=reason))
-            deleted = self.sessions.delete_named(session.key, name)
-            if not deleted:
-                return _reply(self.tips.session_not_found.format(name=name))
-            return _reply(self.tips.session_deleted.format(name=name))
+        # /session switch [id]
+        if sub == "switch" and arg:
+            ok = self.sessions.set_active(msg.channel, msg.chat_id, arg)
+            if not ok:
+                return _reply(self.tips.session_not_found.format(session_id=arg))
+            s = self.sessions.get_session(msg.channel, arg)
+            name = (s.name if s else None) or "Unnamed session"
+            return _reply(self.tips.session_switched.format(session_id=arg, name=name))
 
         return _reply(self.tips.session_usage)
+
+    @staticmethod
+    def _format_session_turns(session: Session, turns: int = 3) -> str:
+        """Extract the last N turns as truncated text for preview."""
+        boundaries = session.get_completed_turn_boundaries()
+        if not boundaries:
+            return "(no completed turns)"
+
+        recent = boundaries[-turns:]
+        turn_texts = []
+        for i, (start, end) in enumerate(recent, 1):
+            msgs = session.messages[start:end]
+            lines = []
+            for m in msgs:
+                role = m.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                content = m.get("content", "")
+                if not content:
+                    continue
+                if role == "assistant" and m.get("tool_calls"):
+                    continue
+                # Center-ellipsis truncation for lines > 40 chars
+                if len(content) > 40:
+                    content = content[:18] + "..." + content[-19:]
+                prefix = "[Q]" if role == "user" else "[A]"
+                lines.append(f"{prefix} {content}")
+            turn_texts.append(f"Turn {i}:\n" + "\n".join(lines))
+        return "\n\n".join(turn_texts)
 
     async def _handle_context(self, msg: InboundMessage, session: Session) -> OutboundMessage:
         """Handle /context command — show compact numeric context panel."""
@@ -1030,15 +1099,16 @@ class AgentLoop:
         )
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-    async def _handle_whoami(self, msg: InboundMessage, session_key: str) -> OutboundMessage:
-        """Handle /whoami command — show channel and chat routing IDs."""
+    async def _handle_whoami(self, msg: InboundMessage, session: Session) -> OutboundMessage:
+        """Handle /whoami command — show channel, chat and session routing IDs."""
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=self.tips.whoami_info.format(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                session_key=session_key,
+                session_id=session.id,
+                session_key=session.key,
             ),
         )
 
@@ -1145,8 +1215,7 @@ class AgentLoop:
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
             logger.info("Processing system message from {}", msg.sender_id)
-            key = f"{channel}:{chat_id}"
-            session = self.sessions.get_or_create(key)
+            session = self.sessions.get_or_create(channel, chat_id)
             if not transient:
                 await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), session)
@@ -1184,18 +1253,20 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        key = session_key or msg.session_key
-        session = self.sessions.get_or_create(key)
+        if session_key is not None:
+            session = self.sessions.get_system_session(session_key)
+        else:
+            session = self.sessions.get_or_create(msg.channel, msg.chat_id)
 
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
             session.metadata.pop("nowledge_thread_id", None)
-            session.clear()
-            self.sessions.save(session)
-            self.sessions.invalidate(session.key)
-            self._pending_buf.pop(key, None)
-            self._session_gen.pop(key, None)
+            # Create a fresh session and switch to it
+            new_session = self.sessions._new_session(msg.channel, msg.chat_id)
+            self._pending_buf.pop(msg.session_key, None)
+            self._session_gen.pop(msg.session_key, None)
+            session = new_session
 
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=self.tips.new_session
@@ -1215,7 +1286,7 @@ class AgentLoop:
         if cmd == "/context":
             return await self._handle_context(msg, session)
         if cmd == "/whoami":
-            return await self._handle_whoami(msg, key)
+            return await self._handle_whoami(msg, session)
         if msg.content.strip().lower().startswith("/approve"):
             parts = msg.content.strip().split()
             if len(parts) > 1:

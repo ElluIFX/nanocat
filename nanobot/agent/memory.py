@@ -311,7 +311,7 @@ class MemoryConsolidator:
 
     @staticmethod
     def _channel_and_chat(session: Session) -> tuple[str | None, str | None]:
-        return session.key.split(":", 1) if ":" in session.key else (None, None)
+        return (session.channel, session.chat_id)
 
     def _estimate_prompt_tokens(
         self,
@@ -766,7 +766,7 @@ class NowledgeThreadManager:
     @staticmethod
     def _extract_title(session: Session) -> str:
         """Derive a thread title using the current date as the title."""
-        return f"Conversation from {session.key.replace(':', '_')}"
+        return f"Conversation from {session.channel}_{session.chat_id}"
 
     async def append_turn(self, session: Session, new_messages: list[dict]) -> None:
         """Append new-turn messages to the session's Nowledge thread.

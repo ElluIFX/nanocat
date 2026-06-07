@@ -267,7 +267,7 @@ class TipsConfig(Base):
         "/whoami — Show channel/chat identity\n"
         "/help — Show available commands\n"
         "/compact — Manually consolidate old session turns\n"
-        "/session — List saved sessions\n"
+        "/session — View and switch sessions\n"
         "/status — Show agent status and recent logs\n"
         "/approve <N=5> — Approve safety check for N minutes\n"
         "/max <prompt> — Use high-capability model for this turn"
@@ -296,25 +296,27 @@ class TipsConfig(Base):
     model_error: str = "Error updating model: {error}"
     # /model (choice invalid) — {choice_number}
     model_choice_invalid: str = "Invalid choice number: {choice_number}"
-    # /session — usage shown when subcommand is unknown or missing
-    session_usage: str = "Usage:\n  /session save/load/delete <name>\n  /session list"
-    # /session save — success — {name}
-    session_saved: str = "Session saved as '{name}'."
-    # /session load — success — {name}
-    session_loaded: str = "Session '{name}' loaded."
-    # /session delete — success — {name}
-    session_deleted: str = "Session '{name}' deleted."
-    # /session load — not found — {name}
-    session_not_found: str = "No saved session named '{name}'."
-    # /session save/load — invalid name — {name}, {reason}
-    session_invalid_name: str = "Invalid session name '{name}': {reason}."
-    # /session list — no saves exist
-    session_list_empty: str = "No saved sessions.\nUsage:\n  /session save/load/delete <name>"
-    # /session list — {items} (pre-formatted bullet list)
-    session_list: str = "Saved sessions:\n{items}\n\nUsage:\n  /session save/load/delete <name>"
-    # /whoami — {channel}, {chat_id}, {session_key}
+    # /session - usage shown when subcommand is unknown or missing
+    session_usage: str = (
+        "Usage:\n  /session list [N=10]\n  /session view <id>\n  /session switch <id>"
+    )
+    # /session list — no eligible sessions
+    session_list_empty: str = "No named sessions yet. Keep chatting to auto-generate session names."
+    # /session list — {items} (pre-formatted markdown list)
+    session_list: str = "Sessions:\n{items}\n\nUsage:\n  /session view <id>\n  /session switch <id>"
+    # /session view — {name}, {id}, {turns}
+    session_view: str = "--- {name} ({id}) ---\n{turns}"
+    # /session switch — {session_id}, {name}
+    session_switched: str = "Switched to session `{session_id}` ({name})."
+    # /session view/switch — not found — {session_id}
+    session_not_found: str = "Session `{session_id}` not found."
+    # /whoami — {channel}, {chat_id}, {session_id}, {session_key}
     whoami_info: str = (
-        "🐈 Session Identity\nChannel: {channel}\nChat ID: {chat_id}\nSession Key: {session_key}"
+        "🐈 Session Identity\n"
+        "Channel: {channel}\n"
+        "Chat ID: {chat_id}\n"
+        "Session: {session_id}\n"
+        "Key: {session_key}"
     )
     # /context panel body
     context_panel: str = (

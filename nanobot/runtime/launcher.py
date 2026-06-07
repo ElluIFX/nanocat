@@ -139,15 +139,11 @@ def build_runtime(
 
     def pick_heartbeat_target() -> tuple[str, str]:
         enabled = set(channels.enabled_channels)
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if ":" not in key:
-                continue
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
+        for ch in enabled:
+            sessions = session_manager.list_sessions(ch, min_turns=1, limit=1)
+            if sessions:
+                item = sessions[0]
+                return ch, item.get("chat_id", "direct")
         return "system", "direct"
 
     async def on_heartbeat_execute(tasks: str) -> str:
@@ -223,7 +219,9 @@ def run_gateway(
 ) -> None:
     """Synchronous wrapper for gateway runtime."""
     try:
-        asyncio.run(run_gateway_async(config_path=config_path, workspace=workspace, verbose=verbose))
+        asyncio.run(
+            run_gateway_async(config_path=config_path, workspace=workspace, verbose=verbose)
+        )
     except KeyboardInterrupt:
         logger.info("Shutting down runtime")
 
