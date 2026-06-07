@@ -222,20 +222,16 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        fs_cfg = self.filesystem_config
-        allowed_dir = self.workspace if fs_cfg.restrict_to_workspace else None
-        extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
+        extra_read = [BUILTIN_SKILLS_DIR]
         self.tools.register(
             ReadFileTool(
                 workspace=self.workspace,
-                allowed_dir=allowed_dir,
                 extra_allowed_dirs=extra_read,
             )
         )
         self.tools.register(
             LoadImageTool(
                 workspace=self.workspace,
-                allowed_dir=allowed_dir,
                 extra_allowed_dirs=extra_read,
             )
         )
@@ -250,13 +246,12 @@ class AgentLoop:
             FileHexTool,
         ):
             self.tools.register(
-                cls(workspace=self.workspace, allowed_dir=allowed_dir)
+                cls(workspace=self.workspace, extra_allowed_dirs=extra_read)
             )
         self.tools.register(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
-                restrict_to_workspace=fs_cfg.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
                 deny_patterns=self.exec_config.deny_patterns or None,
                 allow_patterns=self.exec_config.allow_patterns or None,

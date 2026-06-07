@@ -152,13 +152,13 @@ class ExecToolConfig(Base):
     path_append: str = ""
     deny_patterns: list[str] = Field(default_factory=list)
     allow_patterns: list[str] = Field(default_factory=list)
+    restrict_to_workspace: bool = False  # Block shell access to paths outside the working dir
 
 
 class FilesystemToolConfig(Base):
     """Filesystem tool configuration."""
 
     safety_check: bool = True  # If false, skip path restriction checks
-    restrict_to_workspace: bool = False  # If true, restrict file access to workspace directory
 
 
 class MCPServerConfig(Base):

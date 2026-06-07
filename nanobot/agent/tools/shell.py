@@ -37,13 +37,11 @@ class ExecTool(Tool):
         workspace_dir: str | None = None,
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
-        restrict_to_workspace: bool = False,
         path_append: str = "",
     ):
         self.timeout = timeout
         self.working_dir = working_dir
         self.workspace_dir = workspace_dir or working_dir
-        self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
 
         # Wire extra security patterns into the central command guard.
@@ -129,7 +127,6 @@ class ExecTool(Tool):
                 command,
                 cwd=cwd,
                 workspace=self.workspace_dir or cwd,
-                restrict_to_workspace=self.restrict_to_workspace,
                 on_blocked=self._on_blocked,
             )
             if error:

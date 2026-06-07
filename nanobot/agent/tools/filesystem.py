@@ -19,13 +19,12 @@ _APPROVE_HINT = (
 def _resolve_path(
     path: str,
     workspace: Path | None = None,
-    allowed_dir: Path | None = None,
     extra_allowed_dirs: list[Path] | None = None,
 ) -> Path:
     """Resolve path against workspace (if relative) and enforce directory restriction.
 
-    The workspace is always the default containment boundary.  *allowed_dir*
-    and *extra_allowed_dirs* grant ADDITIONAL access beyond the workspace.
+    The workspace is always the default containment boundary.
+    *extra_allowed_dirs* grant ADDITIONAL access beyond the workspace.
     """
     from nanobot.security import safety_bypass
     from nanobot.security.path import is_under
@@ -39,8 +38,6 @@ def _resolve_path(
         boundaries: list[Path] = []
         if workspace:
             boundaries.append(workspace.resolve())
-        if allowed_dir:
-            boundaries.append(allowed_dir.resolve())
         if extra_allowed_dirs:
             boundaries.extend(d.resolve() for d in extra_allowed_dirs)
         if boundaries and not any(is_under(resolved, d) for d in boundaries):
@@ -58,16 +55,14 @@ class _FsTool(Tool):
     def __init__(
         self,
         workspace: Path | None = None,
-        allowed_dir: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
     ):
         self._workspace = workspace
-        self._allowed_dir = allowed_dir
         self._extra_allowed_dirs = extra_allowed_dirs
 
     def _resolve(self, path: str) -> Path:
         return _resolve_path(
-            path, self._workspace, self._allowed_dir, self._extra_allowed_dirs
+            path, self._workspace, self._extra_allowed_dirs
         )
 
 

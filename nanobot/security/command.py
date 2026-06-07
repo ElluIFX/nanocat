@@ -102,7 +102,6 @@ def guard_command(
     cwd: str,
     workspace: str,
     *,
-    restrict_to_workspace: bool = False,
     on_blocked: Callable[[str, str, str, str], bool] | None = None,
 ) -> str | None:
     """Check *command* against all safety rules.
@@ -110,10 +109,13 @@ def guard_command(
     Returns an error string if blocked, None if allowed.
     *on_blocked* is called before blocking and can return True to override.
     """
+    from nanobot.config.loader import get_runtime_config
+
     cmd = command.strip()
     lower = cmd.lower()
     workspace_path = Path(workspace).resolve()
     cwd_path = Path(cwd).resolve()
+    restrict = get_runtime_config().tools.exec.restrict_to_workspace
 
     # Allow-list check (if configured, ALLOW_ALWAYS acts as strict allow-list)
     if _ALLOW_ALWAYS:
@@ -158,7 +160,7 @@ def guard_command(
         return _block_msg("internal/private URL detected")
 
     # Path containment
-    if restrict_to_workspace:
+    if restrict:
         if "..\\" in cmd or "../" in cmd:
             return _block_msg("path traversal detected")
 
