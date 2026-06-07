@@ -150,6 +150,8 @@ class ExecToolConfig(Base):
     safety_check: bool = True  # If false, skip command safety guard checks
     timeout: int = 60
     path_append: str = ""
+    deny_patterns: list[str] = Field(default_factory=list)
+    allow_patterns: list[str] = Field(default_factory=list)
 
 
 class FilesystemToolConfig(Base):
@@ -177,6 +179,7 @@ class MCPServerConfig(Base):
 class ToolsConfig(Base):
     """Tools configuration."""
 
+    max_return_chars: int = 16000  # Truncate tool results exceeding this; 0 = no limit
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)

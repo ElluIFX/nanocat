@@ -3,19 +3,19 @@
 import asyncio
 import json
 import locale
-import logging
 import os
 import platform
 import re
 import shutil
-import tempfile
+import signal
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from nanobot.agent.tools.base import Tool
 
 _APPROVE_HINT = (
     "\nIf you believe this action is necessary, explain the reason to the user "
@@ -100,7 +100,6 @@ class ExecTool(Tool):
         return "exec"
 
     _MAX_TIMEOUT = 600
-    _MAX_OUTPUT = 4096
 
     @property
     def description(self) -> str:
@@ -189,7 +188,7 @@ class ExecTool(Tool):
                     timeout=effective_timeout,
                 )
             except asyncio.TimeoutError:
-                process.kill()
+                self._kill_tree(process)
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
@@ -200,29 +199,41 @@ class ExecTool(Tool):
             stderr_text = _decode_output(stderr) if stderr else ""
             elapsed = round(time.monotonic() - t_start, 3)
 
-            result: dict[str, Any] = {
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-                "returncode": process.returncode,
-                "elapsed_s": elapsed,
-            }
-
-            if len(stdout_text) > self._MAX_OUTPUT:
-                full_len = len(stdout_text)
-                tmp = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".txt", delete=False, encoding="utf-8"
-                )
-                tmp.write(stdout_text)
-                tmp.close()
-                result["stdout"] = stdout_text[: self._MAX_OUTPUT]
-                result["stdout_truncated"] = True
-                result["stdout_full_length"] = full_len
-                result["stdout_full_path"] = tmp.name
-
-            return json.dumps(result, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "stdout": stdout_text,
+                    "stderr": stderr_text,
+                    "returncode": process.returncode,
+                    "elapsed_s": elapsed,
+                },
+                ensure_ascii=False,
+            )
 
         except Exception as e:
             return json.dumps({"stdout": "", "stderr": str(e), "returncode": -1}, ensure_ascii=False)
+
+    @staticmethod
+    def _kill_tree(process: asyncio.subprocess.Process) -> None:
+        """Kill *process* and all its children (cross-platform best-effort)."""
+        try:
+            if sys.platform == "win32":
+                # taskkill /T kills the tree; /F forces.
+                subprocess = __import__("subprocess")
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                    capture_output=True,
+                    timeout=10,
+                )
+            else:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    process.kill()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
 
     def _on_blocked(self, command: str, category: str, shell_type: str, reason: str) -> bool:
         """
@@ -292,7 +303,7 @@ class ExecTool(Tool):
                     p = Path(expanded).expanduser().resolve()
                 except Exception:
                     continue
-                if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
+                if p.is_absolute() and not p.is_relative_to(cwd_path):
                     return "Error: Command blocked by safety guard (path outside working dir)" + _APPROVE_HINT
 
         return None
@@ -318,7 +329,7 @@ class ExecTool(Tool):
             except Exception:
                 return False
 
-            if p != workspace and workspace not in p.parents:
+            if not p.is_relative_to(workspace):
                 return False
 
         return True

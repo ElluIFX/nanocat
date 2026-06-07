@@ -262,6 +262,8 @@ class AgentLoop:
                 restrict_to_workspace=fs_cfg.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
                 safety_check=self.exec_config.safety_check,
+                deny_patterns=self.exec_config.deny_patterns or None,
+                allow_patterns=self.exec_config.allow_patterns or None,
             )
         )
         self.tools.register(
@@ -610,6 +612,28 @@ class AgentLoop:
                             tc.name,
                         )
                         continue
+
+                    # Centralized result truncation (skip tools with own pagination).
+                    _no_truncate = frozenset({"read_file", "grep_file"})
+                    _max_chars = self._config.tools.max_return_chars
+                    if tc.name not in _no_truncate and _max_chars > 0:
+                        _str = result if isinstance(result, str) else str(result)
+                        if len(_str) > _max_chars:
+                            tmp = tempfile.NamedTemporaryFile(
+                                mode="w", suffix=".txt", delete=False, encoding="utf-8"
+                            )
+                            tmp.write(_str)
+                            tmp.close()
+                            result = (
+                                f"Tool return length {len(_str)} exceeds limit "
+                                f"({_max_chars} chars). Full output written to: {tmp.name}\n"
+                                f"Use appropriate tools to read this file selectively."
+                            )
+                            logger.info(
+                                "[%s] Tool %s result truncated: %d → %s",
+                                _log_ids[idx], tc.name, len(_str), tmp.name,
+                            )
+
                     messages = self.context.add_tool_result(
                         messages, tc.id, tc.name, result
                     )
