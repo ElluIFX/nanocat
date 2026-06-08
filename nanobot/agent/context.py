@@ -25,16 +25,8 @@ class ContextBuilder:
         self.skills = SkillsLoader(workspace)
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt, ordered by stability for LLM prefix caching."""
         parts = [self._get_identity()]
-
-        bootstrap = self._load_bootstrap_files()
-        if bootstrap:
-            parts.append(bootstrap)
-
-        memory = self.memory.get_memory_context()
-        if memory:
-            parts.append(memory)
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -50,6 +42,14 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 You must read complete SKILL.md before any execution, guessing the usage of any skill is not allowed.
 
 {skills_summary}""")
+
+        bootstrap = self._load_bootstrap_files()
+        if bootstrap:
+            parts.append(bootstrap)
+
+        memory = self.memory.get_memory_context()
+        if memory:
+            parts.append(memory)
 
         return "\n\n---\n\n".join(parts)
 
@@ -190,13 +190,19 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         consolidated_msg = self._build_consolidated_memory_message(consolidated_memory)
 
         system_content = self.build_system_prompt(skill_names)
-        if injected_memories:
-            system_content += (
-                "\n\n## NowledgeMem Auto-Matched\n(search/read if it may useful)\n"
-                + json.dumps(injected_memories, ensure_ascii=False, indent=2)
-            )
 
         messages = [{"role": "system", "content": system_content}]
+        if injected_memories:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "## NowledgeMem Auto-Matched\n"
+                        "(search/read if it may useful)\n"
+                        + json.dumps(injected_memories, ensure_ascii=False, indent=2)
+                    ),
+                }
+            )
         if consolidated_msg:
             messages.append(consolidated_msg)
         messages.extend(history)
