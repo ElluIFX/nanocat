@@ -1463,22 +1463,24 @@ class AgentLoop:
             ):
                 entry["content"] = content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
-                if isinstance(content, str) and content.startswith(
-                    ContextBuilder._RUNTIME_CONTEXT_TAG
-                ):
-                    # Strip the runtime-context prefix, keep only the user text.
-                    parts = content.split("\n\n", 1)
-                    if len(parts) > 1 and parts[1].strip():
-                        entry["content"] = parts[1]
-                    else:
-                        continue
+                if isinstance(content, str):
+                    _RT_OPEN = ContextBuilder._RUNTIME_CTX_OPEN
+                    _RT_CLOSE = ContextBuilder._RUNTIME_CTX_CLOSE
+                    if content.startswith(_RT_OPEN):
+                        idx = content.find(_RT_CLOSE)
+                        if idx != -1:
+                            stripped = content[idx + len(_RT_CLOSE) :].lstrip()
+                            if stripped:
+                                entry["content"] = stripped
+                            else:
+                                continue
                 if isinstance(content, list):
                     filtered = []
                     for c in content:
                         if (
                             c.get("type") == "text"
                             and isinstance(c.get("text"), str)
-                            and c["text"].startswith(ContextBuilder._RUNTIME_CONTEXT_TAG)
+                            and c["text"].startswith(ContextBuilder._RUNTIME_CTX_OPEN)
                         ):
                             continue  # Strip runtime context from multimodal messages
                         if c.get("type") == "image_url" and c.get("image_url", {}).get(
