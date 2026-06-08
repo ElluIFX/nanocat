@@ -44,6 +44,7 @@ class AgentDefaults(Base):
     vision_model: str | None = (
         None  # model for ParseImageTool / adaptive image loading; None → assistant_model → model
     )
+    pulse_enabled: bool = False  # enable <pulse> internal emotional reflection
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     max_tokens: int | None = 8192
     context_window_tokens: int = 65_536

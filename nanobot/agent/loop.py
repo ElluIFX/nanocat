@@ -526,6 +526,14 @@ class AgentLoop:
 
         _bypass_token = safety_bypass.set(bypass_safety_check) if bypass_safety_check else None
         messages = initial_messages
+
+        if self._config.agents.defaults.pulse_enabled:
+            from nanobot.agent.pulse import PULSE_PROMPT
+
+            sys_msg = dict(messages[0])
+            sys_msg["content"] += "\n\n" + PULSE_PROMPT
+            messages = [sys_msg, *messages[1:]]
+
         iteration = 0
         final_content = None
         tools_used: list[str] = []
@@ -653,6 +661,14 @@ class AgentLoop:
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
+
+        if self._config.agents.defaults.pulse_enabled and final_content:
+            from nanobot.agent.pulse import extract_pulse, strip_pulse
+
+            pulse = extract_pulse(final_content)
+            if pulse:
+                logger.debug("[PULSE]\n{}", pulse)
+            final_content = strip_pulse(final_content)
 
         if _bypass_token is not None:
             safety_bypass.reset(_bypass_token)
