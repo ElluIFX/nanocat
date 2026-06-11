@@ -25,7 +25,7 @@ class CronPayload:
 
     kind: Literal["system_event", "agent_turn"] = "agent_turn"
     message: str = ""
-    channel: str | None = None  # e.g. "whatsapp"
+    channel: str | None = None  # e.g. "telegram"
     to: str | None = None  # e.g. phone number
     # never=silent, always=unconditional delivery, smart=evaluate with assistant model
     notify_mode: Literal["never", "always", "smart"] = "smart"

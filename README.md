@@ -159,7 +159,7 @@ change (a `ProviderSpec` entry + a config field).
 Connect NanoCat to a chat platform via `channels.*` in `config.json`. Each channel gates senders
 with `allowFrom` (empty denies all; `["*"]` allows everyone).
 
-Supported: **Telegram · Discord · Slack · Feishu · DingTalk · QQ · WeCom · Matrix · WhatsApp · Email · Mochat**.
+Supported: **Telegram · Discord · Slack · Feishu · DingTalk · QQ · WeCom · Matrix · Email · Mochat**.
 
 ```json
 {

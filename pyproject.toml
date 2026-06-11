@@ -86,11 +86,8 @@ packages = ["nanocat"]
 [tool.hatch.build.targets.wheel.sources]
 "nanocat" = "nanocat"
 
-[tool.hatch.build.targets.wheel.force-include]
-"bridge" = "nanocat/bridge"
-
 [tool.hatch.build.targets.sdist]
-include = ["nanocat/", "bridge/", "README.md", "LICENSE"]
+include = ["nanocat/", "README.md", "LICENSE"]
 
 [tool.ruff]
 line-length = 100
