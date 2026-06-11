@@ -1008,13 +1008,14 @@ class AgentLoop:
             role = msg.get("role")
             if role not in ("user", "assistant"):
                 continue
-            content = msg.get("content", "")
-            if not content:
-                continue
             if role == "assistant" and msg.get("tool_calls"):
                 continue
-            # Truncate each message to avoid token waste
-            text_lines.append(content[:200])
+            # Flatten multimodal block-list content to plain text before truncating;
+            # appending a raw list here breaks the later "\n".join(...).
+            text = self._preview_text(msg.get("content"))
+            if not text:
+                continue
+            text_lines.append(text[:200])
         if not text_lines:
             return None
 
