@@ -17,7 +17,7 @@
 
 ## 一、特色功能（相比原仓库）
 
-- 🧠 **三层记忆系统**：常驻长期记忆 + 可检索的语义记忆库（自动注入相关记忆、按 ID 取全文）+ 会话自动压缩。长对话也不丢上下文、不爆窗口。
+- 🧠 **三层记忆系统**：常驻长期记忆 + 可检索的语义记忆库（自动注入相关记忆、按 ID 取全文，基于 [Nowledge](https://mem.nowledge.co/)）+ 会话自动压缩。长对话也不丢上下文、不爆窗口。
 - 🐈 **Pulse 内心独白**：回应前的情绪与联想反射，让回复更有"人味"（可开关）。
 - 💬 **多会话管理**：每个聊天可拥有多个会话，自动起名，随时 `/session` 查看与切换，互不串味。
 - ⌨️ **增强命令集**：`/model` 多角色切换模型、`/context` 查看上下文用量、`/compact` 手动整理记忆等。
@@ -47,7 +47,7 @@
 | **协作** | `spawn` · `gather` · `wait` · `message` | 后台子代理、汇总结果、等待、主动发消息 |
 | **扩展** | *MCP* | 任意 [MCP](https://modelcontextprotocol.io/) 服务器的工具会自动接入 |
 
-> 记忆类工具需在配置中启用记忆库（Nowledge）；MCP 工具按配置动态加载。
+> 记忆类工具依赖记忆库 [Nowledge](https://mem.nowledge.co/)（需自行部署并在配置中连接）；MCP 工具按配置动态加载。
 
 ## 三、简要使用教程
 
@@ -76,17 +76,9 @@ pip install -e .
 
 > 也支持 OpenRouter、OpenAI、Gemini、Anthropic、Qwen、Kimi、智谱、火山等众多 provider，以及 Ollama / vLLM 本地模型。
 
-**3. 启动**
+**3. 接入聊天渠道（必需）**
 
-```bash
-nanocat
-```
-
-直接在终端对话即可。工作区在 `~/.nanocat/workspace/`，记忆、技能、媒体都存在这里。
-
-**4. 接入聊天软件**（可选）
-
-在 `~/.nanocat/config.json` 的 `channels` 下开启对应渠道，填好凭证与 `allowFrom`（允许的用户白名单），即可用手机随时找它聊天：
+NanoCat 没有终端交互界面，需通过聊天软件与它对话。在 `~/.nanocat/config.json` 的 `channels` 下开启一个渠道，填好凭证与 `allowFrom`（允许的用户白名单）：
 
 > 支持 **Telegram · Discord · Slack · 飞书 · 钉钉 · QQ · 企业微信 · Matrix · 邮件 · Mochat**。
 
@@ -101,6 +93,14 @@ nanocat
   }
 }
 ```
+
+**4. 启动**
+
+```bash
+nanocat
+```
+
+启动后即作为后台服务运行，用接入的聊天软件找它对话即可。工作区在 `~/.nanocat/workspace/`，记忆、技能、媒体都存在这里。
 
 **5. 常用对话命令**
 
