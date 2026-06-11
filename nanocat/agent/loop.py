@@ -997,14 +997,26 @@ class AgentLoop:
         ]
         try:
             provider = get_provider(self.assistant_model)
-            resp = await provider.chat(messages, model=self.assistant_model, max_tokens=32)
-            name = (resp.content or "").strip()
+            # Budget must leave room for the title AFTER any chain-of-thought: reasoning
+            # models (e.g. deepseek-v4*) spend the whole allowance on reasoning and return
+            # empty content if the cap is tiny, so keep it comfortably above the CoT length.
+            resp = await provider.chat(messages, model=self.assistant_model, max_tokens=1024)
             # Clean: remove quotes, punctuation, extra whitespace
-            name = name.strip("\"'\"'").strip()
+            name = (resp.content or "").strip().strip("\"'\"'").strip()
             if not name:
+                logger.warning(
+                    "Session name generation returned empty content (model={}, "
+                    "finish_reason={}, has_reasoning={})",
+                    self.assistant_model,
+                    resp.finish_reason,
+                    bool(resp.reasoning_content),
+                )
                 return None
             return name[:10]
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Session name generation failed (model={}): {}", self.assistant_model, e
+            )
             return None
 
     async def _handle_session(self, msg: InboundMessage, session: Session) -> OutboundMessage:

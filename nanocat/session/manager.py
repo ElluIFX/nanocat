@@ -503,5 +503,7 @@ class SessionManager:
                 self.set_name(session.channel, session.id, name)
                 session.name = name
                 logger.debug("Auto-named session {}/{} -> {}", session.channel, session.id, name)
-        except Exception:
-            logger.debug("Auto-naming failed for session {}/{}", session.channel, session.id)
+        except Exception as e:
+            logger.warning(
+                "Auto-naming failed for session {}/{}: {}", session.channel, session.id, e
+            )
