@@ -86,14 +86,64 @@ async def _with_retry(
     raise RuntimeError("unreachable")  # pragma: no cover
 
 
+# Markers in a QQ API error meaning the passive-reply window expired (60 min C2C /
+# 5 min group) or the per-message reply cap (5) / monthly active cap was hit — error
+# code 22009 "msg limit exceed". Retrying these cannot succeed, so stop early.
+_RATE_LIMIT_MARKERS = ("22009", "msg limit", "limit exceed", "push msg")
+
+
+async def _post_message_with_retry(
+    fn: Callable[[], Coroutine[Any, Any, Any]],
+    *,
+    label: str,
+    max_attempts: int = 3,
+    base_delay: float = 1.5,
+) -> Any | None:
+    """Send via a botpy ``post_*`` call, retrying on both exceptions and ``None`` results.
+
+    botpy's HTTP layer swallows ``asyncio.TimeoutError`` and returns ``None`` WITHOUT
+    raising (see ``botpy.http.BotHttp.request``), so exception-only retry never fires on a
+    timeout and the message is silently dropped — the user sees no reply while the agent
+    looks busy. Treat ``None`` as a failure and retry it; bail out early (no retry) on
+    passive-window/rate-limit errors. Returns the API result dict, or ``None`` on failure.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = await fn()
+        except Exception as e:
+            if any(m in str(e).lower() for m in _RATE_LIMIT_MARKERS):
+                logger.warning("{}: passive window expired / rate-limited, not retrying: {}", label, e)
+                return None
+            if attempt == max_attempts:
+                logger.error("{}: failed after {} attempts: {}", label, max_attempts, e)
+                return None
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning("{}: attempt {}/{} error: {}; retry in {:.0f}s", label, attempt, max_attempts, e, delay)
+            await asyncio.sleep(delay)
+            continue
+        if result is not None:
+            return result
+        # None = botpy swallowed a timeout and returned without raising
+        if attempt == max_attempts:
+            logger.error("{}: no API response after {} attempts (timeouts)", label, max_attempts)
+            return None
+        delay = base_delay * (2 ** (attempt - 1))
+        logger.warning("{}: no response (timeout) attempt {}/{}; retry in {:.0f}s", label, attempt, max_attempts, delay)
+        await asyncio.sleep(delay)
+    return None
+
+
 def _make_bot_class(channel: "QQChannel") -> "type[botpy.Client]":
     """Create a botpy Client subclass bound to the given channel."""
     intents = botpy.Intents(public_messages=True, direct_message=True)
 
     class _Bot(botpy.Client):
         def __init__(self):
-            # Disable botpy's file log — NanoCat uses loguru; default "botpy.log" fails on read-only fs
-            super().__init__(intents=intents, ext_handlers=False)
+            # Disable botpy's file log — NanoCat uses loguru; default "botpy.log" fails on read-only fs.
+            # Raise the HTTP timeout: botpy defaults to 5 s, which fails often under instability.
+            super().__init__(
+                intents=intents, ext_handlers=False, timeout=channel.config.timeout
+            )
 
         async def on_ready(self):
             logger.info("QQ bot ready: {}", self.robot.name)
@@ -118,6 +168,7 @@ class QQConfig(Base):
     secret: str = ""
     allow_from: list[str] = Field(default_factory=list)
     msg_format: Literal["plain", "markdown"] = "plain"
+    timeout: int = 20  # botpy HTTP timeout (s); default 5 is too short under instability
 
 
 class QQChannel(BaseChannel):
@@ -151,21 +202,37 @@ class QQChannel(BaseChannel):
             return
 
         self._running = True
-        bot_class = _make_bot_class(self)
-        self._client = bot_class()
         logger.info("QQ bot started (C2C & Group supported)")
         await self._run_bot()
 
     async def _run_bot(self) -> None:
-        """Run the bot connection with auto-reconnect."""
+        """Run the bot connection with auto-reconnect and capped exponential backoff.
+
+        The client is rebuilt each attempt so a stale session after an error does not
+        wedge reconnection; backoff resets once a connection has stayed up for a while.
+        """
+        import time
+
+        backoff = 5
         while self._running:
+            self._client = _make_bot_class(self)()
+            started = time.monotonic()
             try:
                 await self._client.start(appid=self.config.app_id, secret=self.config.secret)
             except Exception as e:
                 logger.warning("QQ bot error: {}", e)
-            if self._running:
-                logger.info("Reconnecting QQ bot in 5 seconds...")
-                await asyncio.sleep(5)
+            finally:
+                try:
+                    await self._client.close()
+                except Exception:
+                    pass
+            if not self._running:
+                break
+            if time.monotonic() - started > 60:
+                backoff = 5  # connection was healthy; reset backoff
+            logger.info("Reconnecting QQ bot in {}s...", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
     async def stop(self) -> None:
         """Stop the QQ bot."""
@@ -259,14 +326,14 @@ class QQChannel(BaseChannel):
                         "msg_seq": self._msg_seq,
                     }
                     if chat_type == "group":
-                        await _with_retry(
+                        await _post_message_with_retry(
                             lambda p=m_payload: self._client.api.post_group_message(
                                 group_openid=msg.chat_id, **p
                             ),
                             label="QQ post_group_message (media)",
                         )
                     else:
-                        await _with_retry(
+                        await _post_message_with_retry(
                             lambda p=m_payload: self._client.api.post_c2c_message(
                                 openid=msg.chat_id, **p
                             ),
@@ -274,6 +341,9 @@ class QQChannel(BaseChannel):
                         )
                 except Exception as e:
                     logger.warning("QQ: failed to send media {}: {}", Path(media_path).name, e)
+
+            if not (msg.content or "").strip():
+                return
 
             self._msg_seq += 1
             payload: dict[str, Any] = {
@@ -287,16 +357,22 @@ class QQChannel(BaseChannel):
                 payload["content"] = msg.content
 
             if chat_type == "group":
-                await _with_retry(
+                result = await _post_message_with_retry(
                     lambda: self._client.api.post_group_message(
                         group_openid=msg.chat_id, **payload
                     ),
                     label="QQ post_group_message",
                 )
             else:
-                await _with_retry(
+                result = await _post_message_with_retry(
                     lambda: self._client.api.post_c2c_message(openid=msg.chat_id, **payload),
                     label="QQ post_c2c_message",
+                )
+            if result is None:
+                logger.error(
+                    "QQ message not delivered to {} (passive window may have expired "
+                    "after slow processing, or the API is unreachable)",
+                    msg.chat_id,
                 )
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
@@ -429,7 +505,17 @@ class QQChannel(BaseChannel):
                         content_parts.append(part)
 
             if not content_parts and not media_paths:
-                return
+                # QQ does not deliver forwarded/merged-forward (合并转发) content, stickers,
+                # or some rich types to bots — they arrive with empty content and no
+                # attachments. Surface a placeholder so the agent can reply instead of the
+                # user getting silence (which looks like the bot ignored them).
+                logger.info("QQ: unparseable message from {} (forwarded/sticker/unsupported)", user_id)
+                content_parts.append(
+                    "[Received a message with no readable text or media — likely a "
+                    "forwarded/merged message, sticker, or a type QQ does not deliver to "
+                    "bots. Tell the user you cannot read it and ask them to paste the "
+                    "content as text.]"
+                )
 
             await self._handle_message(
                 sender_id=user_id,
