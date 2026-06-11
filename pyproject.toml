@@ -1,11 +1,11 @@
 [project]
-name = "nanobot-ai"
+name = "nanocat"
 version = "0.1.4.post5"
 description = "A lightweight personal AI assistant framework"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "nanobot contributors" }]
+authors = [{ name = "NanoCat contributors" }]
 keywords = ["ai", "agent", "chatbot"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -63,7 +63,7 @@ dev = [
 ]
 
 [project.scripts]
-nanobot = "nanobot.runtime.launcher:main"
+nanocat = "nanocat.runtime.launcher:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -74,23 +74,23 @@ allow-direct-references = true
 
 [tool.hatch.build]
 include = [
-    "nanobot/**/*.py",
-    "nanobot/templates/**/*.md",
-    "nanobot/skills/**/*.md",
-    "nanobot/skills/**/*.sh",
+    "nanocat/**/*.py",
+    "nanocat/templates/**/*.md",
+    "nanocat/skills/**/*.md",
+    "nanocat/skills/**/*.sh",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot"]
+packages = ["nanocat"]
 
 [tool.hatch.build.targets.wheel.sources]
-"nanobot" = "nanobot"
+"nanocat" = "nanocat"
 
 [tool.hatch.build.targets.wheel.force-include]
-"bridge" = "nanobot/bridge"
+"bridge" = "nanocat/bridge"
 
 [tool.hatch.build.targets.sdist]
-include = ["nanobot/", "bridge/", "README.md", "LICENSE"]
+include = ["nanocat/", "bridge/", "README.md", "LICENSE"]
 
 [tool.ruff]
 line-length = 100

@@ -1,9 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m ruff check \"c:/Users/Ellu/.nanobot/nanobot/nanobot\" \"c:/Users/Ellu/.nanobot/nanobot/README.md\" \"c:/Users/Ellu/.nanobot/nanobot/CONTRIBUTING.md\" \"c:/Users/Ellu/.nanobot/nanobot/CLAUDE.md\")",
+      "Bash(python -m ruff check \"c:/Users/Ellu/.nanobot/nanobot/nanocat\" \"c:/Users/Ellu/.nanobot/nanobot/README.md\" \"c:/Users/Ellu/.nanobot/nanobot/CLAUDE.md\")",
       "Bash(python -m pip show ruff)",
-      "Bash(python -m ruff check \"c:/Users/Ellu/.nanobot/nanobot/nanobot\")",
+      "Bash(python -m ruff check \"c:/Users/Ellu/.nanobot/nanobot/nanocat\")",
       "Bash(ruff check:*)"
     ]
   }

@@ -3,11 +3,11 @@ x-common-config: &common-config
     context: .
     dockerfile: Dockerfile
   volumes:
-    - ~/.nanobot:/root/.nanobot
+    - ~/.nanocat:/root/.nanocat
 
 services:
-  nanobot-gateway:
-    container_name: nanobot-gateway
+  nanocat-gateway:
+    container_name: nanocat-gateway
     <<: *common-config
     command: ["gateway"]
     restart: unless-stopped
@@ -21,8 +21,8 @@ services:
         reservations:
           cpus: '0.25'
           memory: 256M
-  
-  nanobot-cli:
+
+  nanocat-cli:
     <<: *common-config
     profiles:
       - cli
