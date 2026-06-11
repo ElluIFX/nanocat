@@ -289,12 +289,14 @@ class AgentLoop:
             from nanocat.agent.tools.nowledge import (
                 MemoryAddTool,
                 MemoryDeleteTool,
+                MemoryGetTool,
                 MemorySearchTool,
                 MemoryUpdateTool,
                 ReadWorkingMemoryTool,
             )
 
             self.tools.register(MemorySearchTool(self.nowledge_client))
+            self.tools.register(MemoryGetTool(self.nowledge_client))
             self.tools.register(MemoryAddTool(self.nowledge_client))
             self.tools.register(MemoryUpdateTool(self.nowledge_client))
             self.tools.register(MemoryDeleteTool(self.nowledge_client))

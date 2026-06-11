@@ -565,6 +565,7 @@ class NowledgeClient:
                 return r.json() or {}
         except Exception:
             logger.warning("Nowledge get_memory failed for id={}", memory_id)
+            return {}
 
     async def create_memory(
         self,
