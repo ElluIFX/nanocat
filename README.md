@@ -1,198 +1,118 @@
 <div align="center">
   <img src="nanobot_logo.png" alt="NanoCat" width="420">
-  <h1>NanoCat</h1>
-  <p><b>A heavily-modified, ultra-lightweight personal AI assistant.</b></p>
+  <h1>NanoCat 🐈</h1>
+  <p><b>超轻量个人 AI 助手</b></p>
   <p>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   </p>
 </div>
 
-> **About this project** — NanoCat is a personal fork that has diverged substantially from
-> its upstream. It started from [**nanobot**](https://github.com/HKUDS/nanobot) (HKUDS),
-> which is itself inspired by [OpenClaw](https://github.com/openclaw/openclaw). NanoCat is
-> no longer kept in sync with the upstream main line — the agent loop, memory system,
-> context/prompt-cache strategy, session model, and security sandbox have been reworked.
-> Credit for the original architecture and channel/provider integrations belongs to the
-> nanobot authors; this repository is maintained independently for personal use, research,
-> and technical exchange. It is unrelated to crypto and has no token or coin.
+> **关于本项目** —— NanoCat 是一个高度魔改的个人分支，源自
+> [nanobot](https://github.com/HKUDS/nanobot)（HKUDS，灵感来自 OpenClaw），目前已与上游主线
+> 大幅分离、独立维护。原始架构与各渠道/模型接入归功于 nanobot 作者；本仓库仅用于个人使用、
+> 研究与技术交流，与任何加密货币无关，不涉及任何代币。
 
 ---
 
-🐈 **NanoCat** keeps a minimal core agent (an LLM ↔ tool loop in a few thousand readable lines)
-and trades the upstream's breadth for a tighter, more opinionated runtime tuned for a single user.
+## 一、特色功能（相比原仓库）
 
-## Signature Features
+- 🧠 **三层记忆系统**：常驻长期记忆 + 可检索的语义记忆库（自动注入相关记忆、按 ID 取全文）+ 会话自动压缩。长对话也不丢上下文、不爆窗口。
+- 🐈 **Pulse 内心独白**：回应前的情绪与联想反射，让回复更有"人味"（可开关）。
+- 💬 **多会话管理**：每个聊天可拥有多个会话，自动起名，随时 `/session` 查看与切换，互不串味。
+- ⌨️ **增强命令集**：`/model` 多角色切换模型、`/context` 查看上下文用量、`/compact` 手动整理记忆等。
+- ⚡ **更快更稳**：工具并行调用；消息可打断（连发新消息会取消上一条还在跑的任务）；缓存优化让长对话更省更快。
+- 🛡️ **默认安全沙箱**：所有文件/命令工具默认锁定在工作区内，防越权与路径穿越。
+- 🔌 **模型兼容增强**：DeepSeek 直连（支持思考模式）；纯文本模型遇到图片会自动转成可解析的本地路径，不再报错。
+- 🔎 **记忆检索增强**：中英文关键词智能提取，记忆搜索匹配更准。
+- 📱 **渠道可靠性**：QQ 等渠道的发送重试、断线重连、异常消息兜底等大量稳定性增强。
+- 🪶 **更轻量**：精简了上游的部分冗余（如 WhatsApp 桥接），更小更快。
 
-### 🧠 Three-tier memory
+## 二、内置工具
 
-NanoCat does not rely on a single flat memory file. Memory is layered by lifetime and access pattern:
+开箱即用的内置工具（按类别）：
 
-| Tier | Where | Behavior |
-|------|-------|----------|
-| **Static long-term** | `MEMORY.md` in the workspace root | Always injected into context; the durable "who/what" the agent should never forget. |
-| **Semantic (Nowledge)** | External Nowledge Mem REST backend | The agent **auto-extracts durable facts** from conversations and writes them to a vector-searchable store; recalled on demand via the memory tools. |
-| **Session compaction** | Per-session compacted block | When a session's prompt crosses a **token budget** tied to the model's context window, older raw turns are compacted into a running summary instead of being dropped. |
+| 类别 | 工具 | 说明 |
+|------|------|------|
+| **文件** | `read_file` · `write_file` · `edit_file` | 读取 / 写入 / 精确编辑文件 |
+| | `insert_lines` · `delete_lines` · `file_hex` | 按行插入 / 删除、十六进制查看 |
+| | `list_dir` · `grep_file` | 列目录、按内容搜索 |
+| **视觉** | `parse_image` · `load_image` | 解析图片内容、加载图片 |
+| **命令** | `exec` | 执行 Shell 命令（沙箱受限） |
+| **联网** | `web_search` · `web_fetch` | 网页搜索、抓取网页正文 |
+| **记忆** | `memory_search` · `memory_get` | 检索记忆、按 ID 取全文 |
+| | `memory_add` · `memory_update` · `memory_delete` | 增 / 改 / 删记忆 |
+| | `read_working_memory` | 读取工作记忆 |
+| **任务** | `todo` · `cron` | 待办清单、定时任务 |
+| **协作** | `spawn` · `gather` · `wait` · `message` | 后台子代理、汇总结果、等待、主动发消息 |
+| **扩展** | *MCP* | 任意 [MCP](https://modelcontextprotocol.io/) 服务器的工具会自动接入 |
 
-Auto-injected memories are isolated in a dedicated `<AUTO-MEMORY>` block placed for maximum
-provider **prompt-cache** hit rate — the system prompt is ordered by stability so the cacheable
-prefix stays identical across turns.
+> 记忆类工具需在配置中启用记忆库（Nowledge）；MCP 工具按配置动态加载。
 
-### 🛠️ Enhanced built-in tools
+## 三、简要使用教程
 
-| Group | Tools | Notes |
-|-------|-------|-------|
-| **Filesystem** | `read_file`, `write_file`, `edit_file`, `list_dir`, `grep_file`, `load_image` | Sandboxed to the workspace by default; `edit_file` does exact-match string edits. |
-| **Shell** | `exec` | Allow/deny pattern guard, path containment, process-tree kill, centralized output truncation. |
-| **Web** | `web_search`, `web_fetch` | Multi-provider search (Brave/Tavily/Jina/SearXNG/DuckDuckGo) with proxy support. |
-| **Vision** | `parse_image`, `load_image` | `parse_image` accepts a `focus` hint to steer extraction. |
-| **Memory** | `memory_search`, `memory_get`, `memory_add`, `memory_update`, `memory_delete`, `read_working_memory` | Full CRUD over the semantic memory store. |
-| **Async / orchestration** | `spawn`, `gather`, `wait`, `message` | `spawn` runs background subagents that inherit the main tool registry; `gather` fans results back in. |
-| **Productivity** | `todo`, `cron` | Native scheduled tasks; no shelling out to a `nanocat cron` CLI. |
-| **MCP** | *dynamic* | Any [MCP](https://modelcontextprotocol.io/) server (stdio or HTTP) is discovered and registered as native tools at startup. |
-
-The agent loop executes independent tool calls **in parallel** with correlation IDs in the logs,
-and supports a **hard interrupt** — an incoming same-session message cancels the in-flight LLM turn
-so replies stay responsive.
-
-### ⌨️ Enhanced command set
-
-Slash commands work from any channel:
-
-| Command | Purpose |
-|---------|---------|
-| `/session list` · `/session view [id]` · `/session switch [id]` | Multiple UUID-keyed, auto-named sessions per channel. |
-| `/model <role> <N>` | Switch the model for a role — `agent`, `subagent`, `assistant`, or `max`. |
-| `/context` | Compact numeric context panel (token usage). |
-| `/compact` | Force session compaction now. |
-| `/status` | Runtime / busy status. |
-| `/whoami` | Show channel, chat, and session routing IDs. |
-| `/new` · `/stop` · `/restart` · `/help` | New session · cancel current turn · restart runtime · help. |
-
-### 🛡️ Sandbox by default
-
-`tools.restrictToWorkspace` defaults to **on**: all file and shell tools are confined to the
-workspace, with env-dump and network-enumeration commands blocked. `tools.exec.pathAppend`
-extends `PATH` when a command genuinely needs a binary outside the default search path.
-
-### 🫀 Pulse
-
-An optional internal `<pulse>` reflection block the model writes at the start of a turn
-(Vibe / Echo / Read / Will). It is stripped before delivery and logged for inspection — a
-lightweight inner-monologue channel that can color the reply without leaking into it.
-
-## Architecture
-
-```
-nanocat/
-├── agent/          🧠 Core agent
-│   ├── loop.py     #   Agent loop (LLM ↔ tool execution, parallel calls, hard interrupt)
-│   ├── context.py  #   Prompt builder (cache-ordered, <AUTO-MEMORY> isolation)
-│   ├── memory.py   #   Three-tier memory: MEMORY.md · Nowledge · compaction
-│   ├── pulse.py    #   Internal reflection block
-│   ├── skills.py   #   Skills loader
-│   ├── subagent.py #   Background task execution
-│   └── tools/      #   Built-in tools (filesystem, shell, web, vision, memory, cron, spawn…)
-├── channels/       📱 Chat platform integrations
-├── providers/      🤖 LLM providers (registry-driven, 2-step to add one)
-├── security/       🛡️ Command guard + workspace containment
-├── session/        💬 Multi-session store
-├── bus/  cron/  heartbeat/        🚌 ⏰ 💓 Routing, scheduling, proactive wake-up
-├── config/  runtime/  utils/      ⚙️ 🚀 Config, bootstrap, helpers
-└── skills/  templates/            🎯 Bundled skills + workspace templates
-```
-
-## Install
+**1. 安装**
 
 ```bash
-git clone <your-repo-url> nanocat
+git clone <你的仓库地址> nanocat
 cd nanocat
 pip install -e .
 ```
 
-## Quick Start
-
-NanoCat reads everything from `~/.nanocat/`. Create the config and workspace before the first run.
-
-**1. Configure** — `~/.nanocat/config.json`:
+**2. 配置** —— 编辑 `~/.nanocat/config.json`，填入模型与 API Key：
 
 ```json
 {
   "providers": {
-    "openrouter": { "apiKey": "sk-or-v1-xxx" }
+    "deepseek": { "apiKey": "sk-xxx" }
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-opus-4-5",
-      "provider": "openrouter"
+      "model": "deepseek/deepseek-v4-pro"
     }
   }
 }
 ```
 
-**2. Run:**
+> 也支持 OpenRouter、OpenAI、Gemini、Anthropic、Qwen、Kimi、智谱、火山等众多 provider，以及 Ollama / vLLM 本地模型。
+
+**3. 启动**
 
 ```bash
 nanocat
 ```
 
-## Providers
+直接在终端对话即可。工作区在 `~/.nanocat/workspace/`，记忆、技能、媒体都存在这里。
 
-Set one provider's API key, point `agents.defaults.model` at it. The provider registry
-(`nanocat/providers/registry.py`) is the single source of truth — adding a provider is a two-step
-change (a `ProviderSpec` entry + a config field).
+**4. 接入聊天软件**（可选）
 
-| Provider | Notes |
-|----------|-------|
-| `openrouter` | Gateway to all models (recommended) |
-| `anthropic` / `openai` / `gemini` | Direct first-party |
-| `deepseek` | Direct, with thinking mode |
-| `volcengine` / `byteplus` / `dashscope` / `zhipu` / `moonshot` / `minimax` | Regional |
-| `groq` | LLM + Whisper voice transcription |
-| `azure_openai` / `aihubmix` / `siliconflow` | Gateways / managed |
-| `custom` | Any OpenAI-compatible endpoint (direct, no LiteLLM) |
-| `ollama` / `vllm` | Local |
-| `openai_codex` / `github_copilot` | OAuth token flow |
+在 `~/.nanocat/config.json` 的 `channels` 下开启对应渠道，填好凭证与 `allowFrom`（允许的用户白名单），即可用手机随时找它聊天：
 
-## Channels
-
-Connect NanoCat to a chat platform via `channels.*` in `config.json`. Each channel gates senders
-with `allowFrom` (empty denies all; `["*"]` allows everyone).
-
-Supported: **Telegram · Discord · Slack · Feishu · DingTalk · QQ · WeCom · Matrix · Email · Mochat**.
+> 支持 **Telegram · Discord · Slack · 飞书 · 钉钉 · QQ · 企业微信 · Matrix · 邮件 · Mochat**。
 
 ```json
 {
   "channels": {
     "telegram": {
       "enabled": true,
-      "token": "YOUR_BOT_TOKEN",
-      "allowFrom": ["YOUR_USER_ID"]
+      "token": "你的BotToken",
+      "allowFrom": ["你的用户ID"]
     }
   }
 }
 ```
 
-## Configuration Highlights
+**5. 常用对话命令**
 
-**Web search** — `tools.web.search.provider`: `brave` (default), `tavily`, `jina`, `searxng`,
-`duckduckgo` (zero-config fallback). Route all web traffic through a proxy with `tools.web.proxy`.
+| 命令 | 作用 |
+|------|------|
+| `/session list` · `/session switch <id>` | 查看 / 切换会话 |
+| `/model <角色> <序号>` | 切换某个角色使用的模型 |
+| `/context` | 查看当前上下文用量 |
+| `/compact` | 手动整理压缩当前会话 |
+| `/status` · `/whoami` | 查看运行状态 / 身份信息 |
+| `/new` · `/stop` · `/restart` | 新会话 / 停止当前任务 / 重启 |
 
-**MCP** — Claude-Desktop-compatible config under `tools.mcpServers`, both stdio
-(`command` + `args`) and HTTP (`url` + `headers`); `enabledTools` selects a subset.
+---
 
-**Heartbeat** — the runtime wakes every 30 minutes and runs tasks listed in
-`~/.nanocat/workspace/HEARTBEAT.md`, delivering results to your most recently active channel.
-
-## Docker
-
-```bash
-docker build -t nanocat .
-docker run -v ~/.nanocat:/root/.nanocat -p 18790:18790 nanocat
-```
-
-## License
-
-MIT. Derived from [nanobot](https://github.com/HKUDS/nanobot) (MIT). See [LICENSE](./LICENSE).
-
-<p align="center"><sub>For educational, research, and technical exchange purposes only.</sub></p>
+<p align="center"><sub>仅用于教育、研究与技术交流。基于 <a href="https://github.com/HKUDS/nanobot">nanobot</a>（MIT）。</sub></p>
