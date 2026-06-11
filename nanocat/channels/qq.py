@@ -56,42 +56,6 @@ def _bridge_botpy_logging() -> None:
         botpy_logger.propagate = False
 
 
-def _install_raw_payload_logging() -> None:
-    """Debug-log the raw inbound event payload before botpy parses it.
-
-    botpy parses messages into objects with fixed ``__slots__``, silently dropping any
-    field it does not know — including whatever QQ may attach for forwarded/merged-forward
-    (合并转发) messages. Patch the parsers to dump the raw ``payload["d"]`` so we can see
-    what actually arrives. Idempotent; logs at DEBUG.
-    """
-    try:
-        from botpy.connection import ConnectionState
-    except Exception as e:  # pragma: no cover
-        logger.debug("QQ raw-payload logging unavailable: {}", e)
-        return
-    if getattr(ConnectionState, "_nanocat_raw_logged", False):
-        return
-    for name in (
-        "parse_c2c_message_create",
-        "parse_group_at_message_create",
-        "parse_direct_message_create",
-    ):
-        orig = getattr(ConnectionState, name, None)
-        if orig is None:
-            continue
-
-        def wrapper(self, payload, _orig=orig, _name=name):
-            try:
-                logger.debug("QQ RAW PAYLOAD [{}]: {}", _name, payload.get("d", payload))
-            except Exception:
-                pass
-            return _orig(self, payload)
-
-        setattr(ConnectionState, name, wrapper)
-    ConnectionState._nanocat_raw_logged = True
-    logger.debug("QQ raw-payload debug logging installed")
-
-
 _T = TypeVar("_T")
 
 
@@ -238,7 +202,6 @@ class QQChannel(BaseChannel):
             return
 
         self._running = True
-        _install_raw_payload_logging()
         logger.info("QQ bot started (C2C & Group supported)")
         await self._run_bot()
 
