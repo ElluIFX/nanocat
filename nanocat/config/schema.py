@@ -207,9 +207,10 @@ class NowledgeAutoInjectConfig(Base):
 
     enabled: bool = False
     with_content: bool = False  # include memory content in the injected system prompt
-    score_threshold: float = 0.5  # minimum similarity_score to include a result
+    score_threshold: float = 0.7  # minimum similarity_score to include a result
     max_length: int = 128  # truncate memory content beyond this char count
     max_num: int = 5  # maximum number of memories to inject
+    extract_keywords: bool = True  # extract zh/en keywords (jieba) instead of sending raw text
 
 
 class NowledgeConfig(Base):

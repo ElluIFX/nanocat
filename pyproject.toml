@@ -45,6 +45,7 @@ dependencies = [
     "pilk>=0.2.4",
     "pillow>=12.1.1",
     "telegramify-markdown[mermaid]>=1.1.1",
+    "jieba>=0.42.1,<1.0.0",
 ]
 
 [project.optional-dependencies]

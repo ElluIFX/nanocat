@@ -55,6 +55,15 @@ if TYPE_CHECKING:
     from nanocat.config.schema import Config
     from nanocat.cron.service import CronService
 
+try:  # optional: sharpens memory-search queries; falls back to raw text if absent
+    import jieba.analyse as _jieba_analyse
+except Exception:  # pragma: no cover - jieba is an optional runtime dependency
+    _jieba_analyse = None
+
+# Keep content-bearing POS tags (nouns/verbs/proper nouns + English tokens); drop
+# particles, pronouns, conjunctions and other filler that dilute the search query.
+_KEYWORD_ALLOW_POS = ("n", "nr", "ns", "nt", "nz", "nrt", "vn", "v", "eng", "j", "l")
+
 
 class AgentLoop:
     """
@@ -485,12 +494,31 @@ class AgentLoop:
         )
         return tool_text, user_blocks
 
+    @staticmethod
+    def _extract_search_query(text: str, topk: int = 10) -> str:
+        """Reduce a conversational message to zh/en keywords for a sharper memory search.
+
+        A full utterance carries filler that dilutes both the BM25 and the vector side of
+        Nowledge's hybrid search. jieba's TF-IDF extraction (POS-filtered) keeps the salient
+        Chinese/English terms; on any failure or empty result we fall back to the raw text.
+        """
+        if not text or _jieba_analyse is None:
+            return text
+        try:
+            tags = _jieba_analyse.extract_tags(text, topK=topk, allowPOS=_KEYWORD_ALLOW_POS)
+        except Exception:
+            return text
+        return " ".join(tags) if tags else text
+
     async def _auto_inject_memories(self, query: str) -> list[dict] | None:
         """Search Nowledge and return cleaned results for system prompt injection."""
         cfg = self._nowledge_auto_inject
         if not cfg.enabled or not self.nowledge_client:
             return None
-        results = await self.nowledge_client.search_memories(query, limit=cfg.max_num)
+        search_query = self._extract_search_query(query) if cfg.extract_keywords else query
+        if search_query != query:
+            logger.debug("Memory search query: {!r} -> {!r}", query, search_query)
+        results = await self.nowledge_client.search_memories(search_query, limit=cfg.max_num)
         cleaned = []
         for r in results:
             score = r.get("similarity_score", 0)
