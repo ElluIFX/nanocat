@@ -1029,8 +1029,12 @@ class AgentLoop:
         sub = parts[1].lower() if len(parts) > 1 else ""
         arg = parts[2].strip() if len(parts) > 2 else ""
 
+        # /session (no subcommand) — show help instead of falling back to list
+        if not sub:
+            return _reply(self.tips.session_usage)
+
         # /session list [N=10]
-        if not sub or sub == "list":
+        if sub == "list":
             try:
                 limit = int(arg) if arg else 10
             except ValueError:
@@ -1072,33 +1076,58 @@ class AgentLoop:
         return _reply(self.tips.session_usage)
 
     @staticmethod
-    def _format_session_turns(session: Session, turns: int = 3) -> str:
-        """Extract the last N turns as truncated text for preview."""
+    def _preview_text(content: Any) -> str:
+        """Flatten a message's content (str or block list) into one readable line.
+
+        Multimodal messages store content as a list of blocks; rendering that list
+        directly leaks JSON fragments (``[{...}]``) into the preview, so pull out the
+        text blocks, mark images as ``[image]``, and collapse all whitespace.
+        """
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text" and block.get("text"):
+                        parts.append(str(block["text"]))
+                    elif block.get("type") == "image_url":
+                        parts.append("[image]")
+                elif isinstance(block, str):
+                    parts.append(block)
+            text = " ".join(parts)
+        else:
+            text = "" if content is None else str(content)
+        return " ".join(text.split())
+
+    @staticmethod
+    def _format_session_turns(session: Session, turns: int = 3, width: int = 46) -> str:
+        """Render the last N turns as a clean one-line-per-message text preview."""
         boundaries = session.get_completed_turn_boundaries()
         if not boundaries:
             return "(no completed turns)"
 
         recent = boundaries[-turns:]
+        first_num = len(boundaries) - len(recent) + 1
         turn_texts = []
-        for i, (start, end) in enumerate(recent, 1):
-            msgs = session.messages[start:end]
+        for offset, (start, end) in enumerate(recent):
             lines = []
-            for m in msgs:
+            for m in session.messages[start:end]:
                 role = m.get("role")
                 if role not in ("user", "assistant"):
                     continue
-                content = m.get("content", "")
-                if not content:
-                    continue
                 if role == "assistant" and m.get("tool_calls"):
                     continue
-                # Center-ellipsis truncation for lines > 40 chars
-                if len(content) > 40:
-                    content = content[:18] + "..." + content[-19:]
+                text = AgentLoop._preview_text(m.get("content"))
+                if not text:
+                    continue
+                if len(text) > width:
+                    text = text[: width - 1].rstrip() + "…"
                 prefix = "[Q]" if role == "user" else "[A]"
-                lines.append(f"{prefix} {content}")
-            turn_texts.append(f"Turn {i}:\n" + "\n".join(lines))
-        return "\n\n".join(turn_texts)
+                lines.append(f"{prefix} {text}")
+            if lines:
+                turn_texts.append(f"Turn {first_num + offset}:\n" + "\n".join(lines))
+        return "\n\n".join(turn_texts) if turn_texts else "(no preview)"
 
     async def _handle_context(self, msg: InboundMessage, session: Session) -> OutboundMessage:
         """Handle /context command — show compact numeric context panel."""
