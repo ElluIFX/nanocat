@@ -29,7 +29,12 @@ class DeepSeekProvider(LLMProvider):
     - Thinking mode ignores ``temperature`` / ``top_p`` (not sent).
     - ``frequency_penalty`` / ``presence_penalty`` are deprecated by
       DeepSeek and never sent.
+    - The API is text-only: image blocks are replaced with a stable text path
+      reference before sending (see ``supports_vision``).
     """
+
+    # DeepSeek has no multimodal support; strip images to text proactively.
+    supports_vision = False
 
     _DEFAULT_BASE_URL = "https://api.deepseek.com"
 
@@ -64,6 +69,9 @@ class DeepSeekProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         resolved_model = self._strip_model(model or self.default_model)
+
+        # Text-only API: turn image blocks into stable [image: {path}] text first.
+        messages = self._enforce_vision_policy(messages)
 
         kwargs: dict[str, Any] = {
             "model": resolved_model,

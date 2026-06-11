@@ -74,6 +74,11 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
+    # Whether the provider's API accepts multimodal image_url content blocks.
+    # Text-only providers (e.g. DeepSeek) set this False so images are replaced
+    # with a stable text path reference before the request is built.
+    supports_vision: bool = True
+
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _TRANSIENT_ERROR_MARKERS = (
         "429",
@@ -214,6 +219,18 @@ class LLMProvider(ABC):
             else:
                 result.append(msg)
         return result if found else None
+
+    def _enforce_vision_policy(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """For text-only providers, proactively replace image blocks with a stable
+        ``[image: {path}]`` text reference (matching the persisted-history form, so the
+        prompt-cache prefix stays identical across turns) instead of relying on a
+        reactive error-then-retry. Vision providers pass messages through unchanged.
+        """
+        if self.supports_vision:
+            return messages
+        return self._strip_image_content(messages) or messages
 
     async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
         """Call chat() and convert unexpected exceptions to error responses."""
