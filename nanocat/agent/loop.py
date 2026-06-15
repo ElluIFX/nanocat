@@ -557,6 +557,7 @@ class AgentLoop:
         _bypass_token = safety_bypass.set(bypass_safety_check) if bypass_safety_check else None
         messages = initial_messages
 
+        # Cacheable PULSE spec in system; per-turn trigger is in the user message.
         if self._config.agents.defaults.pulse_enabled:
             from nanocat.agent.pulse import PULSE_PROMPT
 
@@ -1045,9 +1046,7 @@ class AgentLoop:
                 return None
             return name[:10]
         except Exception as e:
-            logger.warning(
-                "Session name generation failed (model={}): {}", self.assistant_model, e
-            )
+            logger.warning("Session name generation failed (model={}): {}", self.assistant_model, e)
             return None
 
     async def _handle_session(self, msg: InboundMessage, session: Session) -> OutboundMessage:
@@ -1326,9 +1325,7 @@ class AgentLoop:
             self._save_turn(session, all_msgs, n_initial_sys - 1)
             self.sessions.save(session)
             if not transient:
-                self._schedule_background(
-                    self.memory_compactor.maybe_compact_by_tokens(session)
-                )
+                self._schedule_background(self.memory_compactor.maybe_compact_by_tokens(session))
                 if self.thread_manager:
                     _new_msgs_sys = session.messages[_old_msg_count_sys:]
                     self._schedule_background(
@@ -1368,9 +1365,7 @@ class AgentLoop:
                 content=self.tips.help,
             )
         if cmd == "/compact":
-            changed = await self.memory_compactor.maybe_compact_by_tokens(
-                session, force=True
-            )
+            changed = await self.memory_compactor.maybe_compact_by_tokens(session, force=True)
             content = self.tips.compact_completed if changed else self.tips.compact_failed
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
         if cmd == "/context":
@@ -1455,6 +1450,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            pulse=self._config.agents.defaults.pulse_enabled,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -1523,9 +1519,14 @@ class AgentLoop:
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
+        from nanocat.agent.pulse import strip_pulse
+
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
+            if role == "assistant" and isinstance(content, str) and "<pulse" in content.lower():
+                content = strip_pulse(content)
+                entry["content"] = content
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages — they poison session context
             if (
@@ -1536,25 +1537,22 @@ class AgentLoop:
                 entry["content"] = content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
                 if isinstance(content, str):
-                    _RT_OPEN = ContextBuilder._RUNTIME_CTX_OPEN
-                    _RT_CLOSE = ContextBuilder._RUNTIME_CTX_CLOSE
-                    if content.startswith(_RT_OPEN):
-                        idx = content.find(_RT_CLOSE)
-                        if idx != -1:
-                            stripped = content[idx + len(_RT_CLOSE) :].lstrip()
-                            if stripped:
-                                entry["content"] = stripped
-                            else:
-                                continue
+                    stripped = ContextBuilder.strip_leading_ephemeral(content)
+                    if stripped == content:
+                        pass
+                    elif stripped:
+                        entry["content"] = stripped
+                    else:
+                        continue
                 if isinstance(content, list):
                     filtered = []
                     for c in content:
                         if (
                             c.get("type") == "text"
                             and isinstance(c.get("text"), str)
-                            and c["text"].startswith(ContextBuilder._RUNTIME_CTX_OPEN)
+                            and ContextBuilder.is_ephemeral_text_block(c["text"])
                         ):
-                            continue  # Strip runtime context from multimodal messages
+                            continue
                         if c.get("type") == "image_url" and c.get("image_url", {}).get(
                             "url", ""
                         ).startswith("data:image/"):

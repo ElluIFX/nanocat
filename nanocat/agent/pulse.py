@@ -8,6 +8,10 @@ import re
 
 _PULSE_RE = re.compile(r"<pulse>[\s\S]*?</pulse>", re.IGNORECASE)
 
+# Ephemeral per-turn trigger tags, stripped before persistence.
+PULSE_DIRECTIVE_OPEN = "<PULSE-DIRECTIVE>"
+PULSE_DIRECTIVE_CLOSE = "</PULSE-DIRECTIVE>"
+
 PULSE_PROMPT = """\
 ## PULSE
 
@@ -55,6 +59,12 @@ Will:
   - ...
   - ...
 </pulse>"""
+
+
+def build_pulse_directive() -> str:
+    """Per-turn PULSE trigger injected into the user message and stripped before persist."""
+    body = "This turn, emit one PULSE block before replying (see PULSE spec)."
+    return f"{PULSE_DIRECTIVE_OPEN}\n{body}\n{PULSE_DIRECTIVE_CLOSE}"
 
 
 def strip_pulse(text: str) -> str:

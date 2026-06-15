@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from nanocat.agent.memory import MemoryStore
+from nanocat.agent.pulse import (
+    PULSE_DIRECTIVE_CLOSE,
+    PULSE_DIRECTIVE_OPEN,
+    build_pulse_directive,
+)
 from nanocat.agent.skills import SkillsLoader
 from nanocat.utils.helpers import build_assistant_message, current_time_str, detect_image_mime
 
@@ -17,8 +22,14 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CTX_OPEN = "<RUNTIME-CONTEXT>"
     _RUNTIME_CTX_CLOSE = "</RUNTIME-CONTEXT>"
+    _PULSE_DIRECTIVE_OPEN = PULSE_DIRECTIVE_OPEN
+    _PULSE_DIRECTIVE_CLOSE = PULSE_DIRECTIVE_CLOSE
     _COMPACTED_MEM_OPEN = "<COMPACTED-MEMORY>"
     _COMPACTED_MEM_CLOSE = "</COMPACTED-MEMORY>"
+    _EPHEMERAL_BLOCKS = (
+        (_RUNTIME_CTX_OPEN, _RUNTIME_CTX_CLOSE),
+        (_PULSE_DIRECTIVE_OPEN, _PULSE_DIRECTIVE_CLOSE),
+    )
 
     def __init__(self, workspace: Path, nowledge_enabled: bool = False):
         self.workspace = workspace
@@ -143,6 +154,28 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         inner = "\n".join(lines)
         return f"{ContextBuilder._RUNTIME_CTX_OPEN}\n{inner}\n{ContextBuilder._RUNTIME_CTX_CLOSE}"
 
+    @classmethod
+    def strip_leading_ephemeral(cls, content: str) -> str:
+        """Strip leading ephemeral blocks (RUNTIME-CONTEXT / PULSE-DIRECTIVE); return the rest."""
+        text = content
+        changed = True
+        while changed:
+            changed = False
+            stripped = text.lstrip()
+            for open_tag, close_tag in cls._EPHEMERAL_BLOCKS:
+                if stripped.startswith(open_tag):
+                    idx = stripped.find(close_tag)
+                    if idx != -1:
+                        text = stripped[idx + len(close_tag) :]
+                        changed = True
+                        break
+        return text.lstrip()
+
+    @classmethod
+    def is_ephemeral_text_block(cls, text: str) -> bool:
+        """Whether a multimodal text block is a leading ephemeral block."""
+        return any(text.startswith(open_tag) for open_tag, _ in cls._EPHEMERAL_BLOCKS)
+
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         parts = []
@@ -156,9 +189,7 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         return "\n\n".join(parts) if parts else ""
 
     @classmethod
-    def _build_compacted_memory_message(
-        cls, compacted_memory: str | None
-    ) -> dict[str, Any] | None:
+    def _build_compacted_memory_message(cls, compacted_memory: str | None) -> dict[str, Any] | None:
         """Build a synthetic context message for the session compacted memory block."""
         text = (compacted_memory or "").strip()
         if not text:
@@ -182,17 +213,26 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         channel: str | None = None,
         chat_id: str | None = None,
         current_role: str = "user",
+        pulse: bool = False,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
         user_content = self._build_user_content(current_message, media)
 
-        # Merge runtime context and user content into a single user message
+        # Ephemeral per-turn prefix blocks (runtime metadata + optional PULSE
+        # directive). They ride the latest user message for recency, then are
+        # stripped before persistence so they never enter session history,
+        # memory extraction, or subsequent context.
+        ephemeral_parts = [runtime_ctx]
+        if pulse:
+            ephemeral_parts.append(build_pulse_directive())
+
+        # Merge ephemeral prefix and user content into a single user message
         # to avoid consecutive same-role messages that some providers reject.
         if isinstance(user_content, str):
-            merged = f"{runtime_ctx}\n\n{user_content}"
+            merged = "\n\n".join([*ephemeral_parts, user_content])
         else:
-            merged = [{"type": "text", "text": runtime_ctx}] + user_content
+            merged = [{"type": "text", "text": p} for p in ephemeral_parts] + user_content
 
         if injected_memories:
             mem_text = (
