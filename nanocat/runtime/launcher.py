@@ -43,10 +43,13 @@ def load_runtime_config(workdir: str | None = None) -> Config:
     ``workspace/``, ``sessions/``, ``cron/`` and ``logs/`` all live under it.
     Defaults to the current working directory when not given.
     """
-    if workdir:
-        wd = Path(workdir).expanduser().resolve()
-        wd.mkdir(parents=True, exist_ok=True)
-        set_config_path(wd / "config.json")
+    # Pin an absolute config path up front (default: the CWD). This makes the
+    # working dir the single, stable anchor: get_config_path() never falls back
+    # to a re-evaluated Path.cwd(), so workspace_path and every path derived from
+    # it stays identical for all consumers even if the process CWD later changes.
+    wd = Path(workdir).expanduser().resolve() if workdir else Path.cwd().resolve()
+    wd.mkdir(parents=True, exist_ok=True)
+    set_config_path(wd / "config.json")
 
     return load_config(get_config_path())
 
