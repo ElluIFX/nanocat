@@ -32,7 +32,6 @@ class AgentDefaults(Base):
 
     model_config = ConfigDict(extra="ignore")
 
-    workspace: str = "~/.nanocat/workspace"
     model: str = "openai/gpt-4o"
     max_model: str | None = None  # Optional high-capability model for /max command
     assistant_model: str | None = (
@@ -349,8 +348,15 @@ class Config(BaseSettings):
 
     @property
     def workspace_path(self) -> Path:
-        """Get expanded workspace path."""
-        return Path(self.agents.defaults.workspace).expanduser()
+        """The agent workspace, always ``<workdir>/workspace``.
+
+        The working directory (the config file's parent) is the single anchor
+        for all runtime state, so the workspace cannot be relocated independently
+        via config — pointing ``-w`` somewhere relocates everything together.
+        """
+        from nanocat.config.loader import get_config_path
+
+        return get_config_path().parent / "workspace"
 
     def _match_provider(
         self, model: str | None = None

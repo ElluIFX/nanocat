@@ -37,8 +37,17 @@ def get_logs_dir() -> Path:
 
 
 def get_workspace_path(workspace: str | None = None) -> Path:
-    """Resolve and ensure the agent workspace path."""
-    path = Path(workspace).expanduser() if workspace else Path.home() / ".nanocat" / "workspace"
+    """Resolve and ensure the agent workspace path.
+
+    With no explicit *workspace*, defaults to the active config's
+    ``workspace_path`` (``<workdir>/workspace``).
+    """
+    if workspace:
+        path = Path(workspace).expanduser()
+    else:
+        from nanocat.config.loader import get_runtime_config
+
+        path = get_runtime_config().workspace_path
     return ensure_dir(path)
 
 

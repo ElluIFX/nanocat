@@ -49,18 +49,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tui = ["textual>=8.0.0,<9.0.0"]
 wecom = ["wecom-aibot-sdk-python>=0.1.5"]
-matrix = [
-    "matrix-nio[e2e]>=0.25.2",
-    "mistune>=3.0.0,<4.0.0",
-    "nh3>=0.2.17,<1.0.0",
-]
 langsmith = ["langsmith>=0.1.0"]
 dev = [
     "ruff>=0.1.0",
-    "matrix-nio[e2e]>=0.25.2",
-    "mistune>=3.0.0,<4.0.0",
-    "nh3>=0.2.17,<1.0.0",
 ]
 
 [project.scripts]

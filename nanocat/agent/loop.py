@@ -27,7 +27,6 @@ from nanocat.agent.memory import (
 from nanocat.agent.skills import BUILTIN_SKILLS_DIR
 from nanocat.agent.subagent import SubagentManager
 from nanocat.agent.tools.cron import CronTool
-from nanocat.agent.tools.gather import GatherTool
 from nanocat.agent.tools.filesystem import (
     DeleteLinesTool,
     EditFileTool,
@@ -39,6 +38,7 @@ from nanocat.agent.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
+from nanocat.agent.tools.gather import GatherTool
 from nanocat.agent.tools.message import MessageTool
 from nanocat.agent.tools.registry import ToolRegistry
 from nanocat.agent.tools.shell import ExecTool
@@ -607,7 +607,7 @@ class AgentLoop:
                 for i, tc in enumerate(response.tool_calls):
                     tools_used.append(tc.name)
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
-                    logger.debug("[{}] Tool call: {}({})", _log_ids[i], tc.name, args_str)
+                    logger.info("[{}] Tool call: {}({})", _log_ids[i], tc.name, args_str)
 
                 async def _run_one(idx: int, tc: Any) -> tuple[int, Any, Any]:
                     result = await self.tools.execute(
@@ -628,7 +628,7 @@ class AgentLoop:
                             + f"...[TRUNCATED {len(result_str) - 512} CHARS]..."
                             + result_str[-256:]
                         )
-                    logger.debug("[{}] Tool {} result: {}", _log_ids[idx], tc.name, result_str)
+                    logger.info("[{}] Tool {} result: {}", _log_ids[idx], tc.name, result_str)
                     if bridged := self._bridge_image_tool_result(tc.name, result):
                         tool_text, user_blocks = bridged
                         logger.info(

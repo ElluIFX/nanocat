@@ -25,3 +25,12 @@ uv.lock
 
 AGENT.md
 CLAUDE.md
+
+# nanocat runtime state (anchored at the working dir, default = CWD)
+/config.json
+/workspace/
+/sessions/
+/cron/
+/logs/
+/media/
+.pending_restart_notify.json

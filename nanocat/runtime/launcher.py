@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from nanocat.agent.loop import AgentLoop
 from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.manager import ChannelManager
-from nanocat.config.loader import load_config, set_config_path
+from nanocat.config.loader import get_config_path, load_config, set_config_path
 from nanocat.config.paths import get_cron_dir, get_sessions_dir
 from nanocat.config.schema import Config
 from nanocat.cron.service import CronService
@@ -35,19 +36,49 @@ class RuntimeContext:
     heartbeat: HeartbeatService
 
 
-def load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
-    """Load config and optionally override the active workspace."""
-    config_path = None
-    if config:
-        config_path = Path(config).expanduser().resolve()
-        if not config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        set_config_path(config_path)
+def load_runtime_config(workdir: str | None = None) -> Config:
+    """Load config from the working directory.
 
-    loaded = load_config(config_path)
-    if workspace:
-        loaded.agents.defaults.workspace = workspace
-    return loaded
+    *workdir* is the single anchor for all runtime state: ``config.json``,
+    ``workspace/``, ``sessions/``, ``cron/`` and ``logs/`` all live under it.
+    Defaults to the current working directory when not given.
+    """
+    if workdir:
+        wd = Path(workdir).expanduser().resolve()
+        wd.mkdir(parents=True, exist_ok=True)
+        set_config_path(wd / "config.json")
+
+    return load_config(get_config_path())
+
+
+def configure_logging(verbose: bool = False, local_mode: bool = False) -> None:
+    """Set up loguru sinks. INFO by default; DEBUG with ``--verbose``.
+
+    The level is exported as ``NANOCAT_LOG_LEVEL`` so the TUI pane sink (built
+    later, inside the channel) picks the same level. In gateway mode a stderr
+    sink is installed; in local (TUI) mode Textual owns the screen, so stderr is
+    left off and the TUI adds its own pane sink. A rotating file sink under
+    ``<workdir>/logs`` is installed in both modes.
+    """
+    level = "DEBUG" if verbose else "INFO"
+    os.environ["NANOCAT_LOG_LEVEL"] = level
+
+    logger.remove()  # drop loguru's default (DEBUG) stderr sink
+    if not local_mode:
+        logger.add(sys.stderr, level=level, backtrace=False, diagnose=False)
+
+    logs_dir = get_config_path().parent / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        logs_dir / "runtime.log",
+        rotation="5 MB",
+        retention=5,
+        level=level,
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <7} | {name}:{line} - {message}",
+    )
 
 
 def warn_deprecated_memory_window(config: Config) -> None:
@@ -61,15 +92,18 @@ def warn_deprecated_memory_window(config: Config) -> None:
 
 def build_runtime(
     *,
-    config_path: str | None = None,
-    workspace: str | None = None,
+    workdir: str | None = None,
     verbose: bool = False,
+    local_mode: bool = False,
 ) -> RuntimeContext:
-    """Construct the runtime services needed to run the gateway."""
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
+    """Construct the runtime services needed to run the gateway.
 
-    config = load_runtime_config(config_path, workspace)
+    *workdir* anchors all runtime state (see :func:`load_runtime_config`). When
+    *local_mode* is set, only the ``tui`` channel is started and all network
+    channels stay disabled regardless of config.
+    """
+    config = load_runtime_config(workdir)  # sets the config path before paths derive
+    configure_logging(verbose=verbose, local_mode=local_mode)
     warn_deprecated_memory_window(config)
     sync_workspace_templates(config.workspace_path, silent=True)
 
@@ -135,7 +169,7 @@ def build_runtime(
         return response
 
     cron.on_job = on_cron_job
-    channels = ChannelManager(config, bus)
+    channels = ChannelManager(config, bus, force_channel="tui" if local_mode else None)
 
     def pick_heartbeat_target() -> tuple[str, str]:
         enabled = set(channels.enabled_channels)
@@ -187,12 +221,11 @@ def build_runtime(
 
 async def run_gateway_async(
     *,
-    config_path: str | None = None,
-    workspace: str | None = None,
+    workdir: str | None = None,
     verbose: bool = False,
 ) -> None:
     """Run the gateway services until interrupted."""
-    runtime = build_runtime(config_path=config_path, workspace=workspace, verbose=verbose)
+    runtime = build_runtime(workdir=workdir, verbose=verbose)
     logger.info("Starting NanoCat runtime v{}", __version__)
     if runtime.channels.enabled_channels:
         logger.info("Channels enabled: {}", ", ".join(runtime.channels.enabled_channels))
@@ -211,21 +244,132 @@ async def run_gateway_async(
         await runtime.channels.stop_all()
 
 
-def run_gateway(
+async def _shutdown_runtime(runtime: RuntimeContext) -> None:
+    """Tear down runtime services (mirrors run_gateway_async's finally block)."""
+    await runtime.agent.close_mcp()
+    runtime.heartbeat.stop()
+    runtime.cron.stop()
+    runtime.agent.stop()
+    await runtime.channels.stop_all()
+
+
+def run_local_tui(
     *,
-    config_path: str | None = None,
-    workspace: str | None = None,
+    workdir: str | None = None,
     verbose: bool = False,
 ) -> None:
-    """Synchronous wrapper for gateway runtime."""
+    """Run the local TUI: runtime on a background loop, Textual UI on main thread.
+
+    Decoupling the loops keeps the agent's synchronous work from starving the
+    UI compositor (which otherwise freezes the screen until a turn completes).
+    """
+    import threading
+
+    runtime = build_runtime(workdir=workdir, verbose=verbose, local_mode=True)
+    tui = runtime.channels.get_channel("tui")
+    if tui is None or not hasattr(tui, "run_ui"):
+        raise SystemExit("Error: TUI channel unavailable (is 'textual' installed?)")
+
+    # Preload the local session transcript so it renders on startup.
     try:
-        asyncio.run(
-            run_gateway_async(config_path=config_path, workspace=workspace, verbose=verbose)
-        )
+        session = runtime.session_manager.get_or_create("tui", "local")
+        tui.preload_history(session.get_history())  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.warning("Could not preload TUI session history: {}", e)
+
+    loop = asyncio.new_event_loop()
+    started = threading.Event()
+
+    async def _serve() -> None:
+        await runtime.cron.start()
+        await runtime.heartbeat.start()
+        await asyncio.gather(runtime.agent.run(), runtime.channels.start_all())
+
+    def _runtime_thread() -> None:
+        asyncio.set_event_loop(loop)
+        loop.create_task(_serve())
+        started.set()
+        loop.run_forever()
+        loop.close()
+
+    worker = threading.Thread(target=_runtime_thread, name="nanocat-runtime", daemon=True)
+    worker.start()
+    started.wait()
+    tui.bind_runtime_loop(loop)  # type: ignore[attr-defined]
+
+    logger.info("Starting NanoCat runtime v{} (local TUI)", __version__)
+
+    try:
+        tui.run_ui()  # type: ignore[attr-defined]  # blocks until the user quits
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            asyncio.run_coroutine_threadsafe(_shutdown_runtime(runtime), loop).result(timeout=10)
+        except Exception as e:
+            logger.warning("Local TUI shutdown error: {}", e)
+        loop.call_soon_threadsafe(loop.stop)
+        worker.join(timeout=5)
+
+
+def run_gateway(
+    *,
+    workdir: str | None = None,
+    verbose: bool = False,
+    local_mode: bool = False,
+) -> None:
+    """Synchronous wrapper for gateway runtime."""
+    if local_mode:
+        run_local_tui(workdir=workdir, verbose=verbose)
+        return
+    try:
+        asyncio.run(run_gateway_async(workdir=workdir, verbose=verbose))
     except KeyboardInterrupt:
         logger.info("Shutting down runtime")
 
 
 def main() -> None:
-    """Default module/script entrypoint."""
-    run_gateway()
+    """Module/script entrypoint. A start mode (``gateway`` or ``tui``) is required."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="nanocat",
+        description="NanoCat — ultra-lightweight personal AI assistant.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "modes:\n"
+            "  gateway    Run the network channels (Telegram, Slack, …) defined in config.\n"
+            "  tui        Local split-screen terminal UI; all network channels disabled.\n\n"
+            "The working directory (-w, default: current directory) anchors all\n"
+            "runtime state: config.json, workspace/, sessions/, cron/ and logs/.\n\n"
+            "examples:\n"
+            "  nanocat gateway\n"
+            "  nanocat tui -w ~/.nanocat"
+        ),
+    )
+    parser.add_argument(
+        "mode",
+        choices=["gateway", "tui"],
+        help="Start mode: 'gateway' (network channels) or 'tui' (local terminal UI).",
+    )
+    parser.add_argument(
+        "-w",
+        "--workdir",
+        help="Working directory holding config.json and all runtime state "
+        "(default: current directory).",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging.")
+
+    # Zero args: show full help instead of an argparse usage error.
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return
+
+    args = parser.parse_args()
+
+    run_gateway(
+        workdir=args.workdir,
+        verbose=args.verbose,
+        local_mode=args.mode == "tui",
+    )

@@ -19,10 +19,14 @@ def set_config_path(path: Path) -> None:
 
 
 def get_config_path() -> Path:
-    """Get the configuration file path."""
+    """Get the configuration file path.
+
+    Defaults to ``./config.json`` in the current working directory; pass
+    ``--config`` to point elsewhere (which relocates all derived runtime dirs).
+    """
     if _current_config_path:
         return _current_config_path
-    return Path.home() / ".nanocat" / "config.json"
+    return Path.cwd() / "config.json"
 
 
 def set_runtime_config(config: Config) -> None:

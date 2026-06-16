@@ -22,9 +22,10 @@ class ChannelManager:
     - Route outbound messages
     """
 
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(self, config: Config, bus: MessageBus, force_channel: str | None = None):
         self.config = config
         self.bus = bus
+        self.force_channel = force_channel
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
 
@@ -46,7 +47,25 @@ class ChannelManager:
             else None
         )
 
-        for name, cls in discover_all().items():
+        discovered = discover_all()
+
+        # Local mode: force exactly one channel (e.g. the TUI), ignore config so
+        # every network channel stays disabled. Synthesized from default_config.
+        if self.force_channel:
+            cls = discovered.get(self.force_channel)
+            if cls is None:
+                raise SystemExit(f"Error: unknown channel '{self.force_channel}'")
+            try:
+                channel = cls(cls.default_config(), self.bus)
+                channel._transcription_provider = transcription_provider
+                channel._help_text = self.config.tips.help
+                self.channels[self.force_channel] = channel
+                logger.info("{} channel enabled (local mode)", cls.display_name)
+            except Exception as e:
+                raise SystemExit(f"Error: failed to start '{self.force_channel}': {e}")
+            return
+
+        for name, cls in discovered.items():
             section = getattr(self.config.channels, name, None)
             if section is None:
                 continue
