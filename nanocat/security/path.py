@@ -6,6 +6,7 @@ context var consistently controls path restrictions.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -83,6 +84,13 @@ def extract_path_args(command: str) -> list[str]:
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute path-like strings from a command."""
     win = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)
-    posix = re.findall(r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command)
     home = re.findall(r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command)
+    # POSIX-style "/abs/path" only applies off Windows. On Windows a leading
+    # "/" token is a command flag (e.g. Everything's /ad, /a-d; cmd's /F), not a
+    # path — matching it would resolve to "C:\ad" and wrongly trip containment.
+    posix = (
+        []
+        if os.name == "nt"
+        else re.findall(r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command)
+    )
     return win + posix + home
