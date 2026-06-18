@@ -149,6 +149,10 @@ class AgentLoop:
         self._processing_lock = asyncio.Lock()
         self._session_gen: dict[str, int] = {}
         self._pending_buf: dict[str, InboundMessage] = {}
+        # Mid-turn interjection ("steer"): pending messages to inject into a
+        # running turn, and whether a session's turn has produced visible output.
+        self._steer_buf: dict[str, list[InboundMessage]] = {}
+        self._progressed: dict[str, bool] = {}
         self._recent_logs: deque = deque(maxlen=10)
         logger.add(
             lambda msg: self._recent_logs.append(msg.strip()),
@@ -581,12 +585,32 @@ class AgentLoop:
             logger.debug(f"Auto-injected {len(cleaned)} memories to system prompt ({log})")
         return cleaned or None
 
+    async def _drain_steer(
+        self,
+        session_key: str,
+        messages: list[dict],
+        on_progress: Callable[..., Awaitable[None]] | None,
+    ) -> bool:
+        """Inject any pending interjection ("steer") for *session_key* as a user
+        message appended to *messages* (in place). Returns True if it injected."""
+        pending = self._steer_buf.pop(session_key, None)
+        if not pending:
+            return False
+        steer_text = "\n\n".join(m.content for m in pending if m.content)
+        steer_media = [p for m in pending for p in (m.media or [])]
+        content = self.context._build_user_content(steer_text, steer_media or None)
+        messages.append({"role": "user", "content": content})
+        if on_progress and steer_text:
+            await on_progress(f"↪ {steer_text[:80]}")
+        return True
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         bypass_safety_check: bool = False,
         on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
+        session_key: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
         from nanocat.security import safety_bypass
@@ -609,6 +633,10 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
+            # Pick up any interjection that arrived during the previous tool round.
+            if session_key:
+                await self._drain_steer(session_key, messages, on_progress)
+
             tool_defs = self.tools.get_definitions()
 
             response = await self.provider.chat_with_retry(
@@ -618,6 +646,10 @@ class AgentLoop:
             )
 
             if response.has_tool_calls:
+                # Turn has produced visible work — from here a new message steers
+                # (injects) rather than cancels (see run()).
+                if session_key:
+                    self._progressed[session_key] = True
                 if on_progress:
                     thought = self._strip_think(response.content)
                     if thought:
@@ -759,6 +791,14 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
+                # An interjection that landed during this final response: deliver
+                # the answer as progress, then continue the turn with the steer
+                # instead of ending — so a late steer is never lost.
+                if session_key and self._steer_buf.get(session_key):
+                    if clean and on_progress:
+                        await on_progress(clean)
+                    await self._drain_steer(session_key, messages, on_progress)
+                    continue
                 final_content = clean
                 break
 
@@ -802,6 +842,8 @@ class AgentLoop:
                 await self._handle_stop(msg)
                 self._pending_buf.pop(msg.session_key, None)
                 self._session_gen.pop(msg.session_key, None)
+                self._steer_buf.pop(msg.session_key, None)
+                self._progressed.pop(msg.session_key, None)
             elif cmd == "/restart":
                 await self._handle_restart(msg)
             elif self._is_standalone_cmd(msg):
@@ -823,6 +865,13 @@ class AgentLoop:
                 # are processed as a single turn.
                 sk = msg.session_key
                 live = [t for t in self._active_tasks.get(sk, []) if not t.done()]
+
+                # Interject: if the in-flight turn has already produced output,
+                # queue this as a steer for the running loop to pick up at its
+                # next step — don't cancel, keep its tool calls / thoughts.
+                if live and self._progressed.get(sk):
+                    self._steer_buf.setdefault(sk, []).append(msg)
+                    continue
 
                 if live:
                     for t in live:
@@ -1338,6 +1387,19 @@ class AgentLoop:
                         content=self.tips.error,
                     )
                 )
+            finally:
+                # Turn finished for this session (only if not superseded by a newer
+                # gen): clear the progress flag and re-dispatch any interjection that
+                # arrived too late to be consumed inside the loop.
+                sk = msg.session_key
+                if not gen or self._session_gen.get(sk, 0) == gen:
+                    self._progressed.pop(sk, None)
+                    orphans = self._steer_buf.pop(sk, None)
+                    if orphans:
+                        merged = orphans[0]
+                        for extra in orphans[1:]:
+                            merged = self._merge_messages(merged, extra)
+                        await self.bus.publish_inbound(merged)
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, terminate ssh/proc sessions, close MCP."""
@@ -1579,6 +1641,7 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
             bypass_safety_check=_bypass,
             on_tool_event=None if transient else _bus_tool_event,
+            session_key=None if transient else msg.session_key,
         )
 
         _old_msg_count = len(session.messages)
