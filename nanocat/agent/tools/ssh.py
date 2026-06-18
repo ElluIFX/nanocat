@@ -29,8 +29,17 @@ _DEFAULT_COLS, _DEFAULT_ROWS = 80, 24
 _MIN_COLS, _MAX_COLS = 20, 300
 _MIN_ROWS, _MAX_ROWS = 5, 100
 
-_OPEN_SETTLE = 1.2  # seconds to wait after connect before returning initial screen
-_SEND_SETTLE = 0.4  # seconds to wait after input before returning updated screen
+# Timing: after sending input we settle for a base delay (agent-overridable via
+# `wait`), then keep draining only while output is still actively streaming —
+# so long/streaming output is captured in full without making silent or
+# already-finished commands wait the whole ceiling.
+_SEND_SETTLE = 0.5  # base settle after input before reading the screen
+_SEND_QUIET = 0.25  # treat output as "still streaming" if active within this window
+_SEND_STREAM_CEIL = 8.0  # max extra time to keep draining a streaming command
+_OPEN_SETTLE = 1.2
+_OPEN_QUIET = 0.3
+_OPEN_STREAM_CEIL = 8.0
+_WAIT_CEILING = 120.0  # hard cap for a caller-supplied wait override
 
 # Control chars + CSI/escape sequences, stripped from the line-oriented scrollback
 # view (the pyte screen view keeps them rendered).
@@ -253,6 +262,19 @@ class SSHSession:
     def idle_seconds(self) -> int:
         return int(time.monotonic() - self.last_activity)
 
+    async def drain_until_idle(self, quiet: float, ceiling: float) -> None:
+        """Keep waiting while the remote is still actively producing output (last
+        activity within *quiet* seconds), capped at *ceiling* seconds. Lets a
+        streaming command finish before the screen is read, without penalising
+        silent or already-finished commands (which return immediately)."""
+        deadline = time.monotonic() + ceiling
+        while (
+            self.alive
+            and time.monotonic() - self.last_activity < quiet
+            and time.monotonic() < deadline
+        ):
+            await asyncio.sleep(0.05)
+
 
 class SSHManager:
     """Owns all live ssh sessions, keyed by short uuid."""
@@ -313,12 +335,13 @@ class SSHManager:
         session.start_reader()
         self._sessions[sid] = session
         await asyncio.sleep(_OPEN_SETTLE)
+        await session.drain_until_idle(_OPEN_QUIET, _OPEN_STREAM_CEIL)
 
         # Sync the remote PTY to the requested geometry (default 80x24 needs none).
         if (cols, rows) != (_DEFAULT_COLS, _DEFAULT_ROWS) and session.alive:
             try:
                 await session.send_bytes(f"stty rows {rows} cols {cols} 2>/dev/null\n".encode())
-                await asyncio.sleep(0.25)
+                await session.drain_until_idle(_OPEN_QUIET, 2.0)
             except RuntimeError:
                 pass
 
@@ -347,6 +370,7 @@ class SSHManager:
         keys: list[str] | None = None,
         enter: bool = False,
         immediate_return: bool = True,
+        wait: float | None = None,
     ) -> str:
         session = self._sessions.get(session_id)
         if session is None:
@@ -378,7 +402,9 @@ class SSHManager:
             )
 
         if immediate_return:
-            await asyncio.sleep(_SEND_SETTLE)
+            base = _SEND_SETTLE if wait is None else max(0.0, min(wait, _WAIT_CEILING))
+            await asyncio.sleep(base)
+            await session.drain_until_idle(_SEND_QUIET, _SEND_STREAM_CEIL)
             return f"[sent to {session_id}] screen:\n{session.render_screen()}"
         return f"[sent to {session_id}] (call ssh_read to view output)"
 
@@ -527,8 +553,13 @@ class SSHSendTool(Tool):
                 "enter": {"type": "boolean", "description": "Append Enter (default false)"},
                 "immediate_return": {
                     "type": "boolean",
-                    "description": "If true (default) wait briefly and return the updated "
-                    "screen; if false return at once and use ssh_read",
+                    "description": "If true (default) wait until output settles and return "
+                    "the updated screen; if false return at once and use ssh_read",
+                },
+                "wait": {
+                    "type": "number",
+                    "description": "Max seconds to wait for output to settle before returning "
+                    "(default ~2); raise for slow commands like builds or installs",
                 },
             },
             "required": ["session_id"],
@@ -541,6 +572,7 @@ class SSHSendTool(Tool):
         keys: list[str] | None = None,
         enter: bool = False,
         immediate_return: bool = True,
+        wait: float | None = None,
         **kwargs: Any,
     ) -> str:
         return await self._mgr.send(
@@ -549,6 +581,7 @@ class SSHSendTool(Tool):
             keys=keys,
             enter=enter,
             immediate_return=immediate_return,
+            wait=wait,
         )
 
 
