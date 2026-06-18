@@ -459,10 +459,16 @@ class AgentLoop:
             tmp_path,
         )
 
-        notice = (
-            f"[Image intercepted: the tool returned a raw base64 image ({size_mb:.1f} MB) "
-            f"which cannot be passed as text context. "
-            f"Saved to local file: {tmp_path}, use load_image(path) to read it.]"
+        notice = json.dumps(
+            {
+                "intercepted": True,
+                "type": "image",
+                "message": "Tool returned a raw base64 image that cannot be passed as text",
+                "size_mb": round(size_mb, 1),
+                "saved_to": tmp_path,
+                "hint": "use load_image(path) to view it",
+            },
+            ensure_ascii=False,
         )
         # Replace the entire base64 blob region with the notice
         return result[: match.start()] + notice + result[match.end() :]
