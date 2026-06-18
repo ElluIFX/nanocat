@@ -40,6 +40,7 @@ from nanocat.agent.tools.filesystem import (
     WriteFileTool,
 )
 from nanocat.agent.tools.gather import GatherTool
+from nanocat.agent.tools.http import HttpRequestTool
 from nanocat.agent.tools.message import MessageTool
 from nanocat.agent.tools.proc import (
     ProcListTool,
@@ -287,6 +288,7 @@ class AgentLoop:
         )
         self._reg(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self._reg(WebFetchTool(proxy=self.web_proxy))
+        self._reg(HttpRequestTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
         self._reg(MessageTool(send_callback=self.bus.publish_outbound))
         self._reg(WaitTool(send_callback=self.bus.publish_outbound))
         self._reg(TodoTool(send_callback=self.bus.publish_outbound))
