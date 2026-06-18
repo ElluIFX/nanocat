@@ -664,10 +664,18 @@ class AgentLoop:
                             )
                             tmp.write(_str)
                             tmp.close()
-                            result = (
-                                f"Tool return length {len(_str)} exceeds limit "
-                                f"({_max_chars} chars). Full output written to: {tmp.name}\n"
-                                f"Use appropriate tools to read this file selectively."
+                            _head = max(1, _max_chars // 10)
+                            result = json.dumps(
+                                {
+                                    "truncated": True,
+                                    "message": f"Output exceeds {_max_chars} chars limit",
+                                    "first_10pct_chars": _str[:_head],
+                                    "last_10pct_chars": _str[-_head:],
+                                    "total_lines": _str.count("\n") + 1,
+                                    "total_chars": len(_str),
+                                    "full_output": tmp.name,
+                                },
+                                ensure_ascii=False,
                             )
                             logger.info(
                                 "[{}] Tool {} result truncated: {} → {}",
