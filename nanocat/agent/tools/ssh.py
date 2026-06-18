@@ -150,13 +150,15 @@ class SSHOpenTool(Tool):
                 },
                 "cols": {
                     "type": "integer",
-                    "description": "Terminal width (default 80); raise for wide TUIs",
+                    "default": _DEFAULT_COLS,
+                    "description": "Terminal width; raise for wide TUIs",
                     "minimum": _MIN_COLS,
                     "maximum": _MAX_COLS,
                 },
                 "rows": {
                     "type": "integer",
-                    "description": "Terminal height (default 24)",
+                    "default": _DEFAULT_ROWS,
+                    "description": "Terminal height",
                     "minimum": _MIN_ROWS,
                     "maximum": _MAX_ROWS,
                 },
@@ -211,16 +213,17 @@ class SSHSendTool(Tool):
                     "characters, or modifier chords with ctrl/alt/shift, e.g. 'ctrl-b' "
                     "(tmux prefix), 'ctrl-c', 'alt-x', 'ctrl-alt-del'.",
                 },
-                "enter": {"type": "boolean", "description": "Append Enter (default false)"},
+                "enter": {"type": "boolean", "default": False, "description": "Append Enter"},
                 "immediate_return": {
                     "type": "boolean",
-                    "description": "If true (default) wait until output settles and return "
-                    "the updated screen; if false return at once and use ssh_read",
+                    "default": True,
+                    "description": "Wait until output settles and return the updated screen; "
+                    "if false return at once and use ssh_read",
                 },
                 "wait": {
                     "type": "number",
-                    "description": "Max seconds to wait for output to settle before returning "
-                    "(default ~2); raise for slow commands like builds or installs",
+                    "description": "Seconds to wait for output before returning; raise for slow "
+                    "commands like builds or installs",
                 },
             },
             "required": ["session_id"],
@@ -267,6 +270,7 @@ class SSHReadTool(Tool):
                 "mode": {
                     "type": "string",
                     "enum": ["screen", "scrollback"],
+                    "default": "screen",
                     "description": "screen = current terminal screen render (for TUIs); "
                     "scrollback = recent line history (ANSI stripped)",
                 },

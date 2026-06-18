@@ -100,11 +100,11 @@ class HttpRequestTool(Tool):
             "type": "object",
             "properties": {
                 "url": {"type": "string"},
-                "method": {"type": "string", "enum": _METHODS, "description": "default GET"},
+                "method": {"type": "string", "enum": _METHODS, "default": "GET"},
                 "headers": {"type": "object", "description": "Request headers"},
                 "json": {"type": "object", "description": "JSON body (sets Content-Type)"},
                 "body": {"type": "string", "description": "Raw text body (when not using json)"},
-                "timeout": {"type": "number", "description": "Seconds (default 30)"},
+                "timeout": {"type": "number", "default": 30, "description": "Seconds"},
                 "session": {
                     "type": "boolean",
                     "description": "Keep cookies in an in-memory session; the result returns a "

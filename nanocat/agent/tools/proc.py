@@ -110,13 +110,15 @@ class ProcStartTool(Tool):
                 "cwd": {"type": "string", "description": "Working directory (default: workspace)"},
                 "cols": {
                     "type": "integer",
-                    "description": "Screen width (default 80)",
+                    "default": _DEFAULT_COLS,
+                    "description": "Screen width",
                     "minimum": _MIN_COLS,
                     "maximum": _MAX_COLS,
                 },
                 "rows": {
                     "type": "integer",
-                    "description": "Screen height (default 24)",
+                    "default": _DEFAULT_ROWS,
+                    "description": "Screen height",
                     "minimum": _MIN_ROWS,
                     "maximum": _MAX_ROWS,
                 },
@@ -170,16 +172,17 @@ class ProcSendTool(Tool):
                     "characters, or modifier chords with ctrl/alt/shift, e.g. 'ctrl-c', "
                     "'ctrl-d', 'alt-x', 'ctrl-alt-del'.",
                 },
-                "enter": {"type": "boolean", "description": "Append Enter (default false)"},
+                "enter": {"type": "boolean", "default": False, "description": "Append Enter"},
                 "immediate_return": {
                     "type": "boolean",
-                    "description": "If true (default) wait until output settles and return "
-                    "the updated screen; if false return at once and use proc_read",
+                    "default": True,
+                    "description": "Wait until output settles and return the updated screen; "
+                    "if false return at once and use proc_read",
                 },
                 "wait": {
                     "type": "number",
-                    "description": "Max seconds to wait for output to settle (default ~2); "
-                    "raise for slow commands",
+                    "description": "Seconds to wait for output before returning; raise for "
+                    "slow commands",
                 },
             },
             "required": ["proc_id"],
@@ -226,6 +229,7 @@ class ProcReadTool(Tool):
                 "mode": {
                     "type": "string",
                     "enum": ["screen", "scrollback"],
+                    "default": "screen",
                     "description": "screen = current rendered screen; "
                     "scrollback = recent line history (ANSI stripped, good for logs)",
                 },

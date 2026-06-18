@@ -104,7 +104,8 @@ class ReadFileTool(_FsTool):
                 },
                 "encoding": {
                     "type": "string",
-                    "description": "Text encoding (default utf-8, python-style)",
+                    "default": "utf-8",
+                    "description": "Text encoding (python-style)",
                 },
             },
             "required": ["path"],
@@ -668,7 +669,8 @@ class GrepFileTool(_FsTool):
                 },
                 "encoding": {
                     "type": "string",
-                    "description": "Text encoding (default utf-8, python-style)",
+                    "default": "utf-8",
+                    "description": "Text encoding (python-style)",
                 },
             },
             "required": ["path", "pattern"],
