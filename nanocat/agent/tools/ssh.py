@@ -38,14 +38,19 @@ _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][AB0-2]|\x1b[=>]|[\x00-\x08\x0b\x0c\x0e-\x1f]"
 )
 
-# Named keys / chords -> byte sequences sent to the remote PTY.
-_KEY_MAP: dict[str, bytes] = {
+# Special (non-printable) named keys -> byte sequences. Modifier chords such as
+# "ctrl-b" or "alt-x" are computed by _key_to_bytes, so they need not be listed.
+_NAMED_KEYS: dict[str, bytes] = {
     "enter": b"\r",
+    "return": b"\r",
     "tab": b"\t",
     "escape": b"\x1b",
+    "esc": b"\x1b",
     "space": b" ",
     "backspace": b"\x7f",
     "delete": b"\x1b[3~",
+    "del": b"\x1b[3~",
+    "insert": b"\x1b[2~",
     "up": b"\x1b[A",
     "down": b"\x1b[B",
     "right": b"\x1b[C",
@@ -54,15 +59,6 @@ _KEY_MAP: dict[str, bytes] = {
     "end": b"\x1b[F",
     "pageup": b"\x1b[5~",
     "pagedown": b"\x1b[6~",
-    "ctrl-a": b"\x01",
-    "ctrl-c": b"\x03",
-    "ctrl-d": b"\x04",
-    "ctrl-e": b"\x05",
-    "ctrl-l": b"\x0c",
-    "ctrl-r": b"\x12",
-    "ctrl-u": b"\x15",
-    "ctrl-w": b"\x17",
-    "ctrl-z": b"\x1a",
     "f1": b"\x1bOP",
     "f2": b"\x1bOQ",
     "f3": b"\x1bOR",
@@ -75,7 +71,71 @@ _KEY_MAP: dict[str, bytes] = {
     "f10": b"\x1b[21~",
     "f12": b"\x1b[24~",
 }
-_KEY_NAMES = sorted(_KEY_MAP)
+_NAMED_KEY_LIST = sorted(_NAMED_KEYS)
+
+# Modifier aliases -> canonical flag (c=ctrl, a=alt, s=shift).
+_MODIFIERS = {
+    "ctrl": "c",
+    "control": "c",
+    "ctl": "c",
+    "c": "c",
+    "alt": "a",
+    "meta": "a",
+    "option": "a",
+    "opt": "a",
+    "m": "a",
+    "shift": "s",
+    "s": "s",
+}
+# xterm CSI encodings for modified navigation keys.
+_ARROW_FINAL = {"up": "A", "down": "B", "right": "C", "left": "D", "home": "H", "end": "F"}
+_TILDE_PARAM = {"insert": "2", "delete": "3", "del": "3", "pageup": "5", "pagedown": "6"}
+
+
+def _key_to_bytes(name: str) -> bytes | None:
+    """Resolve a key/chord name to the bytes a terminal sends, or None if invalid.
+
+    Accepts named keys (enter, up, f5, ...), single characters, and arbitrary
+    modifier chords joined by '-' or '+': 'ctrl-b', 'alt-x', 'ctrl-alt-del',
+    'shift-tab'. Modifiers: ctrl/control, alt/meta/option, shift.
+    """
+    raw = name.strip()
+    if not raw:
+        return None
+    *mod_parts, base = re.split(r"[-+]", raw)
+    flags = set()
+    for m in mod_parts:
+        flag = _MODIFIERS.get(m.lower())
+        if flag is None:
+            return None
+        flags.add(flag)
+    if not base:
+        return None
+    ctrl, alt, shift = "c" in flags, "a" in flags, "s" in flags
+    base_l = base.lower()
+
+    if base_l in _NAMED_KEYS:
+        if not flags:
+            return _NAMED_KEYS[base_l]
+        if base_l == "tab" and shift and not ctrl and not alt:
+            return b"\x1b[Z"  # back-tab
+        mod = 1 + (1 if shift else 0) + (2 if alt else 0) + (4 if ctrl else 0)
+        if base_l in _ARROW_FINAL:
+            return f"\x1b[1;{mod}{_ARROW_FINAL[base_l]}".encode()
+        if base_l in _TILDE_PARAM:
+            return f"\x1b[{_TILDE_PARAM[base_l]};{mod}~".encode()
+        # Modifier not expressible for this key (e.g. ctrl-enter); best effort.
+        return (b"\x1b" if alt else b"") + _NAMED_KEYS[base_l]
+
+    if len(base) == 1:
+        ch = base.upper() if (shift and base.isalpha()) else base
+        if ctrl and ord(ch) < 128:
+            data = bytes([ord(ch.upper()) & 0x1F])
+        else:
+            data = ch.encode("utf-8", "replace")
+        return (b"\x1b" if alt else b"") + data
+
+    return None
 
 
 class SSHSession:
@@ -296,9 +356,13 @@ class SSHManager:
         if text:
             payload += text.encode("utf-8", errors="replace")
         for key in keys or []:
-            mapped = _KEY_MAP.get(key.lower().strip())
+            mapped = _key_to_bytes(key)
             if mapped is None:
-                return f"Error: unknown key {key!r}. Valid keys: {', '.join(_KEY_NAMES)}"
+                return (
+                    f"Error: unknown key {key!r}. Use a named key "
+                    f"({', '.join(_NAMED_KEY_LIST)}), a single character, or a chord with "
+                    f"ctrl/alt/shift like 'ctrl-b', 'alt-x', 'ctrl-alt-del'."
+                )
             payload += mapped
         if enter:
             payload += b"\r"
@@ -454,8 +518,11 @@ class SSHSendTool(Tool):
                 "text": {"type": "string", "description": "Literal text to type"},
                 "keys": {
                     "type": "array",
-                    "items": {"type": "string", "enum": _KEY_NAMES},
-                    "description": "Named keys/chords sent in order (TUI navigation/control)",
+                    "items": {"type": "string"},
+                    "description": "Keys/chords sent in order. Named keys (enter, tab, esc, "
+                    "up/down/left/right, home, end, pageup, pagedown, delete, f1-f12), single "
+                    "characters, or modifier chords with ctrl/alt/shift, e.g. 'ctrl-b' "
+                    "(tmux prefix), 'ctrl-c', 'alt-x', 'ctrl-alt-del'.",
                 },
                 "enter": {"type": "boolean", "description": "Append Enter (default false)"},
                 "immediate_return": {
