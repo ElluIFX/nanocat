@@ -291,16 +291,17 @@ class SubagentManager:
         status: str,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
-        status_text = "completed successfully" if status == "ok" else "failed"
-
-        announce_content = f"""[Subagent '{label}' {status_text}]
-
-Task: {task}
-
-Result:
-{result}
-
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
+        announce_content = json.dumps(
+            {
+                "subagent_id": task_id,
+                "label": label,
+                "status": status,
+                "task": task,
+                "result": result,
+                "hint": "Summarize this naturally for the user (1-2 sentences).",
+            },
+            ensure_ascii=False,
+        )
 
         msg = InboundMessage(
             channel="system",
