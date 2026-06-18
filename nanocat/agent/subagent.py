@@ -387,8 +387,8 @@ class SubagentSpawnTool(Tool):
     def description(self) -> str:
         return (
             "Spawn one or more subagents to run tasks in the background — returns immediately "
-            "with per-task ids. Each subagent reports back when done. Use for fire-and-forget "
-            "work that doesn't block the current turn. Use gather instead if you need results now."
+            "with per-task ids. Each subagent reports back and wakes you up when done. Use for fire-and-forget "
+            "work that doesn't block the current turn: you can just stop if you have nothing to do after spawn."
         )
 
     @property
