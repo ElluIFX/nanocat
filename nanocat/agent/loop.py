@@ -40,7 +40,7 @@ from nanocat.agent.tools.filesystem import (
     WriteFileTool,
 )
 from nanocat.agent.tools.gather import GatherTool
-from nanocat.agent.tools.http import HttpRequestTool
+from nanocat.agent.tools.http import HttpRequestTool, HttpSessionManager
 from nanocat.agent.tools.message import MessageTool
 from nanocat.agent.tools.proc import (
     ProcListTool,
@@ -140,6 +140,7 @@ class AgentLoop:
         )
         self.ssh = SSHManager()
         self.procs = ProcManager()
+        self.http_sessions = HttpSessionManager(proxy=config.tools.web.proxy)
 
         self._running = False
         self._mcp_stack: AsyncExitStack | None = None
@@ -293,7 +294,11 @@ class AgentLoop:
         )
         self._reg(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self._reg(WebFetchTool(proxy=self.web_proxy))
-        self._reg(HttpRequestTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
+        self._reg(
+            HttpRequestTool(
+                self.http_sessions, proxy=self.web_proxy, safety_check=self.web_safety_check
+            )
+        )
         self._reg(MessageTool(send_callback=self.bus.publish_outbound))
         self._reg(WaitTool(send_callback=self.bus.publish_outbound))
         self._reg(TodoTool(send_callback=self.bus.publish_outbound))
@@ -1407,6 +1412,7 @@ class AgentLoop:
         """Drain pending background archives, terminate ssh/proc sessions, close MCP."""
         await self.ssh.close_all()
         await self.procs.close_all()
+        await self.http_sessions.close_all()
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
