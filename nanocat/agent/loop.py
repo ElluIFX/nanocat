@@ -142,6 +142,7 @@ class AgentLoop:
             bus=bus,
             tools=self.tools,
         )
+        self.subagents._steer_inject = self._steer_buf
         self.ssh = SSHManager()
         self.procs = ProcManager()
         self.http_sessions = HttpSessionManager(proxy=config.tools.web.proxy)
