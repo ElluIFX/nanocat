@@ -41,6 +41,13 @@ from nanocat.agent.tools.filesystem import (
 )
 from nanocat.agent.tools.gather import GatherTool
 from nanocat.agent.tools.message import MessageTool
+from nanocat.agent.tools.proc import (
+    ProcListTool,
+    ProcManager,
+    ProcReadTool,
+    ProcStartTool,
+    ProcStopTool,
+)
 from nanocat.agent.tools.registry import ToolRegistry
 from nanocat.agent.tools.shell import ExecTool
 from nanocat.agent.tools.spawn import SpawnTool
@@ -129,6 +136,7 @@ class AgentLoop:
             tools=self.tools,
         )
         self.ssh = SSHManager()
+        self.procs = ProcManager()
 
         self._running = False
         self._mcp_stack: AsyncExitStack | None = None
@@ -290,6 +298,14 @@ class AgentLoop:
                 SSHReadTool(self.ssh),
                 SSHCloseTool(self.ssh),
                 SSHListTool(self.ssh),
+            ):
+                self.tools.register(tool)
+        if self._config.tools.enabled_builtin_tools.proc:
+            for tool in (
+                ProcStartTool(self.procs, working_dir=str(self.workspace)),
+                ProcReadTool(self.procs),
+                ProcStopTool(self.procs),
+                ProcListTool(self.procs),
             ):
                 self.tools.register(tool)
         if self.cron_service:
@@ -1319,8 +1335,9 @@ class AgentLoop:
                 )
 
     async def close_mcp(self) -> None:
-        """Drain pending background archives, terminate ssh sessions, close MCP."""
+        """Drain pending background archives, terminate ssh/proc sessions, close MCP."""
         await self.ssh.close_all()
+        await self.procs.close_all()
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
@@ -1375,6 +1392,7 @@ class AgentLoop:
                 chat_id=chat_id,
                 current_role=current_role,
                 ssh_sessions=self.ssh.context_block(),
+                proc_sessions=self.procs.context_block(),
             )
             n_initial_sys = len(messages)
             final_content, _, all_msgs = await self._run_agent_loop(messages)
@@ -1509,6 +1527,7 @@ class AgentLoop:
             chat_id=msg.chat_id,
             pulse=self._config.agents.defaults.pulse_enabled,
             ssh_sessions=self.ssh.context_block(),
+            proc_sessions=self.procs.context_block(),
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:

@@ -199,6 +199,7 @@ class EnabledBuiltinToolsConfig(Base):
     spawn: bool = True
     gather: bool = True
     ssh: bool = False  # SSH tools (ssh_open/send/read/close/list); powerful + networked, opt-in
+    proc: bool = True  # background process tools (proc_start/read/stop/list)
 
 
 class ToolsConfig(Base):

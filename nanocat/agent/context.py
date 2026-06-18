@@ -28,10 +28,13 @@ class ContextBuilder:
     _COMPACTED_MEM_CLOSE = "</COMPACTED-MEMORY>"
     _SSH_SESSIONS_OPEN = "<SSH-SESSIONS>"
     _SSH_SESSIONS_CLOSE = "</SSH-SESSIONS>"
+    _PROC_OPEN = "<PROC>"
+    _PROC_CLOSE = "</PROC>"
     _EPHEMERAL_BLOCKS = (
         (_RUNTIME_CTX_OPEN, _RUNTIME_CTX_CLOSE),
         (_PULSE_DIRECTIVE_OPEN, _PULSE_DIRECTIVE_CLOSE),
         (_SSH_SESSIONS_OPEN, _SSH_SESSIONS_CLOSE),
+        (_PROC_OPEN, _PROC_CLOSE),
     )
 
     def __init__(self, workspace: Path, nowledge_enabled: bool = False):
@@ -218,6 +221,7 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         current_role: str = "user",
         pulse: bool = False,
         ssh_sessions: str | None = None,
+        proc_sessions: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
@@ -234,6 +238,8 @@ Keep MEMORY.md concise — it is loaded on every turn."""
             ephemeral_parts.append(
                 f"{self._SSH_SESSIONS_OPEN}\n{ssh_sessions}\n{self._SSH_SESSIONS_CLOSE}"
             )
+        if proc_sessions:
+            ephemeral_parts.append(f"{self._PROC_OPEN}\n{proc_sessions}\n{self._PROC_CLOSE}")
 
         # Merge ephemeral prefix and user content into a single user message
         # to avoid consecutive same-role messages that some providers reject.
