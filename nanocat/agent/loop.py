@@ -13,6 +13,7 @@ import uuid
 from collections import deque
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
@@ -252,7 +253,7 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        extra_read = [BUILTIN_SKILLS_DIR]
+        extra_read = [BUILTIN_SKILLS_DIR, Path(tempfile.gettempdir())]
         self._reg(ReadFileTool(workspace=self.workspace, extra_allowed_dirs=extra_read))
         self._reg(LoadImageTool(workspace=self.workspace, extra_allowed_dirs=extra_read))
         self._reg(ParseImageTool(workspace=str(self.workspace)))
