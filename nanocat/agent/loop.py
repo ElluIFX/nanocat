@@ -49,6 +49,7 @@ from nanocat.agent.tools.proc import (
     ProcStopTool,
 )
 from nanocat.agent.tools.registry import ToolRegistry
+from nanocat.agent.tools.screenshot import ScreenshotTool
 from nanocat.agent.tools.shell import ExecTool
 from nanocat.agent.tools.spawn import SpawnTool
 from nanocat.agent.tools.ssh import (
@@ -291,6 +292,8 @@ class AgentLoop:
         self._reg(TodoTool(send_callback=self.bus.publish_outbound))
         self._reg(SpawnTool(manager=self.subagents))
         self._reg(GatherTool(manager=self.subagents))
+        if self._config.tools.enabled_builtin_tools.screenshot:
+            self.tools.register(ScreenshotTool())
         if self._config.tools.enabled_builtin_tools.ssh:
             for tool in (
                 SSHOpenTool(self.ssh),

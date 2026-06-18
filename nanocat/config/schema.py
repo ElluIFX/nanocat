@@ -200,6 +200,7 @@ class EnabledBuiltinToolsConfig(Base):
     gather: bool = True
     ssh: bool = False  # SSH tools (ssh_open/send/read/close/list); powerful + networked, opt-in
     proc: bool = True  # background process tools (proc_start/read/stop/list)
+    screenshot: bool = False  # screen capture tool; opt-in (privacy/desktop access)
 
 
 class ToolsConfig(Base):
