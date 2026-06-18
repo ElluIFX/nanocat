@@ -308,8 +308,11 @@ if _TEXTUAL_OK:
                 self.push_screen(_QuitConfirm(), self._on_quit_decision)
             elif event.button.id == "send":
                 if self._busy:
-                    self._channel.submit_threadsafe("/stop")
-                    self._set_busy(False)
+                    if self.query_one("#prompt", _ChatInput).text.strip():
+                        self._submit_current()  # Steer: inject the typed interjection
+                    else:
+                        self._channel.submit_threadsafe("/stop")  # Stop: abort the turn
+                        self._set_busy(False)
                 else:
                     self._submit_current()
 
@@ -339,6 +342,19 @@ if _TEXTUAL_OK:
         @on(_ChatInput.Submitted)
         def _on_prompt_submit(self, event: "_ChatInput.Submitted") -> None:
             self._submit_current()
+
+        @on(TextArea.Changed, "#prompt")
+        def _on_prompt_changed(self, event: "TextArea.Changed") -> None:
+            # While busy, the action button reflects whether there's text to send:
+            # text → yellow "Steer" (interject), empty → red "Stop" (abort).
+            self._refresh_busy_button()
+
+        def _refresh_busy_button(self) -> None:
+            if self._send is None or not self._busy:
+                return
+            has_text = bool(self.query_one("#prompt", _ChatInput).text.strip())
+            self._send.label = "Steer" if has_text else "Stop"
+            self._send.variant = "warning" if has_text else "error"
 
         def _submit_current(self) -> None:
             inp = self.query_one("#prompt", _ChatInput)
