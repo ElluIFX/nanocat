@@ -379,7 +379,7 @@ class AgentLoop:
         session: Session | None = None,
     ) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "wait", "spawn", "cron"):
+        for name in ("message", "wait", "subagent_spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))

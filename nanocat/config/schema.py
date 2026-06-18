@@ -196,8 +196,8 @@ class EnabledBuiltinToolsConfig(Base):
     message: bool = True
     wait: bool = True
     todo: bool = True
-    spawn: bool = True
-    gather: bool = True
+    subagent_spawn: bool = True
+    subagent_gather: bool = True
     subagent_list: bool = True
     subagent_steer: bool = True
     subagent_stop: bool = True

@@ -20,8 +20,8 @@ from nanocat.utils.helpers import build_assistant_message
 # scheduling, and Nowledge memory operations.
 _SUBAGENT_EXCLUDED = frozenset(
     {
-        "spawn",
-        "gather",
+        "subagent_spawn",
+        "subagent_gather",
         "subagent_list",
         "subagent_steer",
         "subagent_stop",
@@ -375,7 +375,7 @@ class SubagentSpawnTool(Tool):
 
     @property
     def name(self) -> str:
-        return "spawn"
+        return "subagent_spawn"
 
     @property
     def description(self) -> str:
@@ -418,7 +418,7 @@ class SubagentGatherTool(Tool):
 
     @property
     def name(self) -> str:
-        return "gather"
+        return "subagent_gather"
 
     @property
     def description(self) -> str:
