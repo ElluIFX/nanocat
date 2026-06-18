@@ -276,6 +276,10 @@ class TerminalManager:
 
     kind = "session"  # used in user-facing messages, e.g. "ssh"/"proc"
     clear_cmd = "session_close"  # tool name suggested to clear an ended session
+    # Byte that `enter` sends. A PTY (ssh) translates CR->LF, so CR is correct
+    # there; over a raw local pipe (proc) there's no tty translation, so a line
+    # program needs an actual newline.
+    enter_byte = b"\r"
 
     def __init__(self) -> None:
         self._sessions: dict[str, TerminalSession] = {}
@@ -315,7 +319,7 @@ class TerminalManager:
                 )
             payload += mapped
         if enter:
-            payload += b"\r"
+            payload += self.enter_byte
         if not payload:
             return "Error: nothing to send (provide text and/or keys, or enter=true)."
 

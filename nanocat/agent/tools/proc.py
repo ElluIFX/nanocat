@@ -1,108 +1,57 @@
-"""Background local process tool.
+"""Background local process tool — the local sibling of the SSH session tool.
 
-Unlike the one-shot ``exec`` tool (which blocks and dies when the command
-returns), this keeps a process alive across tool calls: start it, read its
-streaming output later, stop it. For dev servers, ``tail -f``, watchers,
-training runs — the local sibling of the SSH session tool, minus the PTY.
+Unlike the one-shot ``exec`` tool, a process started here stays alive across tool
+calls: send it keys/text with ``proc_send``, read its rendered screen / output
+with ``proc_read``, and stop it with ``proc_stop``. Built on the shared
+`TerminalSession` (pyte virtual screen + scrollback + key chords).
+
+It runs the child over pipes (no PTY), which is fine for dev servers, REPLs,
+tail -f, watchers and training runs. A local program sees a pipe, not a tty, so
+full-screen TUIs (vim/htop) won't truly fullscreen — use the ssh tool for those.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import time
 import uuid
-from collections import deque
 from typing import Any
 
-from loguru import logger
-
 from nanocat.agent.tools.base import Tool
-from nanocat.agent.tools.shell import ExecTool, _decode_output
-
-_START_SETTLE = 0.5  # seconds to wait after launch before returning initial output
-_SCROLLBACK = 4000  # retained output lines per process
-
-
-class Proc:
-    """One live background process + its bounded line-oriented output buffer."""
-
-    def __init__(self, proc_id: str, command: str, proc: asyncio.subprocess.Process):
-        self.id = proc_id
-        self.command = command
-        self.proc = proc
-        self._scrollback: deque[str] = deque(maxlen=_SCROLLBACK)
-        self._partial = ""
-        self.created_at = time.monotonic()
-        self.last_activity = self.created_at
-        self.alive = True
-        self.exit_code: int | None = None
-        self._reader: asyncio.Task | None = None
-
-    def start_reader(self) -> None:
-        self._reader = asyncio.create_task(self._read_loop())
-
-    async def _read_loop(self) -> None:
-        assert self.proc.stdout is not None
-        try:
-            while True:
-                data = await self.proc.stdout.read(4096)
-                if not data:
-                    break
-                self.last_activity = time.monotonic()
-                self._append(data)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("proc reader error for {}", self.id)
-        self.alive = False
-        try:
-            self.exit_code = await asyncio.wait_for(self.proc.wait(), timeout=2.0)
-        except Exception:
-            self.exit_code = self.proc.returncode
-
-    def _append(self, data: bytes) -> None:
-        text = self._partial + _decode_output(data)
-        lines = text.split("\n")
-        self._partial = lines.pop()
-        for ln in lines:
-            self._scrollback.append(ln.rstrip("\r"))
-
-    def render(self, max_lines: int = 200) -> str:
-        lines = list(self._scrollback)
-        if self._partial:
-            lines.append(self._partial)
-        return "\n".join(lines[-max_lines:]).rstrip()
-
-    async def terminate(self) -> None:
-        self.alive = False
-        ExecTool._kill_tree(self.proc)
-        if self._reader:
-            self._reader.cancel()
-            try:
-                await self._reader
-            except (asyncio.CancelledError, Exception):
-                pass
-        try:
-            await asyncio.wait_for(self.proc.wait(), timeout=5.0)
-        except Exception:
-            pass
-
-    def uptime(self) -> int:
-        return int(time.monotonic() - self.created_at)
+from nanocat.agent.tools.terminal import (
+    _DEFAULT_COLS,
+    _DEFAULT_ROWS,
+    _MAX_COLS,
+    _MAX_ROWS,
+    _MIN_COLS,
+    _MIN_ROWS,
+    _OPEN_QUIET,
+    _OPEN_SETTLE,
+    _OPEN_STREAM_CEIL,
+    TerminalManager,
+    TerminalSession,
+)
 
 
-class ProcManager:
-    """Owns all background processes, keyed by short uuid."""
+class ProcManager(TerminalManager):
+    """Owns all background local processes; spawns them via a shell."""
 
-    def __init__(self) -> None:
-        self._procs: dict[str, Proc] = {}
+    kind = "proc"
+    clear_cmd = "proc_stop"
+    enter_byte = b"\n"  # local pipe has no tty to translate CR->LF
 
-    async def start(self, command: str, cwd: str | None) -> str:
+    async def start(
+        self,
+        command: str,
+        cwd: str | None = None,
+        cols: int = _DEFAULT_COLS,
+        rows: int = _DEFAULT_ROWS,
+    ) -> str:
+        cols = max(_MIN_COLS, min(_MAX_COLS, cols))
+        rows = max(_MIN_ROWS, min(_MAX_ROWS, rows))
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,  # PIPE so proc_send can write to it
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
@@ -110,83 +59,27 @@ class ProcManager:
         except Exception as e:
             return f"Error: failed to start process: {e}"
 
-        pid = uuid.uuid4().hex[:8]
-        p = Proc(pid, command, proc)
-        p.start_reader()
-        self._procs[pid] = p
-        await asyncio.sleep(_START_SETTLE)
+        sid = uuid.uuid4().hex[:8]
+        session = TerminalSession(sid, command, proc, cols, rows)
+        session.start_reader()
+        self._sessions[sid] = session
+        await asyncio.sleep(_OPEN_SETTLE)
+        await session.drain_until_idle(_OPEN_QUIET, _OPEN_STREAM_CEIL)
 
-        if not p.alive:
-            out = p.render()
-            self._procs.pop(pid, None)
-            await p.terminate()
-            return json.dumps(
-                {
-                    "started": False,
-                    "message": "process exited immediately",
-                    "exit_code": p.exit_code,
-                    "output": out,
-                },
-                ensure_ascii=False,
+        if not session.alive:
+            detail = session.render_scrollback() or session.render_screen()
+            self._sessions.pop(sid, None)
+            await session.terminate()
+            return (
+                f"Error: process exited immediately (exit={session.exit_code}). "
+                f"Output:\n{detail or '(no output)'}"
             )
-        return json.dumps(
-            {"started": True, "id": pid, "command": command, "output": p.render(50)},
-            ensure_ascii=False,
-        )
 
-    def read(self, proc_id: str, max_lines: int = 200) -> str:
-        p = self._procs.get(proc_id)
-        if p is None:
-            return f"Error: no process {proc_id!r} (use proc_list)."
-        return json.dumps(
-            {
-                "id": proc_id,
-                "alive": p.alive,
-                "exit_code": p.exit_code,
-                "output": p.render(max_lines),
-            },
-            ensure_ascii=False,
-        )
+        screen = session.render_screen() or session.render_scrollback()
+        return f"Started proc {sid} ({command[:60]}). Output:\n{screen or '(no output yet)'}"
 
-    async def stop(self, proc_id: str) -> str:
-        p = self._procs.pop(proc_id, None)
-        if p is None:
-            return f"Error: no process {proc_id!r}."
-        await p.terminate()
-        return json.dumps(
-            {"stopped": True, "id": proc_id, "exit_code": p.exit_code}, ensure_ascii=False
-        )
-
-    def list(self) -> str:
-        if not self._procs:
-            return "No background processes."
-        rows = [
-            {
-                "id": pid,
-                "command": p.command[:80],
-                "alive": p.alive,
-                "exit_code": p.exit_code,
-                "uptime_s": p.uptime(),
-            }
-            for pid, p in self._procs.items()
-        ]
-        return json.dumps(rows, ensure_ascii=False)
-
-    def context_block(self) -> str | None:
-        """One compact line per running process for the per-turn CONTEXT block."""
-        live = [(pid, p) for pid, p in self._procs.items() if p.alive]
-        if not live:
-            return None
-        return "\n".join(f"{pid} · {p.command[:50]} · up {p.uptime()}s" for pid, p in live)
-
-    async def close_all(self) -> None:
-        procs = list(self._procs.values())
-        self._procs.clear()
-        for p in procs:
-            try:
-                await p.terminate()
-            except Exception:
-                logger.exception("error stopping proc {}", p.id)
+    def _time_desc(self, s: TerminalSession) -> str:
+        return f"up {s.uptime()}s"
 
 
 class ProcStartTool(Tool):
@@ -201,10 +94,11 @@ class ProcStartTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Start a long-lived background process and return its id. Unlike exec "
-            "(one-shot, blocks until the command exits), this keeps the process running "
-            "so you can read its streaming output with proc_read and stop it with "
-            "proc_stop — use for dev servers, tail -f, watchers, training runs."
+            "Start a long-lived local process and return its id. Unlike exec (one-shot), "
+            "it keeps running so you can send input with proc_send, read its rendered "
+            "screen/output with proc_read, and stop it with proc_stop — for dev servers, "
+            "REPLs, tail -f, watchers, training runs. (Runs over a pipe, not a real tty, "
+            "so full-screen TUIs like vim won't fullscreen; use ssh for those.)"
         )
 
     @property
@@ -212,16 +106,32 @@ class ProcStartTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "Shell command to run in the background",
-                },
+                "command": {"type": "string", "description": "Shell command to run"},
                 "cwd": {"type": "string", "description": "Working directory (default: workspace)"},
+                "cols": {
+                    "type": "integer",
+                    "description": "Screen width (default 80)",
+                    "minimum": _MIN_COLS,
+                    "maximum": _MAX_COLS,
+                },
+                "rows": {
+                    "type": "integer",
+                    "description": "Screen height (default 24)",
+                    "minimum": _MIN_ROWS,
+                    "maximum": _MAX_ROWS,
+                },
             },
             "required": ["command"],
         }
 
-    async def execute(self, command: str, cwd: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        command: str,
+        cwd: str | None = None,
+        cols: int = _DEFAULT_COLS,
+        rows: int = _DEFAULT_ROWS,
+        **kwargs: Any,
+    ) -> str:
         from nanocat.security import safety_bypass
         from nanocat.security.command import guard_command
 
@@ -230,7 +140,69 @@ class ProcStartTool(Tool):
             error = guard_command(command, cwd=run_cwd, workspace=self._working_dir)
             if error:
                 return error
-        return await self._mgr.start(command, run_cwd)
+        return await self._mgr.start(command, run_cwd, cols, rows)
+
+
+class ProcSendTool(Tool):
+    def __init__(self, manager: ProcManager):
+        self._mgr = manager
+
+    @property
+    def name(self) -> str:
+        return "proc_send"
+
+    @property
+    def description(self) -> str:
+        return "Send input to a local process: literal text and/or named keys; enter submits."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "proc_id": {"type": "string"},
+                "text": {"type": "string", "description": "Literal text to type"},
+                "keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Keys/chords sent in order. Named keys (enter, tab, esc, "
+                    "up/down/left/right, home, end, pageup, pagedown, delete, f1-f12), single "
+                    "characters, or modifier chords with ctrl/alt/shift, e.g. 'ctrl-c', "
+                    "'ctrl-d', 'alt-x', 'ctrl-alt-del'.",
+                },
+                "enter": {"type": "boolean", "description": "Append Enter (default false)"},
+                "immediate_return": {
+                    "type": "boolean",
+                    "description": "If true (default) wait until output settles and return "
+                    "the updated screen; if false return at once and use proc_read",
+                },
+                "wait": {
+                    "type": "number",
+                    "description": "Max seconds to wait for output to settle (default ~2); "
+                    "raise for slow commands",
+                },
+            },
+            "required": ["proc_id"],
+        }
+
+    async def execute(
+        self,
+        proc_id: str,
+        text: str | None = None,
+        keys: list[str] | None = None,
+        enter: bool = False,
+        immediate_return: bool = True,
+        wait: float | None = None,
+        **kwargs: Any,
+    ) -> str:
+        return await self._mgr.send(
+            proc_id,
+            text=text,
+            keys=keys,
+            enter=enter,
+            immediate_return=immediate_return,
+            wait=wait,
+        )
 
 
 class ProcReadTool(Tool):
@@ -243,7 +215,7 @@ class ProcReadTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Read recent output from a background process."
+        return "Read a local process's output."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -251,16 +223,18 @@ class ProcReadTool(Tool):
             "type": "object",
             "properties": {
                 "proc_id": {"type": "string"},
-                "max_lines": {
-                    "type": "integer",
-                    "description": "Tail this many lines (default 200)",
+                "mode": {
+                    "type": "string",
+                    "enum": ["screen", "scrollback"],
+                    "description": "screen = current rendered screen; "
+                    "scrollback = recent line history (ANSI stripped, good for logs)",
                 },
             },
             "required": ["proc_id"],
         }
 
-    async def execute(self, proc_id: str, max_lines: int = 200, **kwargs: Any) -> str:
-        return self._mgr.read(proc_id, max_lines=max_lines)
+    async def execute(self, proc_id: str, mode: str = "screen", **kwargs: Any) -> str:
+        return self._mgr.read(proc_id, mode=mode)
 
 
 class ProcStopTool(Tool):
@@ -273,7 +247,7 @@ class ProcStopTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Stop a background process and terminate it (and its children)."
+        return "Stop a local process and terminate it (and its children)."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -284,7 +258,7 @@ class ProcStopTool(Tool):
         }
 
     async def execute(self, proc_id: str, **kwargs: Any) -> str:
-        return await self._mgr.stop(proc_id)
+        return await self._mgr.close(proc_id)
 
 
 class ProcListTool(Tool):
@@ -297,7 +271,7 @@ class ProcListTool(Tool):
 
     @property
     def description(self) -> str:
-        return "List background processes (id, command, alive, uptime)."
+        return "List background processes (id, command, state, uptime)."
 
     @property
     def parameters(self) -> dict[str, Any]:

@@ -46,6 +46,7 @@ from nanocat.agent.tools.proc import (
     ProcListTool,
     ProcManager,
     ProcReadTool,
+    ProcSendTool,
     ProcStartTool,
     ProcStopTool,
 )
@@ -312,6 +313,7 @@ class AgentLoop:
         if self._config.tools.enabled_builtin_tools.proc:
             for tool in (
                 ProcStartTool(self.procs, working_dir=str(self.workspace)),
+                ProcSendTool(self.procs),
                 ProcReadTool(self.procs),
                 ProcStopTool(self.procs),
                 ProcListTool(self.procs),
