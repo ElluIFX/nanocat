@@ -1,7 +1,6 @@
 """Utility functions for NanoCat."""
 
 import json
-import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,11 +28,6 @@ def ensure_dir(path: Path) -> Path:
     return path
 
 
-def timestamp() -> str:
-    """Current ISO timestamp."""
-    return datetime.now().isoformat()
-
-
 def current_time_str(timezone: bool = True) -> str:
     """Human-readable current time with weekday and timezone, e.g. '2026-03-15 22:30 (Saturday) (CST)'."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
@@ -41,14 +35,6 @@ def current_time_str(timezone: bool = True) -> str:
         tz = time.strftime("%Z") or "UTC"
         return f"{now} ({tz})"
     return now
-
-
-_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
-
-
-def safe_filename(name: str) -> str:
-    """Replace unsafe path characters with underscores."""
-    return _UNSAFE_CHARS.sub("_", name).strip()
 
 
 def split_message(content: str, max_len: int = 2000) -> list[str]:
@@ -123,40 +109,6 @@ def estimate_prompt_tokens(
         return len(enc.encode("\n".join(parts)))
     except Exception:
         return 0
-
-
-def estimate_message_tokens(message: dict[str, Any]) -> int:
-    """Estimate prompt tokens contributed by one persisted message."""
-    content = message.get("content")
-    parts: list[str] = []
-    if isinstance(content, str):
-        parts.append(content)
-    elif isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                text = part.get("text", "")
-                if text:
-                    parts.append(text)
-            else:
-                parts.append(json.dumps(part, ensure_ascii=False))
-    elif content is not None:
-        parts.append(json.dumps(content, ensure_ascii=False))
-
-    for key in ("name", "tool_call_id"):
-        value = message.get(key)
-        if isinstance(value, str) and value:
-            parts.append(value)
-    if message.get("tool_calls"):
-        parts.append(json.dumps(message["tool_calls"], ensure_ascii=False))
-
-    payload = "\n".join(parts)
-    if not payload:
-        return 1
-    try:
-        enc = tiktoken.get_encoding("cl100k_base")
-        return max(1, len(enc.encode(payload)))
-    except Exception:
-        return max(1, len(payload) // 4)
 
 
 def estimate_prompt_tokens_chain(
