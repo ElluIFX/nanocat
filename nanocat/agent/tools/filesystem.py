@@ -61,9 +61,7 @@ class _FsTool(Tool):
         self._extra_allowed_dirs = extra_allowed_dirs
 
     def _resolve(self, path: str) -> Path:
-        return _resolve_path(
-            path, self._workspace, self._extra_allowed_dirs
-        )
+        return _resolve_path(path, self._workspace, self._extra_allowed_dirs)
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +102,21 @@ class ReadFileTool(_FsTool):
                     "description": "Maximum number of lines to read (default 2000)",
                     "minimum": 1,
                 },
+                "encoding": {
+                    "type": "string",
+                    "description": "Text encoding (default utf-8, python-style)",
+                },
             },
             "required": ["path"],
         }
 
     async def execute(
-        self, path: str, offset: int = 1, limit: int | None = None, **kwargs: Any
+        self,
+        path: str,
+        offset: int = 1,
+        limit: int | None = None,
+        encoding: str = "utf-8",
+        **kwargs: Any,
     ) -> str:
         try:
             fp = self._resolve(path)
@@ -118,7 +125,7 @@ class ReadFileTool(_FsTool):
             if not fp.is_file():
                 return f"Error: Not a file: {path}"
 
-            all_lines = fp.read_text(encoding="utf-8").splitlines()
+            all_lines = fp.read_text(encoding=encoding).splitlines()
             total = len(all_lines)
 
             if offset < 1:
@@ -156,6 +163,11 @@ class ReadFileTool(_FsTool):
             )
         except PermissionError as e:
             return f"Error: {e}"
+        except (UnicodeDecodeError, LookupError) as e:
+            return (
+                f"Error: cannot decode {path} as {encoding!r}: {e}. Try another encoding "
+                f"(e.g. encoding='gbk' for Simplified Chinese, 'big5', or 'latin-1')."
+            )
         except Exception as e:
             return f"Error reading file: {e}"
 
@@ -228,7 +240,6 @@ class LoadImageTool(_FsTool):
             )
 
         try:
-
             raw = fp.read_bytes()
             if not raw:
                 return f"Error: Empty file: {path}"
@@ -655,12 +666,22 @@ class GrepFileTool(_FsTool):
                     "minimum": 1,
                     "description": "Max matches to return (default 50)",
                 },
+                "encoding": {
+                    "type": "string",
+                    "description": "Text encoding (default utf-8, python-style)",
+                },
             },
             "required": ["path", "pattern"],
         }
 
     async def execute(
-        self, path: str, pattern: str, context_lines: int = 0, max_matches: int = 50, **kwargs: Any
+        self,
+        path: str,
+        pattern: str,
+        context_lines: int = 0,
+        max_matches: int = 50,
+        encoding: str = "utf-8",
+        **kwargs: Any,
     ) -> str:
         import re as _re
 
@@ -668,12 +689,17 @@ class GrepFileTool(_FsTool):
             fp = self._resolve(path)
             if not fp.exists():
                 return f"Error: File not found: {path}"
-            lines = fp.read_text(encoding="utf-8").splitlines()
+            lines = fp.read_text(encoding=encoding).splitlines()
             rx = _re.compile(pattern)
         except PermissionError as e:
             return f"Error: {e}"
         except _re.error as e:
             return f"Error: Invalid regex: {e}"
+        except (UnicodeDecodeError, LookupError) as e:
+            return (
+                f"Error: cannot decode {path} as {encoding!r}: {e}. "
+                f"Try another encoding (e.g. encoding='gbk', 'big5', or 'latin-1')."
+            )
         except Exception as e:
             return f"Error: {e}"
 
