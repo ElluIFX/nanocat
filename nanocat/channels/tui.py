@@ -21,6 +21,7 @@ The channel never mutates Textual widgets directly.
 from __future__ import annotations
 
 import asyncio
+import json
 import queue
 from typing import Any
 
@@ -52,7 +53,12 @@ except ImportError:  # textual is an optional dependency (extras: tui)
     _TEXTUAL_OK = False
 
 # Model-slot categories offered by the toolbar (maps to `/model <category> <N>`).
-_MODEL_CATEGORIES = [("Agent", "agent"), ("Subagent", "subagent"), ("Assistant", "assistant"), ("Max", "max")]
+_MODEL_CATEGORIES = [
+    ("Agent", "agent"),
+    ("Subagent", "subagent"),
+    ("Assistant", "assistant"),
+    ("Max", "max"),
+]
 
 # Idle hint shown in the status line (TextArea has no placeholder).
 _INPUT_HINT = "/help  ·  Shift+Enter newline  ·  Shift+drag select  ·  Esc stop"
@@ -101,6 +107,19 @@ def _flatten_content(content: Any) -> str:
                 parts.append(block)
         return "\n".join(p for p in parts if p)
     return str(content) if content else ""
+
+
+def _summarize_args(args: Any, limit: int = 64) -> str:
+    """One-line preview of tool-call arguments for the chat pane."""
+    if not isinstance(args, dict) or not args:
+        return ""
+    if len(args) == 1:
+        value = next(iter(args.values()))
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    else:
+        text = json.dumps(args, ensure_ascii=False)
+    text = " ".join(str(text).split())
+    return text[: limit - 1] + "…" if len(text) > limit else text
 
 
 class TuiConfig(Base):
@@ -367,6 +386,29 @@ if _TEXTUAL_OK:
             )
             self._chat.write("")
 
+        def _write_tool_event(self, payload: dict) -> None:
+            """Render a tool-call batch: dim 'running' lines on start, a green/red
+            status line per tool on completion."""
+            assert self._chat is not None
+            phase = payload.get("phase")
+            for call in payload.get("calls", []):
+                name = str(call.get("name", "?"))
+                line = Text()
+                if phase == "start":
+                    line.append("  ⟳ ", style="yellow")
+                    line.append(name, style="bold yellow")
+                    arg = _summarize_args(call.get("args"))
+                    if arg:
+                        line.append(f"  {arg}", style="dim")
+                else:
+                    ok = call.get("status") == "ok"
+                    line.append("  ✓ " if ok else "  ✗ ", style="green" if ok else "red")
+                    line.append(name, style="green" if ok else "red")
+                    preview = " ".join(str(call.get("preview") or "").split())
+                    if preview:
+                        line.append(f"  {preview[:100]}", style="dim")
+                self._chat.write(line)
+
         def _tick_spinner(self) -> None:
             # Idle status (the hint) is owned by _set_busy / on_mount; here we
             # only animate the spinner while a turn is in flight.
@@ -392,6 +434,8 @@ if _TEXTUAL_OK:
                     self._write_bot(payload)
                 elif kind == "chat_progress":
                     self._chat.write(Text(payload, style="dim italic"))
+                elif kind == "tool_event":
+                    self._write_tool_event(payload)
 
         @staticmethod
         def _log_table() -> "Table":
@@ -439,6 +483,7 @@ class TuiChannel(BaseChannel):
 
     name = "tui"
     display_name = "Local TUI"
+    wants_tool_events = True
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -549,6 +594,11 @@ class TuiChannel(BaseChannel):
 
     async def send(self, msg: OutboundMessage) -> None:
         meta = msg.metadata or {}
+        if meta.get("_tool_event"):
+            self._display_q.put(("tool_event", meta["_tool_event"]))
+            return
+        if meta.get("_tool_hint"):
+            return  # superseded by the structured tool-event rendering
         if meta.get("_progress"):
             if msg.content:
                 self._display_q.put(("chat_progress", msg.content))

@@ -148,6 +148,17 @@ class ChannelManager:
             try:
                 msg = await asyncio.wait_for(self.bus.consume_outbound(), timeout=1.0)
 
+                # Structured tool-call events: only delivered to channels that
+                # render them (e.g. the TUI); silently dropped everywhere else.
+                if msg.metadata.get("_tool_event"):
+                    ch = self.channels.get(msg.channel)
+                    if ch and getattr(ch, "wants_tool_events", False):
+                        try:
+                            await ch.send(msg)
+                        except Exception as e:
+                            logger.error("Error sending tool event to {}: {}", msg.channel, e)
+                    continue
+
                 if msg.metadata.get("_progress"):
                     if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
                         continue

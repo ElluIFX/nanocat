@@ -565,6 +565,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         bypass_safety_check: bool = False,
+        on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
         from nanocat.security import safety_bypass
@@ -624,6 +625,19 @@ class AgentLoop:
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
                     logger.info("[{}] Tool call: {}({})", _log_ids[i], tc.name, args_str)
 
+                # Structured tool-call events for rich channels (e.g. the TUI);
+                # other channels drop them. Text-only `_tool_hint` is unchanged.
+                if on_tool_event:
+                    await on_tool_event(
+                        {
+                            "phase": "start",
+                            "calls": [
+                                {"id": tc.id, "name": tc.name, "args": tc.arguments}
+                                for tc in response.tool_calls
+                            ],
+                        }
+                    )
+
                 async def _run_one(idx: int, tc: Any) -> tuple[int, Any, Any]:
                     result = await self.tools.execute(
                         tc.name, tc.arguments, bypass_safety_check, self.context.skills
@@ -633,6 +647,24 @@ class AgentLoop:
                 _results = await asyncio.gather(
                     *[_run_one(i, tc) for i, tc in enumerate(response.tool_calls)]
                 )
+
+                if on_tool_event:
+                    await on_tool_event(
+                        {
+                            "phase": "end",
+                            "calls": [
+                                {
+                                    "id": tc.id,
+                                    "name": tc.name,
+                                    "status": "error"
+                                    if isinstance(r, str) and r.startswith("Error")
+                                    else "ok",
+                                    "preview": self._preview_text(r)[:160],
+                                }
+                                for _, tc, r in sorted(_results, key=lambda x: x[0])
+                            ],
+                        }
+                    )
 
                 # Replay results in original order so messages are deterministic.
                 for idx, tc, result in sorted(_results, key=lambda r: r[0]):
@@ -1492,6 +1524,18 @@ class AgentLoop:
                 )
             )
 
+        async def _bus_tool_event(payload: dict) -> None:
+            meta = dict(msg.metadata or {})
+            meta["_tool_event"] = payload
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="",
+                    metadata=meta,
+                )
+            )
+
         # Check if a temporary safety-check bypass is active
         _bypass = False
         if session.metadata.pop("approve_once", None):
@@ -1510,6 +1554,7 @@ class AgentLoop:
             initial_messages,
             on_progress=on_progress or _bus_progress,
             bypass_safety_check=_bypass,
+            on_tool_event=None if transient else _bus_tool_event,
         )
 
         _old_msg_count = len(session.messages)

@@ -22,6 +22,9 @@ class BaseChannel(ABC):
 
     name: str = "base"
     display_name: str = "Base"
+    # Channels that render structured tool-call events set this True; otherwise
+    # the dispatcher drops `_tool_event` messages for them.
+    wants_tool_events: bool = False
 
     def __init__(self, config: Any, bus: MessageBus):
         """
