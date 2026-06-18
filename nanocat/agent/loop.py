@@ -51,7 +51,6 @@ from nanocat.agent.tools.proc import (
     ProcStopTool,
 )
 from nanocat.agent.tools.registry import ToolRegistry
-from nanocat.agent.tools.screenshot import ScreenshotTool
 from nanocat.agent.tools.shell import ExecTool
 from nanocat.agent.tools.spawn import SpawnTool
 from nanocat.agent.tools.ssh import (
@@ -63,7 +62,7 @@ from nanocat.agent.tools.ssh import (
     SSHSendTool,
 )
 from nanocat.agent.tools.todo import TodoTool
-from nanocat.agent.tools.vision import ParseImageTool
+from nanocat.agent.tools.vision import ParseImageTool, ScreenshotTool
 from nanocat.agent.tools.wait import WaitTool
 from nanocat.agent.tools.web import WebFetchTool, WebSearchTool
 from nanocat.bus.events import InboundMessage, OutboundMessage
