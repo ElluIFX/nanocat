@@ -176,6 +176,31 @@ class MCPServerConfig(Base):
     )  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
 
 
+class EnabledBuiltinToolsConfig(Base):
+    """Per-tool registration switches. Each field gates whether that built-in tool
+    is registered; all default enabled except ssh, which is opt-in."""
+
+    read_file: bool = True
+    write_file: bool = True
+    edit_file: bool = True
+    list_dir: bool = True
+    grep_file: bool = True
+    insert_lines: bool = True
+    delete_lines: bool = True
+    file_hex: bool = True
+    load_image: bool = True
+    parse_image: bool = True
+    exec: bool = True
+    web_search: bool = True
+    web_fetch: bool = True
+    message: bool = True
+    wait: bool = True
+    todo: bool = True
+    spawn: bool = True
+    gather: bool = True
+    ssh: bool = False  # SSH tools (ssh_open/send/read/close/list); powerful + networked, opt-in
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
@@ -184,6 +209,9 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    enabled_builtin_tools: EnabledBuiltinToolsConfig = Field(
+        default_factory=EnabledBuiltinToolsConfig
+    )
 
 
 class WhisperTranscriptionConfig(Base):

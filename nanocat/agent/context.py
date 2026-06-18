@@ -26,9 +26,12 @@ class ContextBuilder:
     _PULSE_DIRECTIVE_CLOSE = PULSE_DIRECTIVE_CLOSE
     _COMPACTED_MEM_OPEN = "<COMPACTED-MEMORY>"
     _COMPACTED_MEM_CLOSE = "</COMPACTED-MEMORY>"
+    _SSH_SESSIONS_OPEN = "<SSH-SESSIONS>"
+    _SSH_SESSIONS_CLOSE = "</SSH-SESSIONS>"
     _EPHEMERAL_BLOCKS = (
         (_RUNTIME_CTX_OPEN, _RUNTIME_CTX_CLOSE),
         (_PULSE_DIRECTIVE_OPEN, _PULSE_DIRECTIVE_CLOSE),
+        (_SSH_SESSIONS_OPEN, _SSH_SESSIONS_CLOSE),
     )
 
     def __init__(self, workspace: Path, nowledge_enabled: bool = False):
@@ -214,18 +217,23 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         chat_id: str | None = None,
         current_role: str = "user",
         pulse: bool = False,
+        ssh_sessions: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
         user_content = self._build_user_content(current_message, media)
 
         # Ephemeral per-turn prefix blocks (runtime metadata + optional PULSE
-        # directive). They ride the latest user message for recency, then are
-        # stripped before persistence so they never enter session history,
-        # memory extraction, or subsequent context.
+        # directive + open ssh sessions). They ride the latest user message for
+        # recency, then are stripped before persistence so they never enter
+        # session history, memory extraction, or subsequent context.
         ephemeral_parts = [runtime_ctx]
         if pulse:
             ephemeral_parts.append(build_pulse_directive())
+        if ssh_sessions:
+            ephemeral_parts.append(
+                f"{self._SSH_SESSIONS_OPEN}\n{ssh_sessions}\n{self._SSH_SESSIONS_CLOSE}"
+            )
 
         # Merge ephemeral prefix and user content into a single user message
         # to avoid consecutive same-role messages that some providers reject.

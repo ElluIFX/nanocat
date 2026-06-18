@@ -43,6 +43,14 @@ from nanocat.agent.tools.message import MessageTool
 from nanocat.agent.tools.registry import ToolRegistry
 from nanocat.agent.tools.shell import ExecTool
 from nanocat.agent.tools.spawn import SpawnTool
+from nanocat.agent.tools.ssh import (
+    SSHCloseTool,
+    SSHListTool,
+    SSHManager,
+    SSHOpenTool,
+    SSHReadTool,
+    SSHSendTool,
+)
 from nanocat.agent.tools.todo import TodoTool
 from nanocat.agent.tools.vision import ParseImageTool
 from nanocat.agent.tools.wait import WaitTool
@@ -119,6 +127,7 @@ class AgentLoop:
             bus=bus,
             tools=self.tools,
         )
+        self.ssh = SSHManager()
 
         self._running = False
         self._mcp_stack: AsyncExitStack | None = None
@@ -236,22 +245,17 @@ class AgentLoop:
     def _mcp_servers(self):
         return self._config.tools.mcp_servers or {}
 
+    def _reg(self, tool) -> None:
+        """Register a built-in tool unless disabled in enabled_builtin_tools."""
+        if getattr(self._config.tools.enabled_builtin_tools, tool.name, True):
+            self.tools.register(tool)
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         extra_read = [BUILTIN_SKILLS_DIR]
-        self.tools.register(
-            ReadFileTool(
-                workspace=self.workspace,
-                extra_allowed_dirs=extra_read,
-            )
-        )
-        self.tools.register(
-            LoadImageTool(
-                workspace=self.workspace,
-                extra_allowed_dirs=extra_read,
-            )
-        )
-        self.tools.register(ParseImageTool(workspace=str(self.workspace)))
+        self._reg(ReadFileTool(workspace=self.workspace, extra_allowed_dirs=extra_read))
+        self._reg(LoadImageTool(workspace=self.workspace, extra_allowed_dirs=extra_read))
+        self._reg(ParseImageTool(workspace=str(self.workspace)))
         for cls in (
             WriteFileTool,
             EditFileTool,
@@ -261,8 +265,8 @@ class AgentLoop:
             DeleteLinesTool,
             FileHexTool,
         ):
-            self.tools.register(cls(workspace=self.workspace, extra_allowed_dirs=extra_read))
-        self.tools.register(
+            self._reg(cls(workspace=self.workspace, extra_allowed_dirs=extra_read))
+        self._reg(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
@@ -271,18 +275,22 @@ class AgentLoop:
                 allow_patterns=self.exec_config.allow_patterns or None,
             )
         )
-        self.tools.register(
-            WebSearchTool(
-                config=self.web_search_config,
-                proxy=self.web_proxy,
-            )
-        )
-        self.tools.register(WebFetchTool(proxy=self.web_proxy))
-        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
-        self.tools.register(WaitTool(send_callback=self.bus.publish_outbound))
-        self.tools.register(TodoTool(send_callback=self.bus.publish_outbound))
-        self.tools.register(SpawnTool(manager=self.subagents))
-        self.tools.register(GatherTool(manager=self.subagents))
+        self._reg(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
+        self._reg(WebFetchTool(proxy=self.web_proxy))
+        self._reg(MessageTool(send_callback=self.bus.publish_outbound))
+        self._reg(WaitTool(send_callback=self.bus.publish_outbound))
+        self._reg(TodoTool(send_callback=self.bus.publish_outbound))
+        self._reg(SpawnTool(manager=self.subagents))
+        self._reg(GatherTool(manager=self.subagents))
+        if self._config.tools.enabled_builtin_tools.ssh:
+            for tool in (
+                SSHOpenTool(self.ssh),
+                SSHSendTool(self.ssh),
+                SSHReadTool(self.ssh),
+                SSHCloseTool(self.ssh),
+                SSHListTool(self.ssh),
+            ):
+                self.tools.register(tool)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
         if self.nowledge_client:
@@ -1264,7 +1272,8 @@ class AgentLoop:
                 )
 
     async def close_mcp(self) -> None:
-        """Drain pending background archives, then close MCP connections."""
+        """Drain pending background archives, terminate ssh sessions, close MCP."""
+        await self.ssh.close_all()
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
@@ -1318,6 +1327,7 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
                 current_role=current_role,
+                ssh_sessions=self.ssh.context_block(),
             )
             n_initial_sys = len(messages)
             final_content, _, all_msgs = await self._run_agent_loop(messages)
@@ -1451,6 +1461,7 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             pulse=self._config.agents.defaults.pulse_enabled,
+            ssh_sessions=self.ssh.context_block(),
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
