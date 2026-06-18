@@ -28,11 +28,11 @@ from nanocat.agent.memory import (
 from nanocat.agent.skills import BUILTIN_SKILLS_DIR
 from nanocat.agent.subagent import (
     SubagentGatherTool,
+    SubagentKillTool,
     SubagentListTool,
     SubagentManager,
     SubagentSpawnTool,
     SubagentSteerTool,
-    SubagentStopTool,
 )
 from nanocat.agent.tools.cron import CronTool
 from nanocat.agent.tools.filesystem import (
@@ -308,7 +308,7 @@ class AgentLoop:
         self._reg(SubagentGatherTool(manager=self.subagents))
         self._reg(SubagentListTool(manager=self.subagents))
         self._reg(SubagentSteerTool(manager=self.subagents))
-        self._reg(SubagentStopTool(manager=self.subagents))
+        self._reg(SubagentKillTool(manager=self.subagents))
         if self._config.tools.enabled_builtin_tools.screenshot:
             self.tools.register(ScreenshotTool())
         if self._config.tools.enabled_builtin_tools.ssh:

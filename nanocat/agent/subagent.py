@@ -24,7 +24,7 @@ _SUBAGENT_EXCLUDED = frozenset(
         "subagent_gather",
         "subagent_list",
         "subagent_steer",
-        "subagent_stop",
+        "subagent_kill",
         "message",
         "cron",
         "memory_search",
@@ -153,7 +153,7 @@ class SubagentManager:
         self._steer_msgs.setdefault(task_id, []).append(text)
         return json.dumps({"ok": True, "steer_to": task_id})
 
-    async def stop(self, task_id: str) -> str:
+    async def kill(self, task_id: str) -> str:
         t = self._running_tasks.get(task_id)
         if t is None:
             return json.dumps({"ok": False, "error": f"no such subagent {task_id!r}"})
@@ -503,17 +503,17 @@ class SubagentSteerTool(Tool):
         return await self._mgr.steer(subagent_id, text)
 
 
-class SubagentStopTool(Tool):
+class SubagentKillTool(Tool):
     def __init__(self, manager: SubagentManager):
         self._mgr = manager
 
     @property
     def name(self) -> str:
-        return "subagent_stop"
+        return "subagent_kill"
 
     @property
     def description(self) -> str:
-        return "Stop a running subagent."
+        return "Kill a running subagent (cancels and removes it)."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -524,4 +524,4 @@ class SubagentStopTool(Tool):
         }
 
     async def execute(self, subagent_id: str, **kwargs: Any) -> str:
-        return await self._mgr.stop(subagent_id)
+        return await self._mgr.kill(subagent_id)
