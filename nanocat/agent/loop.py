@@ -852,9 +852,12 @@ class AgentLoop:
                 self._progressed.pop(msg.session_key, None)
             elif cmd == "/restart":
                 await self._handle_restart(msg)
-            elif self._is_standalone_cmd(msg):
-                # Standalone commands (e.g. /status, /model, /context): queue normally,
-                # do NOT interrupt an in-flight LLM turn.
+            elif self._is_standalone_cmd(msg) or msg.channel == "system":
+                # Standalone commands and system messages (e.g. subagent results):
+                # queue normally, do NOT interrupt in-flight LLM turns. System
+                # messages also skip the gen-based discard in the else-branch
+                # (two spawns completing back-to-back shared a session_key and
+                # bumped each other's gen, causing the first to be discarded).
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(
