@@ -353,7 +353,7 @@ if _TEXTUAL_OK:
             if self._send is None or not self._busy:
                 return
             has_text = bool(self.query_one("#prompt", _ChatInput).text.strip())
-            self._send.label = "Steer" if has_text else "Stop"
+            self._send.label = "Send" if has_text else "Stop"
             self._send.variant = "warning" if has_text else "error"
 
         def _submit_current(self) -> None:
