@@ -142,7 +142,6 @@ class AgentLoop:
             bus=bus,
             tools=self.tools,
         )
-        self.subagents._steer_inject = self._steer_buf
         self.ssh = SSHManager()
         self.procs = ProcManager()
         self.http_sessions = HttpSessionManager(proxy=config.tools.web.proxy)
@@ -158,6 +157,7 @@ class AgentLoop:
         self._pending_buf: dict[str, InboundMessage] = {}
         self._steer_buf: dict[str, list[InboundMessage]] = {}
         self._progressed: dict[str, bool] = {}
+        self.subagents._steer_inject = self._steer_buf
         self._recent_logs: deque = deque(maxlen=10)
         logger.add(
             lambda msg: self._recent_logs.append(msg.strip()),
