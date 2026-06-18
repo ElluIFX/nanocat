@@ -150,8 +150,6 @@ class AgentLoop:
         self._processing_lock = asyncio.Lock()
         self._session_gen: dict[str, int] = {}
         self._pending_buf: dict[str, InboundMessage] = {}
-        # Mid-turn interjection ("steer"): pending messages to inject into a
-        # running turn, and whether a session's turn has produced visible output.
         self._steer_buf: dict[str, list[InboundMessage]] = {}
         self._progressed: dict[str, bool] = {}
         self._recent_logs: deque = deque(maxlen=10)
@@ -597,8 +595,6 @@ class AgentLoop:
         messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None,
     ) -> bool:
-        """Inject any pending interjection ("steer") for *session_key* as a user
-        message appended to *messages* (in place). Returns True if it injected."""
         pending = self._steer_buf.pop(session_key, None)
         if not pending:
             return False
@@ -639,7 +635,6 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            # Pick up any interjection that arrived during the previous tool round.
             if session_key:
                 await self._drain_steer(session_key, messages, on_progress)
 
@@ -652,8 +647,6 @@ class AgentLoop:
             )
 
             if response.has_tool_calls:
-                # Turn has produced visible work — from here a new message steers
-                # (injects) rather than cancels (see run()).
                 if session_key:
                     self._progressed[session_key] = True
                 if on_progress:
@@ -797,9 +790,6 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
-                # An interjection that landed during this final response: deliver
-                # the answer as progress, then continue the turn with the steer
-                # instead of ending — so a late steer is never lost.
                 if session_key and self._steer_buf.get(session_key):
                     if clean and on_progress:
                         await on_progress(clean)
@@ -854,10 +844,7 @@ class AgentLoop:
                 await self._handle_restart(msg)
             elif self._is_standalone_cmd(msg) or msg.channel == "system":
                 # Standalone commands and system messages (e.g. subagent results):
-                # queue normally, do NOT interrupt in-flight LLM turns. System
-                # messages also skip the gen-based discard in the else-branch
-                # (two spawns completing back-to-back shared a session_key and
-                # bumped each other's gen, causing the first to be discarded).
+                # queue normally, do NOT interrupt an in-flight LLM turn.
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(
@@ -1397,9 +1384,6 @@ class AgentLoop:
                     )
                 )
             finally:
-                # Turn finished for this session (only if not superseded by a newer
-                # gen): clear the progress flag and re-dispatch any interjection that
-                # arrived too late to be consumed inside the loop.
                 sk = msg.session_key
                 if not gen or self._session_gen.get(sk, 0) == gen:
                     self._progressed.pop(sk, None)
