@@ -198,6 +198,9 @@ class EnabledBuiltinToolsConfig(Base):
     todo: bool = True
     spawn: bool = True
     gather: bool = True
+    subagent_list: bool = True
+    subagent_steer: bool = True
+    subagent_stop: bool = True
     ssh: bool = False  # SSH tools (ssh_open/send/read/close/list); powerful + networked, opt-in
     proc: bool = True  # background process tools (proc_start/read/stop/list)
     screenshot: bool = False  # screen capture tool; opt-in (privacy/desktop access)

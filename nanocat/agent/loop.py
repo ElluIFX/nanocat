@@ -26,7 +26,14 @@ from nanocat.agent.memory import (
     NowledgeThreadManager,
 )
 from nanocat.agent.skills import BUILTIN_SKILLS_DIR
-from nanocat.agent.subagent import SubagentManager
+from nanocat.agent.subagent import (
+    SubagentGather,
+    SubagentListTool,
+    SubagentManager,
+    SubagentSpawn,
+    SubagentSteerTool,
+    SubagentStopTool,
+)
 from nanocat.agent.tools.cron import CronTool
 from nanocat.agent.tools.filesystem import (
     DeleteLinesTool,
@@ -39,7 +46,6 @@ from nanocat.agent.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-from nanocat.agent.tools.gather import GatherTool
 from nanocat.agent.tools.http import HttpRequestTool, HttpSessionManager
 from nanocat.agent.tools.message import MessageTool
 from nanocat.agent.tools.proc import (
@@ -52,12 +58,6 @@ from nanocat.agent.tools.proc import (
 )
 from nanocat.agent.tools.registry import ToolRegistry
 from nanocat.agent.tools.shell import ExecTool
-from nanocat.agent.tools.spawn import (
-    SpawnTool,
-    SubagentListTool,
-    SubagentSteerTool,
-    SubagentStopTool,
-)
 from nanocat.agent.tools.ssh import (
     SSHCloseTool,
     SSHListTool,
@@ -304,8 +304,8 @@ class AgentLoop:
         self._reg(MessageTool(send_callback=self.bus.publish_outbound))
         self._reg(WaitTool(send_callback=self.bus.publish_outbound))
         self._reg(TodoTool(send_callback=self.bus.publish_outbound))
-        self._reg(SpawnTool(manager=self.subagents))
-        self._reg(GatherTool(manager=self.subagents))
+        self._reg(SubagentSpawn(manager=self.subagents))
+        self._reg(SubagentGather(manager=self.subagents))
         self._reg(SubagentListTool(manager=self.subagents))
         self._reg(SubagentSteerTool(manager=self.subagents))
         self._reg(SubagentStopTool(manager=self.subagents))
