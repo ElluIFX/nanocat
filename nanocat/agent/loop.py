@@ -52,7 +52,12 @@ from nanocat.agent.tools.proc import (
 )
 from nanocat.agent.tools.registry import ToolRegistry
 from nanocat.agent.tools.shell import ExecTool
-from nanocat.agent.tools.spawn import SpawnTool
+from nanocat.agent.tools.spawn import (
+    SpawnTool,
+    SubagentListTool,
+    SubagentSteerTool,
+    SubagentStopTool,
+)
 from nanocat.agent.tools.ssh import (
     SSHCloseTool,
     SSHListTool,
@@ -301,6 +306,9 @@ class AgentLoop:
         self._reg(TodoTool(send_callback=self.bus.publish_outbound))
         self._reg(SpawnTool(manager=self.subagents))
         self._reg(GatherTool(manager=self.subagents))
+        self._reg(SubagentListTool(manager=self.subagents))
+        self._reg(SubagentSteerTool(manager=self.subagents))
+        self._reg(SubagentStopTool(manager=self.subagents))
         if self._config.tools.enabled_builtin_tools.screenshot:
             self.tools.register(ScreenshotTool())
         if self._config.tools.enabled_builtin_tools.ssh:
@@ -1454,6 +1462,7 @@ class AgentLoop:
                 current_role=current_role,
                 ssh_sessions=self.ssh.context_block(),
                 proc_sessions=self.procs.context_block(),
+                subs=self.subagents.context_block(),
             )
             n_initial_sys = len(messages)
             final_content, _, all_msgs = await self._run_agent_loop(messages)
@@ -1589,6 +1598,7 @@ class AgentLoop:
             pulse=self._config.agents.defaults.pulse_enabled,
             ssh_sessions=self.ssh.context_block(),
             proc_sessions=self.procs.context_block(),
+            subs=self.subagents.context_block(),
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:

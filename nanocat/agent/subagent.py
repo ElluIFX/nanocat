@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from typing import Any
 
@@ -16,17 +17,19 @@ from nanocat.utils.helpers import build_assistant_message
 
 # Tools excluded from subagents: nesting prevention, message sending,
 # scheduling, and Nowledge memory operations.
-_SUBAGENT_EXCLUDED = frozenset({
-    "spawn",
-    "gather",
-    "message",
-    "cron",
-    "memory_search",
-    "memory_add",
-    "memory_update",
-    "memory_delete",
-    "read_working_memory",
-})
+_SUBAGENT_EXCLUDED = frozenset(
+    {
+        "spawn",
+        "gather",
+        "message",
+        "cron",
+        "memory_search",
+        "memory_add",
+        "memory_update",
+        "memory_delete",
+        "read_working_memory",
+    }
+)
 
 
 class SubagentManager:
@@ -41,6 +44,8 @@ class SubagentManager:
         self._tools = tools
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+        self._steer_msgs: dict[str, list[str]] = {}  # task_id -> pending steer text
+        self._running_info: dict[str, dict[str, Any]] = {}  # task_id -> {label, created_at}
 
     @property
     def model(self) -> str:
@@ -82,40 +87,89 @@ class SubagentManager:
             "from this tool, then analyze it."
         )
         user_blocks = [
-            {"type": "text", "text": "[Tool Return Value] Auto-forwarded image payload from load_image."},
+            {
+                "type": "text",
+                "text": "[Tool Return Value] Auto-forwarded image payload from load_image.",
+            },
             *image_blocks,
         ]
         return tool_text, user_blocks
 
-    async def spawn(
+    async def spawn_many(
         self,
-        task: str,
-        label: str | None = None,
+        tasks: list[dict[str, str]],
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
     ) -> str:
-        """Spawn a subagent to execute a task in the background."""
-        task_id = str(uuid.uuid4())[:8]
-        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        spawned = []
+        for t in tasks:
+            text = t["task"]
+            label = t.get("label") or text[:30] + ("..." if len(text) > 30 else "")
+            task_id = str(uuid.uuid4())[:8]
+            bg_task = asyncio.create_task(self._run_subagent(task_id, text, label, origin))
+            self._running_tasks[task_id] = bg_task
+            self._running_info[task_id] = {"label": label, "created_at": time.monotonic()}
+            if session_key:
+                self._session_tasks.setdefault(session_key, set()).add(task_id)
 
-        bg_task = asyncio.create_task(self._run_subagent(task_id, task, display_label, origin))
-        self._running_tasks[task_id] = bg_task
-        if session_key:
-            self._session_tasks.setdefault(session_key, set()).add(task_id)
+            def _cleanup(_: asyncio.Task, tid=task_id, sk=session_key) -> None:
+                self._running_tasks.pop(tid, None)
+                self._running_info.pop(tid, None)
+                self._steer_msgs.pop(tid, None)
+                if sk and (ids := self._session_tasks.get(sk)):
+                    ids.discard(tid)
+                    if not ids:
+                        del self._session_tasks[sk]
 
-        def _cleanup(_: asyncio.Task) -> None:
-            self._running_tasks.pop(task_id, None)
-            if session_key and (ids := self._session_tasks.get(session_key)):
-                ids.discard(task_id)
-                if not ids:
-                    del self._session_tasks[session_key]
+            bg_task.add_done_callback(_cleanup)
+            spawned.append({"id": task_id, "label": label})
+            logger.info("Spawned subagent [{}]: {}", task_id, label)
+        return json.dumps({"ok": True, "spawned": spawned}, ensure_ascii=False)
 
-        bg_task.add_done_callback(_cleanup)
+    def list(self) -> str:
+        items = []
+        for tid in self._running_tasks:
+            info = self._running_info.get(tid, {})
+            t = self._running_tasks.get(tid)
+            items.append(
+                {
+                    "id": tid,
+                    "label": info.get("label", "?"),
+                    "alive": t is not None and not t.done(),
+                    "uptime_s": int(time.monotonic() - info.get("created_at", time.monotonic())),
+                }
+            )
+        return json.dumps(items, ensure_ascii=False)
 
-        logger.info("Spawned subagent [{}]: {}", task_id, display_label)
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+    async def steer(self, task_id: str, text: str) -> str:
+        if task_id not in self._running_tasks or self._running_tasks[task_id].done():
+            return json.dumps({"ok": False, "error": f"no such running subagent {task_id!r}"})
+        self._steer_msgs.setdefault(task_id, []).append(text)
+        return json.dumps({"ok": True, "steer_to": task_id})
+
+    async def stop(self, task_id: str) -> str:
+        t = self._running_tasks.get(task_id)
+        if t is None:
+            return json.dumps({"ok": False, "error": f"no such subagent {task_id!r}"})
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+        return json.dumps({"ok": True, "stopped": task_id})
+
+    def context_block(self) -> str | None:
+        if not self._running_tasks:
+            return None
+        lines = []
+        for tid in list(self._running_tasks):
+            info = self._running_info.get(tid, {})
+            label = str(info.get("label", "?"))[:50]
+            uptime = int(time.monotonic() - info.get("created_at", time.monotonic()))
+            lines.append(f"{tid} · {label} · up {uptime}s")
+        return "\n".join(lines)
 
     async def _execute_task(self, task_id: str, task: str, label: str) -> str:
         """Run a subagent to completion and return the final result string."""
@@ -133,6 +187,8 @@ class SubagentManager:
 
         while iteration < max_iterations:
             iteration += 1
+            for steer_text in self._steer_msgs.pop(task_id, []):
+                messages.append({"role": "user", "content": steer_text})
 
             response = await self.provider.chat_with_retry(
                 messages=messages,
@@ -153,7 +209,8 @@ class SubagentManager:
                 for tool_call in response.tool_calls:
                     logger.debug(
                         "Subagent [{}] executing: {} with arguments: {}",
-                        task_id, tool_call.name,
+                        task_id,
+                        tool_call.name,
                         json.dumps(tool_call.arguments, ensure_ascii=False),
                     )
                     result = await tools.execute(tool_call.name, tool_call.arguments)
@@ -184,7 +241,11 @@ class SubagentManager:
         return final_result or "Task completed but no final response was generated."
 
     async def _run_subagent(
-        self, task_id: str, task: str, label: str, origin: dict[str, str],
+        self,
+        task_id: str,
+        task: str,
+        label: str,
+        origin: dict[str, str],
     ) -> None:
         """Execute the subagent task and announce the result via the message bus."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -197,7 +258,8 @@ class SubagentManager:
             await self._announce_result(task_id, label, task, str(e), origin, "error")
 
     async def run_and_collect(
-        self, tasks: list[tuple[str, str | None]],
+        self,
+        tasks: list[tuple[str, str | None]],
     ) -> list[dict[str, Any]]:
         """Run multiple subagents concurrently and return all results inline."""
 
@@ -216,7 +278,13 @@ class SubagentManager:
         return list(await asyncio.gather(*coros))
 
     async def _announce_result(
-        self, task_id: str, label: str, task: str, result: str, origin: dict[str, str], status: str,
+        self,
+        task_id: str,
+        label: str,
+        task: str,
+        result: str,
+        origin: dict[str, str],
+        status: str,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
@@ -239,7 +307,9 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         await self.bus.publish_inbound(msg)
         logger.debug(
             "Subagent [{}] announced result to {}:{}",
-            task_id, origin["channel"], origin["chat_id"],
+            task_id,
+            origin["channel"],
+            origin["chat_id"],
         )
 
     def _build_subagent_prompt(self) -> str:
