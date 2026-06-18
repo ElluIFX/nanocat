@@ -392,7 +392,7 @@ if _TEXTUAL_OK:
             assert self._chat is not None
             for raw in text.splitlines() or [text]:
                 line = Text()
-                line.append("  │ ", style="cyan")
+                line.append("  │ ", style=_BOT_BORDER)
                 line.append(raw, style="italic grey50")
                 self._chat.write(line)
 
