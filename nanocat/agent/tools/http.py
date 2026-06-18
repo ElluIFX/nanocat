@@ -12,7 +12,7 @@ Beyond one-shot requests it supports:
 from __future__ import annotations
 
 import asyncio
-import json as _json
+import json
 import os
 import tempfile
 import uuid
@@ -102,8 +102,11 @@ class HttpRequestTool(Tool):
                 "url": {"type": "string"},
                 "method": {"type": "string", "enum": _METHODS, "default": "GET"},
                 "headers": {"type": "object", "description": "Request headers"},
-                "json": {"type": "object", "description": "JSON body (sets Content-Type)"},
-                "body": {"type": "string", "description": "Raw text body (when not using json)"},
+                "json_body": {"type": "object", "description": "JSON body (sets Content-Type)"},
+                "body": {
+                    "type": "string",
+                    "description": "Raw text body (when not using json_body)",
+                },
                 "timeout": {"type": "number", "default": 30, "description": "Seconds"},
                 "session": {
                     "type": "boolean",
@@ -129,7 +132,7 @@ class HttpRequestTool(Tool):
         url: str,
         method: str = "GET",
         headers: dict | None = None,
-        json: dict | None = None,
+        json_body: dict | None = None,
         body: str | None = None,
         timeout: float = 30.0,
         session: bool = False,
@@ -143,16 +146,16 @@ class HttpRequestTool(Tool):
         if self._safety_check:
             ok, err = validate_url_target(url)
             if not ok:
-                return f"Error: blocked URL: {err}"
+                return json.dumps({"ok": False, "error": "blocked URL", "detail": err})
 
         use_session = session or bool(session_id)
 
         if stream:
             return self._start_stream(
-                url, method, headers, json, body, timeout, use_session, session_id
+                url, method, headers, json_body, body, timeout, use_session, session_id
             )
 
-        # Build the body kwargs (multipart files take precedence, then json, then raw).
+        # Build the body kwargs (multipart files take precedence, then json_body, then raw).
         handles: list = []
         req: dict[str, Any] = {"headers": headers, "timeout": timeout}
         if files:
@@ -163,12 +166,14 @@ class HttpRequestTool(Tool):
                 except Exception as e:
                     for h in handles:
                         h.close()
-                    return f"Error: cannot open file {path!r}: {e}"
+                    return json.dumps(
+                        {"ok": False, "error": f"cannot open file {path!r}", "detail": str(e)}
+                    )
                 handles.append(fh)
                 files_arg[field] = (os.path.basename(path), fh)
             req["files"] = files_arg
-        elif json is not None:
-            req["json"] = json
+        elif json_body is not None:
+            req["json"] = json_body
         elif body is not None:
             req["content"] = body
 
@@ -181,7 +186,7 @@ class HttpRequestTool(Tool):
                 async with self._mgr.new_client() as client:
                     resp = await client.request(method.upper(), url, **req)
         except Exception as e:
-            return f"Error: request failed: {e}"
+            return json.dumps({"ok": False, "error": "request failed", "detail": str(e)})
         finally:
             for h in handles:
                 h.close()
@@ -189,7 +194,7 @@ class HttpRequestTool(Tool):
         if self._safety_check:
             ok, err = validate_resolved_url(str(resp.url))
             if not ok:
-                return f"Error: redirect blocked: {err}"
+                return json.dumps({"ok": False, "error": "redirect blocked", "detail": err})
 
         text = resp.text
         truncated = len(text) > _MAX_BODY
@@ -197,6 +202,7 @@ class HttpRequestTool(Tool):
             text = text[:_MAX_BODY]
 
         result: dict[str, Any] = {
+            "ok": True,
             "status": resp.status_code,
             "url": str(resp.url),
             "headers": {k: resp.headers.get(k) for k in _RESP_HEADER_KEYS if k in resp.headers},
@@ -206,14 +212,14 @@ class HttpRequestTool(Tool):
         }
         if sid:
             result["session_id"] = sid
-        return _json.dumps(result, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
 
     def _start_stream(
         self,
         url: str,
         method: str,
         headers: dict | None,
-        json: dict | None,
+        json_body: dict | None,
         body: str | None,
         timeout: float,
         use_session: bool,
@@ -229,7 +235,7 @@ class HttpRequestTool(Tool):
 
         stream_id = uuid.uuid4().hex[:8]
         task = asyncio.create_task(
-            self._stream_to_file(client, owns, method, url, headers, json, body, timeout, path)
+            self._stream_to_file(client, owns, method, url, headers, json_body, body, timeout, path)
         )
         self._mgr.track_stream(stream_id, task)
         result = {
@@ -241,7 +247,7 @@ class HttpRequestTool(Tool):
         }
         if sid:
             result["session_id"] = sid
-        return _json.dumps(result, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
 
     async def _stream_to_file(
         self,
@@ -250,17 +256,22 @@ class HttpRequestTool(Tool):
         method: str,
         url: str,
         headers: dict | None,
-        json: dict | None,
+        json_body: dict | None,
         body: str | None,
         timeout: float,
         path: str,
     ) -> None:
         from nanocat.security.network import validate_resolved_url
 
-        content = body if json is None else None
+        content = body if json_body is None else None
         try:
             async with client.stream(
-                method.upper(), url, headers=headers, json=json, content=content, timeout=timeout
+                method.upper(),
+                url,
+                headers=headers,
+                json=json_body,
+                content=content,
+                timeout=timeout,
             ) as resp:
                 if self._safety_check:
                     ok, err = validate_resolved_url(str(resp.url))

@@ -217,7 +217,7 @@ class ParseImageTool(Tool):
                     "description": (
                         "Leave empty on first read. On subsequent reads, specify what "
                         "region, element, or aspect of the image to analyze in greater "
-                        'detail, and your desired return format if needed.'
+                        "detail, and your desired return format if needed."
                     ),
                 },
             },
@@ -271,11 +271,7 @@ class ScreenshotTool(Tool):
 
         from nanocat.config.paths import get_media_dir
 
-        bbox = (
-            (region[0], region[1], region[2], region[3])
-            if region and len(region) == 4
-            else None
-        )
+        bbox = (region[0], region[1], region[2], region[3]) if region and len(region) == 4 else None
         try:
             try:
                 img = ImageGrab.grab(bbox=bbox, all_screens=True)

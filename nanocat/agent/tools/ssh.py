@@ -45,8 +45,10 @@ class SSHManager(TerminalManager):
         cols: int = _DEFAULT_COLS,
         rows: int = _DEFAULT_ROWS,
     ) -> str:
+        import json
+
         if not host or not host.strip():
-            return "Error: host is required."
+            return json.dumps({"ok": False, "error": "host is required"})
         cols = max(_MIN_COLS, min(_MAX_COLS, cols))
         rows = max(_MIN_ROWS, min(_MAX_ROWS, rows))
         argv = [
@@ -79,9 +81,9 @@ class SSHManager(TerminalManager):
                 stderr=asyncio.subprocess.STDOUT,
             )
         except FileNotFoundError:
-            return "Error: `ssh` binary not found on PATH."
+            return json.dumps({"ok": False, "error": "`ssh` binary not found on PATH"})
         except Exception as e:
-            return f"Error: failed to launch ssh: {e}"
+            return json.dumps({"ok": False, "error": f"failed to launch ssh: {e}"})
 
         sid = uuid.uuid4().hex[:8]
         session = TerminalSession(sid, host.strip(), proc, cols, rows)
@@ -102,18 +104,32 @@ class SSHManager(TerminalManager):
             detail = session.render_scrollback() or session.render_screen()
             self._sessions.pop(sid, None)
             await session.terminate()
-            return (
-                f"Error: connection to {host} failed (exit={session.exit_code}). "
-                f"Output:\n{detail or '(no output)'}"
+            return json.dumps(
+                {
+                    "ok": False,
+                    "session_id": sid,
+                    "exit_code": session.exit_code,
+                    "output": detail or "",
+                },
+                ensure_ascii=False,
             )
 
         screen = session.render_screen()
-        if not screen and not session.render_scrollback():
-            return (
-                f"Opened ssh session {sid} ({host}, {cols}x{rows}) — connecting, no output "
-                f"yet. Call ssh_read shortly; if it stays empty the host may be unreachable."
-            )
-        return f"Opened ssh session {sid} ({host}, {cols}x{rows}). Initial screen:\n{screen}"
+        return json.dumps(
+            {
+                "ok": True,
+                "session_id": sid,
+                "host": host.strip(),
+                "cols": cols,
+                "rows": rows,
+                "screen": screen,
+                "connecting": not bool(screen),
+            },
+            ensure_ascii=False,
+        )
+
+    def _describe_item(self, s: TerminalSession) -> dict:
+        return {"host": s.label[:50], "idle_s": s.idle_seconds()}
 
 
 class SSHOpenTool(Tool):

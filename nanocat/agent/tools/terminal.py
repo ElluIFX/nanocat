@@ -11,6 +11,7 @@ two small description hooks.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections import deque
@@ -291,6 +292,9 @@ class TerminalManager:
     def _describe(self, sid: str, s: TerminalSession) -> str:
         return f"{sid} · {s.label[:50]} · {self._time_desc(s)}"
 
+    def _describe_item(self, s: TerminalSession) -> dict:
+        return {"label": s.label}
+
     # --- generic session operations -------------------------------------
     async def send(
         self,
@@ -304,7 +308,14 @@ class TerminalManager:
     ) -> str:
         session = self._sessions.get(session_id)
         if session is None:
-            return f"Error: no {self.kind} session {session_id!r} (use {self.kind}_list)."
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": f"no {self.kind} session {session_id!r}",
+                    "hint": f"use {self.kind}_list",
+                },
+                ensure_ascii=False,
+            )
 
         payload = b""
         if text:
@@ -312,55 +323,94 @@ class TerminalManager:
         for key in keys or []:
             mapped = _key_to_bytes(key)
             if mapped is None:
-                return (
-                    f"Error: unknown key {key!r}. Use a named key "
-                    f"({', '.join(_NAMED_KEY_LIST)}), a single character, or a chord with "
-                    f"ctrl/alt/shift like 'ctrl-b', 'alt-x', 'ctrl-alt-del'."
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": f"unknown key {key!r}",
+                        "hint": f"named keys: {', '.join(_NAMED_KEY_LIST)}; chords: ctrl-b, alt-x, ctrl-alt-del",
+                    },
+                    ensure_ascii=False,
                 )
             payload += mapped
         if enter:
             payload += self.enter_byte
         if not payload:
-            return "Error: nothing to send (provide text and/or keys, or enter=true)."
+            return json.dumps({"ok": False, "error": "nothing to send"}, ensure_ascii=False)
 
         try:
             await session.send_bytes(payload)
         except RuntimeError as e:
-            return (
-                f"Error: {e}. Use {self.kind}_read to see the last output, "
-                f"then {self.clear_cmd} to clear it."
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": str(e),
+                    "hint": f"use {self.kind}_read to see the last output, then {self.clear_cmd}",
+                },
+                ensure_ascii=False,
             )
 
         if immediate_return:
             base = _SEND_SETTLE if wait is None else max(0.0, min(wait, _WAIT_CEILING))
             await asyncio.sleep(base)
             await session.drain_until_idle(_SEND_QUIET, _SEND_STREAM_CEIL)
-            return f"[sent to {session_id}] screen:\n{session.render_screen()}"
-        return f"[sent to {session_id}] (call {self.kind}_read to view output)"
+            return json.dumps(
+                {
+                    "ok": True,
+                    "sent_to": session_id,
+                    "screen": session.render_screen(),
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps({"ok": True, "sent_to": session_id}, ensure_ascii=False)
 
     def read(self, session_id: str, mode: str = "screen") -> str:
         session = self._sessions.get(session_id)
         if session is None:
-            return f"Error: no {self.kind} session {session_id!r} (use {self.kind}_list)."
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": f"no {self.kind} session {session_id!r}",
+                    "hint": f"use {self.kind}_list",
+                },
+                ensure_ascii=False,
+            )
         body = session.render_scrollback() if mode == "scrollback" else session.render_screen()
-        status = "" if session.alive else f" [ended, exit={session.exit_code}]"
-        return f"[{session_id} {mode}]{status}\n{body}"
+        return json.dumps(
+            {
+                "ok": True,
+                "session_id": session_id,
+                "mode": mode,
+                "alive": session.alive,
+                "exit_code": session.exit_code,
+                "content": body,
+            },
+            ensure_ascii=False,
+        )
 
     async def close(self, session_id: str) -> str:
         session = self._sessions.pop(session_id, None)
         if session is None:
-            return f"Error: no {self.kind} session {session_id!r}."
+            return json.dumps(
+                {"ok": False, "error": f"no {self.kind} session {session_id!r}"},
+                ensure_ascii=False,
+            )
         await session.terminate()
-        return f"Closed {self.kind} session {session_id}."
+        return json.dumps({"ok": True, "closed": session_id}, ensure_ascii=False)
 
     def list(self) -> str:
         if not self._sessions:
-            return f"No open {self.kind} sessions."
-        out = []
+            return json.dumps([], ensure_ascii=False)
+        items = []
         for sid, s in self._sessions.items():
-            state = "alive" if s.alive else f"ended(exit={s.exit_code})"
-            out.append(f"{self._describe(sid, s)} · {state}")
-        return "\n".join(out)
+            items.append(
+                {
+                    "id": sid,
+                    "alive": s.alive,
+                    "exit_code": s.exit_code,
+                }
+                | self._describe_item(s)
+            )
+        return json.dumps(items, ensure_ascii=False)
 
     def context_block(self) -> str | None:
         """One compact line per session for the per-turn CONTEXT block. Ended-but-

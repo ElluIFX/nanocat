@@ -13,6 +13,7 @@ full-screen TUIs (vim/htop) won't truly fullscreen — use the ssh tool for thos
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from typing import Any
 
@@ -57,7 +58,7 @@ class ProcManager(TerminalManager):
                 cwd=cwd,
             )
         except Exception as e:
-            return f"Error: failed to start process: {e}"
+            return json.dumps({"ok": False, "error": f"failed to start process: {e}"})
 
         sid = uuid.uuid4().hex[:8]
         session = TerminalSession(sid, command, proc, cols, rows)
@@ -66,20 +67,25 @@ class ProcManager(TerminalManager):
         await asyncio.sleep(_OPEN_SETTLE)
         await session.drain_until_idle(_OPEN_QUIET, _OPEN_STREAM_CEIL)
 
-        if not session.alive:
-            detail = session.render_scrollback() or session.render_screen()
-            self._sessions.pop(sid, None)
-            await session.terminate()
-            return (
-                f"Error: process exited immediately (exit={session.exit_code}). "
-                f"Output:\n{detail or '(no output)'}"
-            )
-
         screen = session.render_screen() or session.render_scrollback()
-        return f"Started proc {sid} ({command[:60]}). Output:\n{screen or '(no output yet)'}"
+        return json.dumps(
+            {
+                "ok": True,
+                "started": session.alive,
+                "proc_id": sid,
+                "command": command,
+                "exited": not session.alive,
+                "exit_code": session.exit_code,
+                "screen": screen or "",
+            },
+            ensure_ascii=False,
+        )
 
     def _time_desc(self, s: TerminalSession) -> str:
         return f"up {s.uptime()}s"
+
+    def _describe_item(self, s: TerminalSession) -> dict:
+        return {"command": s.label[:50], "uptime_s": s.uptime()}
 
 
 class ProcStartTool(Tool):
