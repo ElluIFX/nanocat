@@ -386,6 +386,16 @@ if _TEXTUAL_OK:
             )
             self._chat.write("")
 
+        def _write_progress(self, text: str) -> None:
+            """Muted, quote-barred line for the agent's interim 'thinking' notes —
+            visually distinct from final reply bubbles and tool-status lines."""
+            assert self._chat is not None
+            for raw in text.splitlines() or [text]:
+                line = Text()
+                line.append("  │ ", style="cyan")
+                line.append(raw, style="italic grey50")
+                self._chat.write(line)
+
         def _write_tool_event(self, payload: dict) -> None:
             """Render a tool-call batch: dim 'running' lines on start, a green/red
             status line per tool on completion."""
@@ -433,7 +443,7 @@ if _TEXTUAL_OK:
                     self._set_busy(False)
                     self._write_bot(payload)
                 elif kind == "chat_progress":
-                    self._chat.write(Text(payload, style="dim italic"))
+                    self._write_progress(payload)
                 elif kind == "tool_event":
                     self._write_tool_event(payload)
 
@@ -531,10 +541,12 @@ class TuiChannel(BaseChannel):
         )
 
     def preload_history(self, history: list[dict[str, Any]]) -> None:
-        """Queue prior session turns so they render as bubbles before live ones.
+        """Queue prior session turns so they render before live ones.
 
-        Only user messages and assistant text replies are shown; tool calls and
-        empty assistant turns are skipped.
+        User messages and final assistant replies become bubbles; interim
+        assistant turns (those that carried tool calls) render as muted progress
+        notes, matching how they appeared live, instead of full reply bubbles.
+        Empty and non-chat (tool/system) turns are skipped.
         """
         for msg in history:
             role = msg.get("role")
@@ -543,7 +555,12 @@ class TuiChannel(BaseChannel):
             text = _flatten_content(msg.get("content")).strip()
             if not text:
                 continue
-            self._display_q.put(("chat_user" if role == "user" else "chat_bot", text))
+            if role == "user":
+                self._display_q.put(("chat_user", text))
+            elif msg.get("tool_calls"):
+                self._display_q.put(("chat_progress", text))
+            else:
+                self._display_q.put(("chat_bot", text))
 
     def bind_runtime_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Attach the background runtime loop used to publish inbound messages."""
