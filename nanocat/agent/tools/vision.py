@@ -267,7 +267,7 @@ class ScreenshotTool(Tool):
         try:
             from PIL import ImageGrab
         except Exception as e:
-            return f"Error: Pillow ImageGrab unavailable: {e}"
+            return json.dumps({"error": f"Pillow ImageGrab unavailable: {e}"}, ensure_ascii=False)
 
         from nanocat.config.paths import get_media_dir
 
@@ -278,13 +278,13 @@ class ScreenshotTool(Tool):
             except TypeError:
                 img = ImageGrab.grab(bbox=bbox)  # older Pillow / non-Windows
         except Exception as e:
-            return f"Error: screenshot failed: {e}"
+            return json.dumps({"error": f"screenshot failed: {e}"}, ensure_ascii=False)
 
         path = get_media_dir("screenshot") / f"{datetime.now():%Y%m%d_%H%M%S_%f}.png"
         try:
             img.save(path)
         except Exception as e:
-            return f"Error: failed to save screenshot: {e}"
+            return json.dumps({"error": f"failed to save screenshot: {e}"}, ensure_ascii=False)
 
         return json.dumps(
             {

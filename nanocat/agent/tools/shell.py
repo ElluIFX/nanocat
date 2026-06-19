@@ -130,7 +130,9 @@ class ExecTool(Tool):
                 on_blocked=self._on_blocked,
             )
             if error:
-                return error
+                return json.dumps(
+                    {"stdout": "", "stderr": error, "returncode": -1}, ensure_ascii=False
+                )
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
 
@@ -162,7 +164,14 @@ class ExecTool(Tool):
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
-                return f"Error: Command timed out after {effective_timeout} seconds"
+                return json.dumps(
+                    {
+                        "stdout": "",
+                        "stderr": f"Command timed out after {effective_timeout} seconds",
+                        "returncode": -1,
+                    },
+                    ensure_ascii=False,
+                )
 
             stdout_text = _decode_output(stdout) if stdout else ""
             stderr_text = _decode_output(stderr) if stderr else ""
@@ -205,9 +214,7 @@ class ExecTool(Tool):
             except Exception:
                 pass
 
-    def _on_blocked(
-        self, command: str, category: str, shell_type: str, reason: str
-    ) -> bool:
+    def _on_blocked(self, command: str, category: str, shell_type: str, reason: str) -> bool:
         """Hook called when a command is about to be blocked.
 
         Return True to temporarily allow the command.

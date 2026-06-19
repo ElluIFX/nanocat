@@ -158,6 +158,9 @@ class AgentLoop:
         self._steer_buf: dict[str, list[InboundMessage]] = {}
         self._progressed: dict[str, bool] = {}
         self.subagents._steer_inject = self._steer_buf
+        self.subagents._is_live = lambda sk: any(
+            not t.done() for t in self._active_tasks.get(sk, [])
+        )
         self._recent_logs: deque = deque(maxlen=10)
         logger.add(
             lambda msg: self._recent_logs.append(msg.strip()),
@@ -1452,8 +1455,9 @@ class AgentLoop:
                 await self.memory_compactor.maybe_compact_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), session)
             history = session.get_history(max_messages=0)
-            # Subagent results should be assistant role, other system messages use user role
-            current_role = "assistant" if msg.sender_id == "subagent" else "user"
+            # System messages (subagent results, etc.) enter as a user-role event so
+            # the agent responds to them; matches the steer-injection path's role.
+            current_role = "user"
             messages = self.context.build_messages(
                 history=history,
                 compacted_memory=session.compacted_memory,

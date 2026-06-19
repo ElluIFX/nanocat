@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -47,6 +47,7 @@ class SubagentManager:
         self.bus = bus
         self._tools = tools
         self._steer_inject: dict[str, list[InboundMessage]] | None = None
+        self._is_live: Callable[[str], bool] | None = None  # set by AgentLoop
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._steer_msgs: dict[str, list[str]] = {}  # task_id -> pending steer text
@@ -110,7 +111,9 @@ class SubagentManager:
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
         spawned = []
         for t in tasks:
-            text = t["task"]
+            text = (t.get("task") or "").strip()
+            if not text:
+                continue
             label = t.get("label") or text[:30] + ("..." if len(text) > 30 else "")
             task_id = str(uuid.uuid4())[:8]
             bg_task = asyncio.create_task(self._run_subagent(task_id, text, label, origin))
@@ -131,39 +134,44 @@ class SubagentManager:
             bg_task.add_done_callback(_cleanup)
             spawned.append({"id": task_id, "label": label})
             logger.info("Spawned subagent [{}]: {}", task_id, label)
+        if not spawned:
+            return json.dumps({"ok": False, "error": "no valid tasks"}, ensure_ascii=False)
         return json.dumps({"ok": True, "spawned": spawned}, ensure_ascii=False)
 
     def list(self) -> str:
+        now = time.monotonic()
         items = []
-        for tid in self._running_tasks:
+        for tid in list(self._running_tasks):
             info = self._running_info.get(tid, {})
-            t = self._running_tasks.get(tid)
             items.append(
                 {
                     "id": tid,
                     "label": info.get("label", "?"),
-                    "alive": t is not None and not t.done(),
-                    "uptime_s": int(time.monotonic() - info.get("created_at", time.monotonic())),
+                    "uptime_s": int(now - info.get("created_at", now)),
                 }
             )
         return json.dumps(items, ensure_ascii=False)
 
     async def steer(self, task_id: str, text: str) -> str:
         if task_id not in self._running_tasks or self._running_tasks[task_id].done():
-            return json.dumps({"ok": False, "error": f"no such running subagent {task_id!r}"})
+            return json.dumps(
+                {"ok": False, "error": f"no such running subagent {task_id!r}"}, ensure_ascii=False
+            )
         self._steer_msgs.setdefault(task_id, []).append(text)
-        return json.dumps({"ok": True, "steer_to": task_id})
+        return json.dumps({"ok": True, "steer_to": task_id}, ensure_ascii=False)
 
     async def kill(self, task_id: str) -> str:
         t = self._running_tasks.get(task_id)
         if t is None:
-            return json.dumps({"ok": False, "error": f"no such subagent {task_id!r}"})
+            return json.dumps(
+                {"ok": False, "error": f"no such subagent {task_id!r}"}, ensure_ascii=False
+            )
         t.cancel()
         try:
             await t
         except (asyncio.CancelledError, Exception):
             pass
-        return json.dumps({"ok": True, "stopped": task_id})
+        return json.dumps({"ok": True, "stopped": task_id}, ensure_ascii=False)
 
     def context_block(self) -> str | None:
         if not self._running_tasks:
@@ -300,7 +308,7 @@ class SubagentManager:
                 "status": status,
                 "task": task,
                 "result": result,
-                "hint": "This subagent has been removed",
+                "hint": "Background subagent finished and was removed. Relay this to the user.",
             },
             ensure_ascii=False,
         )
@@ -311,7 +319,9 @@ class SubagentManager:
             chat_id=sk,
             content=announce_content,
         )
-        if self._steer_inject is not None:
+        # Fold into the running turn only if one is live for this session; otherwise
+        # publish to the bus so an idle agent is woken up to report the result.
+        if self._steer_inject is not None and self._is_live and self._is_live(sk):
             self._steer_inject.setdefault(sk, []).append(msg)
         else:
             await self.bus.publish_inbound(msg)
