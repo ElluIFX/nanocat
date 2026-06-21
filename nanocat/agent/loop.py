@@ -399,6 +399,16 @@ class AgentLoop:
             return None
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
+    def _strip_pulse(self, text: str | None) -> str | None:
+        """Strip (and debug-log) the PULSE block from any user-facing text when enabled."""
+        if not text or not self._config.agents.defaults.pulse_enabled:
+            return text
+        from nanocat.agent.pulse import extract_pulse, strip_pulse
+
+        if pulse := extract_pulse(text):
+            logger.debug("[PULSE]\n{}", pulse)
+        return strip_pulse(text) or None
+
     @staticmethod
     def _extract_slash_command(text: str) -> str | None:
         """Extract normalized slash command name, e.g. '/model x' -> 'model'."""
@@ -662,7 +672,7 @@ class AgentLoop:
                 if session_key:
                     self._progressed[session_key] = True
                 if on_progress:
-                    thought = self._strip_think(response.content)
+                    thought = self._strip_pulse(self._strip_think(response.content))
                     if thought:
                         await on_progress(thought)
                     tool_hint = self._tool_hint(response.tool_calls)
@@ -803,8 +813,8 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
                 if session_key and self._steer_buf.get(session_key):
-                    if clean and on_progress:
-                        await on_progress(clean)
+                    if on_progress and (shown := self._strip_pulse(clean)):
+                        await on_progress(shown)
                     await self._drain_steer(session_key, messages, on_progress)
                     continue
                 final_content = clean
@@ -817,13 +827,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        if self._config.agents.defaults.pulse_enabled and final_content:
-            from nanocat.agent.pulse import extract_pulse, strip_pulse
-
-            pulse = extract_pulse(final_content)
-            if pulse:
-                logger.debug("[PULSE]\n{}", pulse)
-            final_content = strip_pulse(final_content)
+        final_content = self._strip_pulse(final_content)
 
         if _bypass_token is not None:
             safety_bypass.reset(_bypass_token)
