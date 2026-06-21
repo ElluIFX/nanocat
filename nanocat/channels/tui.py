@@ -89,6 +89,19 @@ _COL_LEVEL = 8
 # a reply can't be mistaken for message boundaries).
 _USER_BORDER = "cyan"
 _BOT_BORDER = "green"
+_SUBAGENT_BORDER = "yellow"
+
+
+def _parse_subagent_result(text: str) -> dict[str, Any] | None:
+    """Return the parsed announce dict if *text* is a subagent result JSON, else None."""
+    s = text.lstrip()
+    if not s.startswith("{") or "subagent_id" not in s:
+        return None
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) and "subagent_id" in obj and "result" in obj else None
 
 
 def _flatten_content(content: Any) -> str:
@@ -402,6 +415,22 @@ if _TEXTUAL_OK:
             )
             self._chat.write("")
 
+        def _write_subagent(self, payload: dict) -> None:
+            assert self._chat is not None
+            label = str(payload.get("label") or "").strip()
+            title = f"Subagent · {label}" if label else "Subagent"
+            self._chat.write(
+                Panel(
+                    Text(str(payload.get("result") or "")),
+                    title=title,
+                    title_align="left",
+                    border_style=_SUBAGENT_BORDER,
+                    box=ROUNDED,
+                    padding=(0, 1),
+                )
+            )
+            self._chat.write("")
+
         def _write_progress(self, text: str) -> None:
             """Muted, quote-barred line for the agent's interim 'thinking' notes —
             visually distinct from final reply bubbles and tool-status lines."""
@@ -458,6 +487,8 @@ if _TEXTUAL_OK:
                 elif kind == "chat_bot":
                     self._set_busy(False)
                     self._write_bot(payload)
+                elif kind == "chat_subagent":
+                    self._write_subagent(payload)
                 elif kind == "chat_progress":
                     self._write_progress(payload)
                 elif kind == "tool_event":
@@ -572,7 +603,10 @@ class TuiChannel(BaseChannel):
             if not text:
                 continue
             if role == "user":
-                self._display_q.put(("chat_user", text))
+                if sub := _parse_subagent_result(text):
+                    self._display_q.put(("chat_subagent", sub))
+                else:
+                    self._display_q.put(("chat_user", text))
             elif msg.get("tool_calls"):
                 self._display_q.put(("chat_progress", text))
             else:
