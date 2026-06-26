@@ -149,7 +149,7 @@ def guard_command(
     lower = cmd.lower()
     workspace_path = Path(workspace).resolve()
     cwd_path = Path(cwd).resolve()
-    restrict = get_runtime_config().tools.exec.restrict_to_workspace
+    restrict = get_runtime_config().tools.cmd.restrict_to_workspace
 
     # Allow-list check (if configured, ALLOW_ALWAYS acts as strict allow-list)
     if _ALLOW_ALWAYS:

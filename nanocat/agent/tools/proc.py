@@ -46,6 +46,7 @@ class ProcManager(TerminalManager):
         cwd: str | None = None,
         cols: int = _DEFAULT_COLS,
         rows: int = _DEFAULT_ROWS,
+        env: dict[str, str] | None = None,
     ) -> str:
         cols = max(_MIN_COLS, min(_MAX_COLS, cols))
         rows = max(_MIN_ROWS, min(_MAX_ROWS, rows))
@@ -56,6 +57,7 @@ class ProcManager(TerminalManager):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                env=env,
             )
         except Exception as e:
             return json.dumps({"ok": False, "error": f"failed to start process: {e}"})
@@ -89,9 +91,17 @@ class ProcManager(TerminalManager):
 
 
 class ProcStartTool(Tool):
-    def __init__(self, manager: ProcManager, working_dir: str):
+    def __init__(
+        self,
+        manager: ProcManager,
+        working_dir: str,
+        env: dict[str, str] | None = None,
+        path_append: list[str] | None = None,
+    ):
         self._mgr = manager
         self._working_dir = working_dir
+        self._env = env or {}
+        self._path_append = path_append or []
 
     @property
     def name(self) -> str:
@@ -140,6 +150,7 @@ class ProcStartTool(Tool):
         rows: int = _DEFAULT_ROWS,
         **kwargs: Any,
     ) -> str:
+        from nanocat.agent.tools.shell import build_command_env
         from nanocat.security import safety_bypass
         from nanocat.security.command import guard_command
 
@@ -148,7 +159,8 @@ class ProcStartTool(Tool):
             error = guard_command(command, cwd=run_cwd, workspace=self._working_dir)
             if error:
                 return error
-        return await self._mgr.start(command, run_cwd, cols, rows)
+        env = build_command_env(self._env, self._path_append)
+        return await self._mgr.start(command, run_cwd, cols, rows, env=env)
 
 
 class ProcSendTool(Tool):

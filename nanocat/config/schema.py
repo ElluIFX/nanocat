@@ -144,15 +144,17 @@ class WebToolsConfig(Base):
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
-class ExecToolConfig(Base):
-    """Shell exec tool configuration."""
+class CmdToolConfig(Base):
+    """Command tool configuration, shared by the exec and proc tools."""
 
     safety_check: bool = True  # If false, skip command safety guard checks
-    timeout: int = 60
-    path_append: str = ""
-    deny_patterns: list[str] = Field(default_factory=list)
-    allow_patterns: list[str] = Field(default_factory=list)
-    restrict_to_workspace: bool = True  # Block shell access to paths outside the working dir
+    timeout: int = 60  # exec only (proc is long-lived)
+    path_append: list[str] = Field(default_factory=list)  # dirs appended to exec/proc child PATH
+    env: dict[str, str] = Field(default_factory=dict)  # extra env injected into exec/proc children
+    deny_regex: list[str] = Field(default_factory=list)  # extra command-guard deny patterns
+    allow_regex: list[str] = Field(default_factory=list)  # command-guard strict allow-list
+    # Confine exec/proc command paths to the working dir (enforced by the command guard).
+    restrict_to_workspace: bool = False
 
 
 class FilesystemToolConfig(Base):
@@ -160,6 +162,10 @@ class FilesystemToolConfig(Base):
 
     safety_check: bool = True  # If false, skip path restriction checks
     force_del_to_trash: bool = True  # delete tool only trashes; hides the permanent option
+    # Confine file tools (read/write/edit/delete/list/...) to the workspace boundary.
+    restrict_to_workspace: bool = False
+    deny_regex: list[str] = Field(default_factory=list)  # block file tools on matching paths
+    allow_regex: list[str] = Field(default_factory=list)  # strict allow-list for file-tool paths
 
 
 class MCPServerConfig(Base):
@@ -214,7 +220,7 @@ class ToolsConfig(Base):
 
     max_return_chars: int = 10000  # Truncate tool results exceeding this; 0 = no limit
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
-    exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    cmd: CmdToolConfig = Field(default_factory=CmdToolConfig)
     filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     enabled_builtin_tools: EnabledBuiltinToolsConfig = Field(

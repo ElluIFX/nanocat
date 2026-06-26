@@ -5,6 +5,7 @@ import difflib
 import glob
 import json
 import mimetypes
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ def _resolve_path(
     The workspace is always the default containment boundary.
     *extra_allowed_dirs* grant ADDITIONAL access beyond the workspace.
     """
+    from nanocat.config.loader import get_runtime_config
     from nanocat.security import safety_bypass
     from nanocat.security.path import is_under
 
@@ -36,18 +38,36 @@ def _resolve_path(
         p = workspace / p
     resolved = p.resolve()
 
+    fs_cfg = get_runtime_config().tools.filesystem
     if not safety_bypass.get():
-        boundaries: list[Path] = []
-        if workspace:
-            boundaries.append(workspace.resolve())
-        if extra_allowed_dirs:
-            boundaries.extend(d.resolve() for d in extra_allowed_dirs)
-        if boundaries and not any(is_under(resolved, d) for d in boundaries):
+        # Path-pattern guard: matched against the resolved path, normalized to
+        # forward slashes and lowercased (so patterns are cross-platform).
+        target = str(resolved).replace("\\", "/").lower()
+        if fs_cfg.allow_regex and not any(re.search(rx, target) for rx in fs_cfg.allow_regex):
             raise PermissionError(
-                f"Path '{path}' is outside the workspace directory.\n"
+                f"Path '{path}' is not in the filesystem allow-list.\n"
                 "Explain to the user that this path is restricted and ask them "
                 "to use /approve to temporarily bypass this check."
             )
+        for rx in fs_cfg.deny_regex:
+            if re.search(rx, target):
+                raise PermissionError(
+                    f"Path '{path}' is blocked by a filesystem deny pattern.\n"
+                    "Explain to the user that this path is restricted and ask them "
+                    "to use /approve to temporarily bypass this check."
+                )
+        if fs_cfg.restrict_to_workspace:
+            boundaries: list[Path] = []
+            if workspace:
+                boundaries.append(workspace.resolve())
+            if extra_allowed_dirs:
+                boundaries.extend(d.resolve() for d in extra_allowed_dirs)
+            if boundaries and not any(is_under(resolved, d) for d in boundaries):
+                raise PermissionError(
+                    f"Path '{path}' is outside the workspace directory.\n"
+                    "Explain to the user that this path is restricted and ask them "
+                    "to use /approve to temporarily bypass this check."
+                )
     return resolved
 
 

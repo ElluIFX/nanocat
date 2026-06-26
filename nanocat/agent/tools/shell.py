@@ -27,6 +27,20 @@ def _decode_output(data: bytes) -> str:
         return data.decode(system_enc, errors="replace")
 
 
+def build_command_env(
+    extra_env: dict[str, str] | None = None, path_append: list[str] | None = None
+) -> dict[str, str]:
+    """Build the child environment shared by the exec and proc tools."""
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    if path_append:
+        env["PATH"] = env.get("PATH", "") + os.pathsep + os.pathsep.join(path_append)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
+
 class ExecTool(Tool):
     """Tool to execute shell commands."""
 
@@ -35,22 +49,24 @@ class ExecTool(Tool):
         timeout: int = 60,
         working_dir: str | None = None,
         workspace_dir: str | None = None,
-        deny_patterns: list[str] | None = None,
-        allow_patterns: list[str] | None = None,
-        path_append: str = "",
+        deny_regex: list[str] | None = None,
+        allow_regex: list[str] | None = None,
+        path_append: list[str] | None = None,
+        env: dict[str, str] | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
         self.workspace_dir = workspace_dir or working_dir
-        self.path_append = path_append
+        self.path_append = path_append or []
+        self.extra_env = env or {}
 
         # Wire extra security patterns into the central command guard.
         from nanocat.security.command import set_allow_always, set_extra_deny
 
-        if deny_patterns:
-            set_extra_deny(deny_patterns)
-        if allow_patterns:
-            set_allow_always(allow_patterns)
+        if deny_regex:
+            set_extra_deny(deny_regex)
+        if allow_regex:
+            set_allow_always(allow_regex)
 
     @property
     def name(self) -> str:
@@ -136,12 +152,7 @@ class ExecTool(Tool):
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
 
-        env = os.environ.copy()
-        if self.path_append:
-            env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
-
-        env.setdefault("PYTHONIOENCODING", "utf-8")
-        env.setdefault("PYTHONUTF8", "1")
+        env = build_command_env(self.extra_env, self.path_append)
 
         try:
             t_start = time.monotonic()

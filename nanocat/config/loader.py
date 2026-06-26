@@ -62,7 +62,6 @@ def load_config(config_path: Path | None = None) -> Config:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            data = _migrate_config(data)
             config = Config.model_validate(data)
             save_config(config, path)
             return config
@@ -88,22 +87,3 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def _migrate_config(data: dict) -> dict:
-    """Migrate old config formats to current."""
-    tools = data.get("tools", {})
-    exec_cfg = tools.get("exec", {})
-    fs_cfg = tools.setdefault("filesystem", {})
-
-    # Move tools.exec.restrictToWorkspace → tools.filesystem.restrictToWorkspace
-    if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in fs_cfg:
-        fs_cfg["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
-
-    # Move tools.restrictToWorkspace → tools.filesystem.restrictToWorkspace
-    if "restrictToWorkspace" in tools and "restrictToWorkspace" not in fs_cfg:
-        fs_cfg["restrictToWorkspace"] = tools.pop("restrictToWorkspace")
-    elif "restrictToWorkspace" in tools:
-        tools.pop("restrictToWorkspace")
-
-    return data

@@ -246,8 +246,8 @@ class AgentLoop:
         return self._config.tools.web.safety_check
 
     @property
-    def exec_config(self):
-        return self._config.tools.exec
+    def cmd_config(self):
+        return self._config.tools.cmd
 
     @property
     def filesystem_config(self):
@@ -300,10 +300,11 @@ class AgentLoop:
         self._reg(
             ExecTool(
                 working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                path_append=self.exec_config.path_append,
-                deny_patterns=self.exec_config.deny_patterns or None,
-                allow_patterns=self.exec_config.allow_patterns or None,
+                timeout=self.cmd_config.timeout,
+                path_append=self.cmd_config.path_append or None,
+                env=self.cmd_config.env or None,
+                deny_regex=self.cmd_config.deny_regex or None,
+                allow_regex=self.cmd_config.allow_regex or None,
             )
         )
         self._reg(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
@@ -334,7 +335,12 @@ class AgentLoop:
                 self.tools.register(tool)
         if self._config.tools.enabled_builtin_tools.proc:
             for tool in (
-                ProcStartTool(self.procs, working_dir=str(self.workspace)),
+                ProcStartTool(
+                    self.procs,
+                    working_dir=str(self.workspace),
+                    env=self.cmd_config.env or None,
+                    path_append=self.cmd_config.path_append or None,
+                ),
                 ProcSendTool(self.procs),
                 ProcReadTool(self.procs),
                 ProcStopTool(self.procs),
