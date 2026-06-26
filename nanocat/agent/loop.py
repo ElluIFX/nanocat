@@ -37,6 +37,7 @@ from nanocat.agent.subagent import (
 from nanocat.agent.tools.cron import CronTool
 from nanocat.agent.tools.filesystem import (
     DeleteLinesTool,
+    DeleteTool,
     EditFileTool,
     FileHexTool,
     GrepFileTool,
@@ -289,6 +290,13 @@ class AgentLoop:
             FileHexTool,
         ):
             self._reg(cls(workspace=self.workspace, extra_allowed_dirs=extra_read))
+        self._reg(
+            DeleteTool(
+                workspace=self.workspace,
+                extra_allowed_dirs=extra_read,
+                force_to_trash=self._config.tools.filesystem.force_del_to_trash,
+            )
+        )
         self._reg(
             ExecTool(
                 working_dir=str(self.workspace),

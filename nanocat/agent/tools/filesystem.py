@@ -2,8 +2,10 @@
 
 import base64
 import difflib
+import glob
 import json
 import mimetypes
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -871,6 +873,226 @@ class DeleteLinesTool(_FsTool):
             return f"Error: {e}"
         except Exception as e:
             return f"Error deleting lines: {e}"
+
+
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
+
+
+class DeleteTool(_FsTool):
+    """Delete files/directories (paths or glob patterns) — to the recycle bin by default."""
+
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        extra_allowed_dirs: list[Path] | None = None,
+        force_to_trash: bool = True,
+    ):
+        super().__init__(workspace, extra_allowed_dirs)
+        self._force_to_trash = force_to_trash
+
+    @property
+    def name(self) -> str:
+        return "delete"
+
+    @property
+    def description(self) -> str:
+        base = (
+            "Delete files and/or directories, sending them to the system recycle bin "
+            "(recoverable). Use this instead of rm/del/Remove-Item in exec. Each entry in "
+            "`paths` is a literal path or a glob pattern (*, ?, [...], ** for recursive). "
+            "Matches outside the workspace are skipped."
+        )
+        if not self._force_to_trash:
+            base += " Set permanent=true to delete irreversibly (requires approval)."
+        return base
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        props: dict[str, Any] = {
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Files/directories to delete; each is a literal path or glob pattern",
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "Required to permanently delete a non-empty directory",
+            },
+        }
+        # The permanent option is only exposed when trash is not forced.
+        if not self._force_to_trash:
+            props["permanent"] = {
+                "type": "boolean",
+                "description": (
+                    "Delete irreversibly, bypassing the recycle bin. Requires user approval: "
+                    "blocked by the safety guard unless the user has run /approve."
+                ),
+            }
+        return {"type": "object", "properties": props, "required": ["paths"]}
+
+    def _boundaries(self) -> list[Path]:
+        bounds: list[Path] = []
+        if self._workspace:
+            bounds.append(self._workspace.resolve())
+        if self._extra_allowed_dirs:
+            bounds.extend(d.resolve() for d in self._extra_allowed_dirs)
+        return bounds
+
+    def _expand(self, entry: str) -> tuple[list[Path], dict[str, Any] | None]:
+        """Resolve a literal path or expand a glob, enforcing the workspace guard."""
+        if any(c in entry for c in "*?["):
+            raw = Path(entry).expanduser()
+            pattern = str(raw if raw.is_absolute() or not self._workspace else self._workspace / raw)
+            matched: list[Path] = []
+            for hit in glob.glob(pattern, recursive=True):
+                try:
+                    matched.append(self._resolve(hit))  # skip out-of-workspace matches
+                except PermissionError:
+                    continue
+            if not matched:
+                return [], {"path": entry, "error": f"No paths matched pattern: {entry}"}
+            return matched, None
+
+        try:
+            fp = self._resolve(entry)
+        except PermissionError as e:
+            return [], {"path": entry, "error": str(e)}
+        if not fp.exists() and not fp.is_symlink():
+            return [], {"path": entry, "error": f"Path not found: {entry}"}
+        return [fp], None
+
+    def _delete_one(self, fp: Path, to_trash: bool, recursive: bool) -> dict[str, Any]:
+        if fp in self._boundaries():
+            return {
+                "ok": False,
+                "error": f"Refusing to delete a protected root directory: {fp}",
+                "hint": "Delete its contents individually instead.",
+            }
+        if not fp.exists() and not fp.is_symlink():
+            return {"ok": False, "error": f"Path not found: {fp}"}
+        is_dir = fp.is_dir() and not fp.is_symlink()
+        type_ = "dir" if is_dir else "file"
+
+        if to_trash:
+            try:
+                from send2trash import send2trash as _send2trash
+
+                _send2trash(str(fp))
+            except ImportError:
+                return {
+                    "ok": False,
+                    "error": "Recycle-bin backend unavailable (send2trash not installed).",
+                    "hint": "Call delete with permanent=true, or install send2trash.",
+                }
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": f"Failed to move to recycle bin: {e}",
+                    "hint": "Target may be locked, in use, or on a volume without a recycle "
+                    "bin. Retry with permanent=true to delete irreversibly.",
+                }
+            return {"ok": True, "type": type_}
+
+        if is_dir:
+            try:
+                non_empty = any(fp.iterdir())
+            except OSError:
+                non_empty = True
+            if non_empty and not recursive:
+                return {
+                    "ok": False,
+                    "error": f"Directory not empty: {fp}",
+                    "hint": "Set recursive=true to permanently delete a non-empty directory.",
+                }
+            try:
+                shutil.rmtree(fp)
+            except OSError as e:
+                return {
+                    "ok": False,
+                    "error": f"Failed to delete directory: {e.strerror or e}",
+                    "hint": "A file inside may be locked or in use.",
+                }
+        else:
+            try:
+                fp.unlink()
+            except OSError as e:
+                return {
+                    "ok": False,
+                    "error": f"Failed to delete file: {e.strerror or e}",
+                    "hint": "The file may be locked or in use by another process.",
+                }
+        return {"ok": True, "type": type_}
+
+    async def execute(
+        self,
+        paths: list[str] | str | None = None,
+        permanent: bool = False,
+        recursive: bool = False,
+        **kwargs: Any,
+    ) -> str:
+        if isinstance(paths, str):
+            entries = [paths]
+        elif isinstance(paths, list):
+            entries = [str(p) for p in paths]
+        else:
+            entries = []
+        # Tolerate a singular `path` argument from the model.
+        if isinstance(kwargs.get("path"), str):
+            entries.append(kwargs["path"])
+        entries = [e for e in entries if e and e.strip()]
+        if not entries:
+            return json.dumps({"ok": False, "error": "No paths provided."}, ensure_ascii=False)
+
+        # Resolve the deletion mode. Trash is forced, or permanent needs approval.
+        if self._force_to_trash:
+            permanent = False
+        elif permanent:
+            from nanocat.security import safety_bypass
+
+            if not safety_bypass.get():
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "Permanent deletion requires approval.",
+                        "hint": "Ask the user to run /approve, then retry; or omit permanent "
+                        "to send the targets to the recycle bin instead.",
+                    },
+                    ensure_ascii=False,
+                )
+
+        candidates: list[Path] = []
+        failed: list[dict[str, Any]] = []
+        seen: set[Path] = set()
+        for entry in entries:
+            matched, issue = self._expand(entry)
+            if issue:
+                failed.append(issue)
+            for m in matched:
+                if m not in seen:
+                    seen.add(m)
+                    candidates.append(m)
+
+        # Deepest paths first so a directory's children are removed before the directory.
+        candidates.sort(key=lambda p: len(p.parts), reverse=True)
+
+        to_trash = not permanent
+        deleted: list[dict[str, Any]] = []
+        for fp in candidates:
+            res = self._delete_one(fp, to_trash, recursive)
+            if res.get("ok"):
+                deleted.append({"path": str(fp), "type": res["type"]})
+            else:
+                entry = {"path": str(fp), "error": res["error"]}
+                if res.get("hint"):
+                    entry["hint"] = res["hint"]
+                failed.append(entry)
+
+        return json.dumps(
+            {"ok": not failed, "deleted": deleted, "failed": failed},
+            ensure_ascii=False,
+        )
 
 
 # ---------------------------------------------------------------------------

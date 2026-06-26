@@ -46,6 +46,7 @@ dependencies = [
     "pyte>=0.8.2,<1.0.0",
     "telegramify-markdown[mermaid]>=1.1.1",
     "jieba>=0.42.1,<1.0.0",
+    "send2trash>=1.8.0,<2.0.0",
 ]
 
 [project.optional-dependencies]

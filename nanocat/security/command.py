@@ -71,6 +71,40 @@ _DENY_RULES: list[tuple[str, str, str]] = [
     (r"\b(?:netstat\b|tasklist\b|ps\s+(?:aux|ef)|ss\s+-[tulp])", _ANY, _POLICY),
 ]
 
+# Local delete commands routed to the `delete` tool (recycle-bin aware) instead
+# of executing in the shell. Covers Unix, CMD and PowerShell delete verbs/aliases.
+_DELETE_REDIRECT_RULES: list[str] = [
+    r"\brm\b",
+    r"\brmdir\b",
+    r"\bunlink\b",
+    r"\bshred\b",
+    r"\bdel\b",
+    r"\berase\b",
+    r"\brd\b",
+    r"\bremove-item\b",
+    r"\bri\b",
+    r"\bfind\b.*\s-delete\b",
+]
+
+_DELETE_REDIRECT_MSG = (
+    "Error: Local file deletion via shell is intercepted. "
+    "Use the `delete` tool instead — it sends files to the system recycle bin by "
+    "default (recoverable) and returns structured results. Pass permanent=true for "
+    "irreversible deletion. If shell-level deletion is truly required, explain why "
+    "and ask the user to /approve."
+)
+
+
+def _delete_redirect(lower: str) -> str | None:
+    """Return the redirect message if *lower* is a local file-delete command."""
+    # `git rm` is a VCS operation, not a local trash delete — exclude it.
+    probe = re.sub(r"\bgit\s+rm\b", "", lower)
+    for pattern in _DELETE_REDIRECT_RULES:
+        if re.search(pattern, probe):
+            return _DELETE_REDIRECT_MSG
+    return None
+
+
 # Patterns that are always blocked regardless of category.
 _UNCONDITIONAL: list[str] = []
 
@@ -121,6 +155,11 @@ def guard_command(
     if _ALLOW_ALWAYS:
         if not any(re.search(p, lower) for p in _ALLOW_ALWAYS):
             return "Error: Command blocked by safety guard (not in allow-list)"
+
+    # Route local file-delete commands to the `delete` tool (recycle-bin aware).
+    if getattr(get_runtime_config().tools.enabled_builtin_tools, "delete", True):
+        if redirect := _delete_redirect(lower):
+            return redirect
 
     # Unconditional deny
     for p in _UNCONDITIONAL:

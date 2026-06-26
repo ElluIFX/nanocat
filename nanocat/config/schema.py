@@ -159,6 +159,7 @@ class FilesystemToolConfig(Base):
     """Filesystem tool configuration."""
 
     safety_check: bool = True  # If false, skip path restriction checks
+    force_del_to_trash: bool = True  # delete tool only trashes; hides the permanent option
 
 
 class MCPServerConfig(Base):
@@ -187,6 +188,7 @@ class EnabledBuiltinToolsConfig(Base):
     grep_file: bool = True
     insert_lines: bool = True
     delete_lines: bool = True
+    delete: bool = True
     file_hex: bool = True
     load_image: bool = True
     parse_image: bool = True
