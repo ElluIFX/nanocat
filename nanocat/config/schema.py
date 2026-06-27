@@ -305,7 +305,7 @@ class TipsConfig(Base):
     # /model (no args) — {model_name}, {provider_name}
     model_info: str = (
         "## 🐈 Model info\n"
-        "- Main Model: {main_model}\n"
+        "- Agent Model: {agent_model}\n"
         "- Max Model: {max_model}\n"
         "- Assistant Model: {assistant_model}\n"
         "- Subagent Model: {subagent_model}\n"

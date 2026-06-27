@@ -1032,7 +1032,7 @@ class AgentLoop:
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self.tips.model_info.format(
-                    main_model=self.model,
+                    agent_model=self.model,
                     max_model=self._config.agents.defaults.max_model,
                     assistant_model=self.assistant_model,
                     subagent_model=self.subagent_model,
