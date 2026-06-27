@@ -145,7 +145,10 @@ class TuiConfig(Base):
 if _TEXTUAL_OK:
 
     class _ChatInput(TextArea):
-        """Multi-line chat input: Enter submits, Shift/Alt+Enter inserts a newline."""
+        """Multi-line chat input: Enter submits, Shift/Alt+Enter inserts a newline.
+
+        Up/Down navigate input history when the text is single-line (no newlines).
+        """
 
         _NEWLINE_KEYS = frozenset({"shift+enter", "alt+enter", "ctrl+enter", "ctrl+j"})
 
@@ -154,17 +157,50 @@ if _TEXTUAL_OK:
                 self.value = value
                 super().__init__()
 
+        def on_mount(self) -> None:
+            self._history: list[str] = []
+            self._hist_idx: int = -1   # -1 = live input, 0..n-1 = navigating
+            self._draft: str = ""      # saved text before entering history nav
+
         async def _on_key(self, event: events.Key) -> None:
             if event.key == "enter":
                 event.stop()
                 event.prevent_default()
-                self.post_message(self.Submitted(self.text))
+                text = self.text
+                if text.strip():
+                    self._history.append(text)
+                self._hist_idx = -1
+                self._draft = ""
+                self.post_message(self.Submitted(text))
                 return
             if event.key in self._NEWLINE_KEYS:
                 event.stop()
                 event.prevent_default()
                 self.insert("\n")
                 return
+            if event.key in ("up", "down") and "\n" not in self.text:
+                if event.key == "up" and self._history:
+                    event.stop()
+                    event.prevent_default()
+                    if self._hist_idx == -1:
+                        self._draft = self.text
+                        self._hist_idx = len(self._history) - 1
+                    elif self._hist_idx > 0:
+                        self._hist_idx -= 1
+                    self.text = self._history[self._hist_idx]
+                    self.move_cursor((0, len(self.text)))
+                    return
+                if event.key == "down" and self._hist_idx != -1:
+                    event.stop()
+                    event.prevent_default()
+                    self._hist_idx += 1
+                    if self._hist_idx >= len(self._history):
+                        self._hist_idx = -1
+                        self.text = self._draft
+                    else:
+                        self.text = self._history[self._hist_idx]
+                    self.move_cursor((0, len(self.text)))
+                    return
             await super()._on_key(event)
 
     class _QuitConfirm(ModalScreen[bool]):
