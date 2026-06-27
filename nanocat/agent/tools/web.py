@@ -68,7 +68,7 @@ def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
     the human-readable list)."""
     shown = items[:n]
     if not shown:
-        return tool_ok(query=query, count=0, content=f"No results for: {query}")
+        return tool_ok(count=0, content=f"No results for: {query}")
     lines = [f"Results for: {query}\n"]
     for i, item in enumerate(shown, 1):
         title = _normalize(_strip_tags(item.get("title", "")))
@@ -76,7 +76,7 @@ def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
         lines.append(f"{i}. {title}\n   {item.get('url', '')}")
         if snippet:
             lines.append(f"   {snippet}")
-    return tool_ok(query=query, count=len(shown), content="\n".join(lines))
+    return tool_ok(count=len(shown), content="\n".join(lines))
 
 
 class WebSearchTool(Tool):
@@ -310,13 +310,10 @@ class WebFetchTool(Tool):
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
             return tool_ok(
-                url=url,
-                finalUrl=data.get("url", url),
+                url=data.get("url", url),
                 status=r.status_code,
                 extractor="jina",
                 truncated=truncated,
-                length=len(text),
-                untrusted=True,
                 content=text,
             )
         except Exception as e:
@@ -373,13 +370,10 @@ class WebFetchTool(Tool):
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
             return tool_ok(
-                url=url,
-                finalUrl=str(r.url),
+                url=str(r.url),
                 status=r.status_code,
                 extractor=extractor,
                 truncated=truncated,
-                length=len(text),
-                untrusted=True,
                 content=text,
             )
         except httpx.ProxyError as e:

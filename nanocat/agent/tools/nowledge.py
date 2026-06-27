@@ -89,8 +89,6 @@ class MemorySearchTool(Tool):
 
     async def execute(self, query: str, limit: int = 5, **_: Any) -> str:
         results = await self._client.search_memories(query=query, limit=limit)
-        if not results:
-            return tool_ok(results=[], message="No memories found.")
         return tool_ok(results=[_clean_search_result(r) for r in results])
 
 
@@ -196,7 +194,7 @@ class MemoryAddTool(Tool):
         if not result:
             return tool_err("Failed to save memory (Nowledge Mem may be unavailable).")
         mem_id = result.get("id") or result.get("memory_id") or "unknown"
-        return tool_ok(id=mem_id, message=f"Memory saved (id: {mem_id}).")
+        return tool_ok(id=mem_id)
 
 
 class MemoryUpdateTool(Tool):
@@ -264,7 +262,7 @@ class MemoryUpdateTool(Tool):
         result = await self._client.update_memory(memory_id, **fields)
         if not result:
             return tool_err(f"Failed to update memory {memory_id} (Nowledge Mem may be unavailable).")
-        return tool_ok(id=memory_id, message=f"Memory {memory_id} updated.")
+        return tool_ok(id=memory_id, updated=True)
 
 
 class MemoryDeleteTool(Tool):
@@ -305,7 +303,7 @@ class MemoryDeleteTool(Tool):
     async def execute(self, memory_id: str, cascade_delete: bool = True, **_: Any) -> str:
         success = await self._client.delete_memory(memory_id, cascade_delete=cascade_delete)
         if success:
-            return tool_ok(id=memory_id, message=f"Memory {memory_id} deleted.")
+            return tool_ok(id=memory_id, deleted=True)
         return tool_err(f"Failed to delete memory {memory_id}.")
 
 
@@ -343,6 +341,4 @@ class ReadWorkingMemoryTool(Tool):
 
     async def execute(self, timeout: int = 5, **_: Any) -> str:
         content = await self._client.get_working_memory()
-        if not content:
-            return tool_ok(content="", message="Working memory is empty.")
-        return tool_ok(content=content)
+        return tool_ok(content=content or "")

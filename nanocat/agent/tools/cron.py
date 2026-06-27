@@ -49,15 +49,12 @@ class CronTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Schedule reminders and recurring tasks. All times are in the local system timezone "
-            "unless tz is specified. Results are returned as JSON.\n"
-            "- Reminder mode: task_description is sent as-is to the user when the job fires.\n"
-            "- Task mode: task_description is executed by the agent each time the job fires.\n"
-            "- One-time (at=): fires once then auto-deletes.\n"
-            "Scheduling: every_seconds=1200 (every 20 min), cron_expr='0 8 * * *' (daily 8am local time), "
-            "at='<ISO datetime with timezone offset, e.g. 2026-03-19T10:30:00+08:00>' (one-shot). "
-            "tz is required when using cron_expr and MUST always be provided explicitly — "
-            "e.g. 'Asia/Shanghai'. Never omit tz for cron_expr."
+            "Schedule reminders and recurring tasks (local timezone unless tz given).\n"
+            "- Reminder mode: task_description is sent to the user as-is when it fires.\n"
+            "- Task mode: the agent executes task_description on each fire.\n"
+            "Scheduling: every_seconds=1200 (interval), cron_expr='0 8 * * *' (needs tz, "
+            "e.g. 'Asia/Shanghai'), at='2026-03-19T10:30:00+08:00' (one-shot, auto-deletes). "
+            "tz is mandatory for cron_expr."
         )
 
     @property

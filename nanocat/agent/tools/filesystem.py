@@ -250,12 +250,7 @@ class LoadImageTool(_FsTool):
         # vision model here — return an error so the agent explicitly routes the
         # image through parse_image instead.
         if self._is_vision_lacking_model():
-            return _err(
-                "The active model has no native vision support; load_image cannot "
-                "inline this image.",
-                "Call parse_image on this path to obtain a text description via a "
-                "vision-capable model instead.",
-            )
+            return _err("Active model lacks native vision.", "Use parse_image instead.")
 
         try:
             raw = fp.read_bytes()
@@ -268,9 +263,9 @@ class LoadImageTool(_FsTool):
                 if len(raw) > self._MAX_BYTES:
                     size_mb = len(raw) / (1024 * 1024)
                     return _err(
-                        f"File too large: {path} ({size_mb:.1f} MB). Maximum supported "
-                        f"size is {self._MAX_BYTES // (1024 * 1024)} MB.",
-                        "Use load_image(path, compress=True) to read it as a compressed image.",
+                        f"File too large: {path} ({size_mb:.1f} MB > "
+                        f"{self._MAX_BYTES // (1024 * 1024)} MB).",
+                        "Retry with compress=true.",
                     )
                 mime = detect_image_mime(raw) or mimetypes.guess_type(str(fp))[0]
 
@@ -751,7 +746,6 @@ class GrepFileTool(_FsTool):
         truncated = match_count > max_matches
         return tool_ok(
             path=str(fp),
-            pattern=pattern,
             matches=match_count if not truncated else f"{max_matches}+",
             truncated=truncated,
             results=results,

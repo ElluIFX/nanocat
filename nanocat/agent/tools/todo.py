@@ -120,15 +120,10 @@ class TodoTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Manage structured todo lists for multi-step tasks within the current session. "
-            "IMPORTANT USAGE RULES:\n"
-            "- Whenever the user requests a task with 2 or more steps, you MUST call todo with action=create "
-            "to plan all steps BEFORE executing anything.\n"
-            "- Mark each step INPROGRESS before starting it, and COMPLETED immediately after finishing.\n"
-            "- Never interrupt the pipeline to ask the user what to do next — update the todo and keep going.\n"
-            "- Call action=complete when all tasks are finished to close the list.\n"
-            "- Notify user when necessary, typically when create.\n\n"
-            "Actions: create | check | update | append | complete"
+            "Manage todo lists for multi-step tasks in this session. For any task with "
+            "2+ steps you MUST create a list before executing, mark each step INPROGRESS "
+            "then COMPLETED, and keep going without asking what to do next. "
+            "Actions: create | check | update | append | complete."
         )
 
     @property
@@ -211,12 +206,7 @@ class TodoTool(Tool):
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
-        return tool_ok(
-            id=todo.id,
-            name=name,
-            task_count=len(tasks),
-            message=f"Created todo list '{name}' with ID {todo.id} ({len(tasks)} tasks)",
-        )
+        return tool_ok(id=todo.id, name=name, task_count=len(tasks))
 
     async def _check(self, id: str | None = None, **_: Any) -> str:
         if not id:
@@ -249,21 +239,10 @@ class TodoTool(Tool):
         if notify:
             await self._notify(todo)
         if status != "COMPLETED":
-            return tool_ok(index=index, status=status, message=f"Task {index} updated to {status}")
+            return tool_ok(index=index, status=status)
         if index + 1 >= len(todo.tasks):
-            return tool_ok(
-                index=index,
-                status=status,
-                all_completed=True,
-                message=f"Task {index} updated to COMPLETED, all tasks completed",
-            )
-        return tool_ok(
-            index=index,
-            status=status,
-            next_index=index + 1,
-            message=f"Task {index} updated to COMPLETED, next task is #{index + 1} "
-            f"{todo.tasks[index + 1].task}",
-        )
+            return tool_ok(index=index, status=status, all_completed=True)
+        return tool_ok(index=index, status=status, next_index=index + 1)
 
     async def _append(
         self, id: str | None = None, task: str | None = None, notify: bool = False, **_: Any
@@ -278,7 +257,7 @@ class TodoTool(Tool):
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
-        return tool_ok(index=new_index, message=f"Appended task {new_index}: {task}")
+        return tool_ok(index=new_index)
 
     async def _complete(self, id: str | None = None, notify: bool = False, **_: Any) -> str:
         if not id:
@@ -294,4 +273,4 @@ class TodoTool(Tool):
         store.pop(id, None)
         if notify:
             await self._notify(todo)
-        return tool_ok(message=f"Todo list '{todo.name}' completed and removed")
+        return tool_ok(completed=todo.name)

@@ -97,12 +97,10 @@ class MessageTool(Tool):
             await self._send_callback(msg)
             if channel == self._default_channel and chat_id == self._default_chat_id:
                 self._sent_in_turn = True
-            media_info = f" with {len(attachments)} attachments" if attachments else ""
             return tool_ok(
                 channel=channel,
                 chat_id=chat_id,
                 attachments=len(attachments) if attachments else 0,
-                message=f"Message sent to {channel}:{chat_id}{media_info}",
             )
         except Exception as e:
             return tool_err(f"Error sending message: {str(e)}")
