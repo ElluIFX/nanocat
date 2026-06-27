@@ -795,30 +795,13 @@ class AgentLoop:
                     if tc.name not in _no_truncate and _max_chars > 0:
                         _str = result if isinstance(result, str) else str(result)
                         if len(_str) > _max_chars:
-                            tmp = tempfile.NamedTemporaryFile(
-                                mode="w", suffix=".txt", delete=False, encoding="utf-8"
-                            )
-                            tmp.write(_str)
-                            tmp.close()
-                            _head = max(1, _max_chars // 10)
-                            result = json.dumps(
-                                {
-                                    "truncated": True,
-                                    "message": f"Output exceeds {_max_chars} chars limit",
-                                    "first_10pct_chars": _str[:_head],
-                                    "last_10pct_chars": _str[-_head:],
-                                    "total_lines": _str.count("\n") + 1,
-                                    "total_chars": len(_str),
-                                    "full_output": tmp.name,
-                                },
-                                ensure_ascii=False,
-                            )
+                            result, _tmp = self._truncate_tool_result(_str, _max_chars)
                             logger.info(
-                                "[{}] Tool {} result truncated: {} → {}",
+                                "[{}] Tool {} result truncated: {} chars → {}",
                                 _log_ids[idx],
                                 tc.name,
                                 len(_str),
-                                tmp.name,
+                                _tmp,
                             )
 
                     messages = self.context.add_tool_result(messages, tc.id, tc.name, result)
@@ -1307,6 +1290,71 @@ class AgentLoop:
         except (ValueError, TypeError):
             return False
         return isinstance(obj, dict) and obj.get("ok") is False
+
+    @staticmethod
+    def _truncate_tool_result(result_str: str, max_chars: int) -> tuple[str, str | None]:
+        """Shrink an oversized tool result.
+
+        When the result is a JSON object, only its bulky *string* fields are
+        replaced by a per-field truncation marker (structure and small fields
+        stay intact, so ``ok``/``error``/``status`` remain readable while a giant
+        ``content``/``stdout``/``body`` is spilled to its own temp file). For
+        non-JSON / non-object results — or if field truncation can't get under
+        budget — the whole string is truncated head+tail to one temp file.
+
+        Returns ``(possibly_shrunk_result, primary_temp_path | None)``.
+        """
+        head = max(1, max_chars // 10)
+
+        def _dump(text: str) -> str:
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8"
+            )
+            tmp.write(text)
+            tmp.close()
+            return tmp.name
+
+        # Field-level: truncate only string fields large enough that replacing
+        # them with a head+tail marker actually shrinks the payload.
+        try:
+            obj = json.loads(result_str)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict):
+            field_cap = head * 4  # > 2*head preview + marker overhead, so truncation shrinks
+            spilled: str | None = None
+            for key, val in obj.items():
+                if isinstance(val, str) and len(val) > field_cap:
+                    path = _dump(val)
+                    spilled = spilled or path
+                    obj[key] = {
+                        "truncated": True,
+                        "total_chars": len(val),
+                        "total_lines": val.count("\n") + 1,
+                        "first_chars": val[:head],
+                        "last_chars": val[-head:],
+                        "full_output": path,
+                    }
+            if spilled is not None:
+                shrunk = json.dumps(obj, ensure_ascii=False)
+                if len(shrunk) <= max_chars:
+                    return shrunk, spilled
+                # else: fall through to whole-output truncation (rare)
+
+        path = _dump(result_str)
+        whole = json.dumps(
+            {
+                "truncated": True,
+                "message": f"Output exceeds {max_chars} chars limit",
+                "first_10pct_chars": result_str[:head],
+                "last_10pct_chars": result_str[-head:],
+                "total_lines": result_str.count("\n") + 1,
+                "total_chars": len(result_str),
+                "full_output": path,
+            },
+            ensure_ascii=False,
+        )
+        return whole, path
 
     @staticmethod
     def _format_session_turns(session: Session, turns: int = 3, width: int = 46) -> str:
