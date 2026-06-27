@@ -23,6 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+import re
+import uuid
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -38,6 +41,7 @@ try:
     from rich.highlighter import ReprHighlighter
     from rich.markdown import Markdown
     from rich.panel import Panel
+    from rich.style import Style
     from rich.table import Table
     from rich.text import Text
     from textual import events, on
@@ -122,6 +126,45 @@ def _flatten_content(content: Any) -> str:
     return str(content) if content else ""
 
 
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def _grab_clipboard_images() -> list[str]:
+    """Return file paths for any image currently on the OS clipboard.
+
+    A raw bitmap (e.g. from a screenshot tool) is written as PNG into the TUI
+    media dir; copied image *files* (from a file manager) are used in place.
+    Returns [] when the clipboard holds no image (plain text, empty, …).
+
+    ponytail: ImageGrab covers Windows/macOS out of the box; on Linux it needs
+    xclip/wl-paste installed — acceptable, the tool just no-ops without them.
+    """
+    try:
+        from PIL import Image, ImageGrab
+
+        from nanocat.config.paths import get_media_dir
+    except Exception:
+        return []
+    try:
+        data = ImageGrab.grabclipboard()
+    except Exception:
+        return []
+    if isinstance(data, Image.Image):
+        out = get_media_dir("tui") / f"paste_{uuid.uuid4().hex[:8]}.png"
+        try:
+            data.save(out, "PNG")
+        except Exception:
+            return []
+        return [str(out)]
+    if isinstance(data, list):
+        return [
+            str(p)
+            for f in data
+            if (p := Path(str(f))).is_file() and p.suffix.lower() in _IMAGE_EXTS
+        ]
+    return []
+
+
 def _summarize_args(args: Any, limit: int = 64) -> str:
     """One-line preview of tool-call arguments for the chat pane."""
     if not isinstance(args, dict) or not args:
@@ -161,6 +204,133 @@ if _TEXTUAL_OK:
             self._history: list[str] = []
             self._hist_idx: int = -1   # -1 = live input, 0..n-1 = navigating
             self._draft: str = ""      # saved text before entering history nav
+            self._pending_media: list[str] = []  # clipboard images staged for the next send
+            self._reconciling = False  # guard against the text-rewrite re-entering reconcile
+
+        def _attach_clipboard_image(self) -> bool:
+            """If the OS clipboard holds an image, stage it and insert an
+            ``[Image N]`` placeholder. Returns True when an image was attached
+            (caller should swallow the paste); False lets normal text paste run."""
+            paths = _grab_clipboard_images()
+            if not paths:
+                return False
+            for path in paths:
+                self._pending_media.append(path)
+                self.insert(f"[Image {len(self._pending_media)}] ")
+            return True
+
+        def take_pending_media(self) -> list[str]:
+            """Return staged media whose ``[Image N]`` placeholder is still in the
+            text (so deleting a placeholder drops its image), then reset."""
+            text = self.text
+            media = [
+                p for i, p in enumerate(self._pending_media, 1) if f"[Image {i}]" in text
+            ]
+            self._pending_media = []
+            return media
+
+        def _reconcile_images(self) -> None:
+            """After an edit, drop images whose ``[Image N]`` placeholder was
+            deleted from the text and renumber the survivors so the visible ids
+            stay contiguous (delete 2 of 1,2,3 → remaining become 1,2).
+
+            ``_pending_media`` is the source of truth; only its still-referenced
+            entries survive, in buffer order. Runs on every change but rewrites
+            the text only when a placeholder actually vanished."""
+            if self._reconciling or not self._pending_media:
+                return
+            text = self.text
+            n = len(self._pending_media)
+            present = {
+                int(m.group(1))
+                for m in re.finditer(r"\[Image (\d+)\]", text)
+                if 1 <= int(m.group(1)) <= n
+            }
+            if len(present) == n:
+                return  # every staged image still referenced — nothing deleted
+            survivors = [i for i in range(1, n + 1) if i in present]
+            remap = {old: new for new, old in enumerate(survivors, 1)}
+            self._pending_media = [self._pending_media[old - 1] for old in survivors]
+            new_text = re.sub(
+                r"\[Image (\d+)\]",
+                lambda m: f"[Image {remap[int(m.group(1))]}]"
+                if int(m.group(1)) in remap
+                else m.group(0),
+                text,
+            )
+            if new_text == text:
+                return  # buffer trimmed; numbering already contiguous
+            cursor = self.cursor_location  # renumbered tokens sit after it → col stays valid
+            self._reconciling = True
+            try:
+                self.text = new_text
+                self.move_cursor(cursor)
+            finally:
+                self._reconciling = False
+
+        def _active_image_spans(self, line: str) -> list[tuple[int, int]]:
+            """Char spans of *real* [Image N] tokens on a line — only those whose
+            N indexes a currently staged image. A hand-typed [Image 7] with no
+            backing media is left as ordinary text (not highlighted, not atomic,
+            not mapped on submit). ``_pending_media`` is the single source of truth.
+            """
+            n_staged = len(self._pending_media)
+            return [
+                (m.start(), m.end())
+                for m in re.finditer(r"\[Image (\d+)\]", line)
+                if 1 <= int(m.group(1)) <= n_staged
+            ]
+
+        def _build_highlight_map(self) -> None:
+            # Runs after every edit; tint real [Image N] placeholders blue so they
+            # read as attachments, not prose. render_line wants BYTE offsets, so
+            # re-derive spans from the UTF-8 line (the placeholder is ASCII, so it
+            # lands on clean codepoint boundaries even when CJK text precedes it).
+            super()._build_highlight_map()
+            theme = getattr(self, "_theme", None)  # unset during __init__'s first call
+            if theme is None:
+                return
+            theme.syntax_styles.setdefault(
+                "nanocat_image", Style(color="bright_blue", bold=True)
+            )
+            n_staged = len(self._pending_media)
+            for row, line in enumerate(self.document.lines):
+                for m in re.finditer(rb"\[Image (\d+)\]", line.encode("utf-8")):
+                    if 1 <= int(m.group(1)) <= n_staged:
+                        self._highlights[row].append((m.start(), m.end(), "nanocat_image"))
+
+        # Treat real [Image N] tokens as atomic: left/right cursor movement and
+        # backspace/delete (which both derive their target from these two hooks)
+        # jump over / remove the whole placeholder instead of one char at a time.
+        # Cursor columns are character indices, so str-regex spans align directly.
+        def get_cursor_left_location(self) -> "tuple[int, int]":
+            row, col = self.cursor_location
+            for start, end in self._active_image_spans(self.document.lines[row]):
+                if start < col <= end:
+                    return (row, start)
+            return super().get_cursor_left_location()
+
+        def get_cursor_right_location(self) -> "tuple[int, int]":
+            row, col = self.cursor_location
+            for start, end in self._active_image_spans(self.document.lines[row]):
+                if start <= col < end:
+                    return (row, end)
+            return super().get_cursor_right_location()
+
+        async def _on_paste(self, event: events.Paste) -> None:
+            # Terminal bracketed paste: an image on the clipboard yields no text,
+            # so peek the OS clipboard first and attach it instead of inserting.
+            if self._attach_clipboard_image():
+                event.stop()
+                event.prevent_default()
+                return
+            await super()._on_paste(event)
+
+        def action_paste(self) -> None:
+            # Ctrl+V binding: same image-first check before the normal paste.
+            if self._attach_clipboard_image():
+                return
+            super().action_paste()
 
         async def _on_key(self, event: events.Key) -> None:
             if event.key == "enter":
@@ -394,6 +564,9 @@ if _TEXTUAL_OK:
 
         @on(TextArea.Changed, "#prompt")
         def _on_prompt_changed(self, event: "TextArea.Changed") -> None:
+            # Drop deleted images from the buffer + renumber survivors first, so
+            # the button state reflects the reconciled text.
+            self.query_one("#prompt", _ChatInput)._reconcile_images()
             # While busy, the action button reflects whether there's text to send:
             # text → yellow "Steer" (interject), empty → red "Stop" (abort).
             self._refresh_busy_button()
@@ -407,13 +580,14 @@ if _TEXTUAL_OK:
 
         def _submit_current(self) -> None:
             inp = self.query_one("#prompt", _ChatInput)
+            media = inp.take_pending_media()  # read before clearing (filters by placeholder)
             text = inp.text.strip()
             inp.text = ""
-            if not text:
+            if not text and not media:
                 return
-            self._write_user(text)
+            self._write_user(text or "[image]")
             self._set_busy(True)
-            self._channel.submit_threadsafe(text)
+            self._channel.submit_threadsafe(text, media=media or None)
 
         def _set_busy(self, value: bool) -> None:
             self._busy = value
@@ -652,14 +826,16 @@ class TuiChannel(BaseChannel):
         """Attach the background runtime loop used to publish inbound messages."""
         self._runtime_loop = loop
 
-    def submit_threadsafe(self, text: str) -> None:
+    def submit_threadsafe(self, text: str, media: list[str] | None = None) -> None:
         """Forward terminal input to the agent from the UI thread (non-blocking)."""
         loop = self._runtime_loop
         if loop is None:
             logger.warning("TUI received input before the runtime loop was bound")
             return
         asyncio.run_coroutine_threadsafe(
-            self._handle_message(sender_id="local", chat_id="local", content=text),
+            self._handle_message(
+                sender_id="local", chat_id="local", content=text, media=media
+            ),
             loop,
         )
 
