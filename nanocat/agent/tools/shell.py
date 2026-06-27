@@ -122,6 +122,14 @@ class ExecTool(Tool):
                     "minimum": 1,
                     "maximum": 600,
                 },
+                "shell": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "subprocess shell=. True (default): via system shell "
+                        "(pipes/redirects/builtins). False: direct exec of argv-split command."
+                    ),
+                },
             },
             "required": ["command"],
         }
@@ -131,6 +139,7 @@ class ExecTool(Tool):
         command: str,
         working_dir: str | None = None,
         timeout: int | None = None,
+        shell: bool = True,
         **kwargs: Any,
     ) -> str:
         from nanocat.security import safety_bypass
@@ -157,13 +166,30 @@ class ExecTool(Tool):
 
         try:
             t_start = time.monotonic()
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            )
+            if shell:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
+            else:
+                import shlex
+
+                argv = shlex.split(command)
+                if not argv:
+                    return json.dumps(
+                        {"ok": False, "stdout": "", "stderr": "empty command", "returncode": -1},
+                        ensure_ascii=False,
+                    )
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
 
             try:
                 stdout, stderr = await asyncio.wait_for(
