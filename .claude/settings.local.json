@@ -6,5 +6,6 @@
       "Bash(python -m ruff check \"c:/Users/Ellu/.nanobot/nanobot/nanocat\")",
       "Bash(ruff check:*)"
     ]
-  }
+  },
+  "outputStyle": "default"
 }
