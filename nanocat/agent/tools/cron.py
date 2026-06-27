@@ -10,11 +10,6 @@ from nanocat.cron.service import CronService
 from nanocat.cron.types import CronSchedule
 
 
-def _local_tz() -> ZoneInfo:
-    """Return the local system timezone as a ZoneInfo object."""
-    return datetime.now().astimezone().tzinfo
-
-
 def _ms_to_local_iso(ms: int) -> str:
     """Convert epoch ms to local-timezone ISO string with offset."""
     return datetime.fromtimestamp(ms / 1000).astimezone().isoformat()
@@ -139,6 +134,24 @@ class CronTool(Tool):
             return tool_err("task_description is required for add")
         if not self._channel or not self._chat_id:
             return tool_err("no session context (channel/chat_id)")
+
+        # Exactly one schedule must be given; they are mutually exclusive.
+        provided = [
+            field
+            for field, given in (
+                ("every_seconds", every_seconds is not None),
+                ("cron_expr", bool(cron_expr)),
+                ("at", bool(at)),
+            )
+            if given
+        ]
+        if len(provided) > 1:
+            return tool_err(f"provide exactly one of every_seconds/cron_expr/at, not {provided}")
+        if not provided:
+            return tool_err("one of every_seconds, cron_expr, or at is required")
+        if every_seconds is not None and every_seconds <= 0:
+            return tool_err("every_seconds must be a positive integer")
+
         if tz and not cron_expr:
             return tool_err("tz can only be used with cron_expr")
         if tz:
@@ -175,6 +188,8 @@ class CronTool(Tool):
                     f"datetime '{at}' has no timezone offset. "
                     "Provide an explicit offset, e.g. '2026-03-19T10:30:00+08:00'."
                 )
+            if dt.timestamp() <= datetime.now().timestamp():
+                return tool_err(f"'at' time '{at}' is in the past")
             at_ms = int(dt.timestamp() * 1000)
             schedule = CronSchedule(kind="at", at_ms=at_ms)
             delete_after = True

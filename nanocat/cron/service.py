@@ -20,7 +20,10 @@ def _now_ms() -> int:
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     """Compute next run time in ms."""
     if schedule.kind == "at":
-        return schedule.at_ms if schedule.at_ms and schedule.at_ms > now_ms else None
+        # Return at_ms even when it is already in the past: a one-shot whose time
+        # passed during downtime then fires once on restart (catch-up) and is
+        # cleaned up by _execute_job, instead of silently becoming a dead job.
+        return schedule.at_ms
 
     if schedule.kind == "every":
         if not schedule.every_ms or schedule.every_ms <= 0:
@@ -75,6 +78,7 @@ class CronService:
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
         self._running = False
+        self._timer_running = False  # guard against overlapping _on_timer batches
 
     def _load_store(self) -> CronStore:
         """Load jobs from disk. Reloads automatically if file was modified externally."""
@@ -108,7 +112,7 @@ class CronService:
                                 message=j["payload"].get("message", ""),
                                 channel=j["payload"].get("channel"),
                                 to=j["payload"].get("to"),
-                                notify_mode=j["payload"].get("notifyMode"),
+                                notify_mode=j["payload"].get("notifyMode") or "smart",
                             ),
                             state=CronJobState(
                                 next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
@@ -224,30 +228,38 @@ class CronService:
         delay_s = delay_ms / 1000
 
         async def tick():
-            await asyncio.sleep(delay_s)
+            try:
+                await asyncio.sleep(delay_s)
+            except asyncio.CancelledError:
+                return
+            # Run due jobs in a *detached* task so that re-arming the timer (from a
+            # concurrent add/remove or the next tick) only ever cancels a sleeping
+            # tick, never an in-flight job execution.
             if self._running:
-                await self._on_timer()
+                asyncio.create_task(self._on_timer())
 
         self._timer_task = asyncio.create_task(tick())
 
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
-        self._load_store()
-        if not self._store:
-            return
-
-        now = _now_ms()
-        due_jobs = [
-            j
-            for j in self._store.jobs
-            if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
-        ]
-
-        for job in due_jobs:
-            await self._execute_job(job)
-
-        self._save_store()
-        self._arm_timer()
+        if self._timer_running:
+            return  # a prior batch is still running; its re-arm will catch up
+        self._timer_running = True
+        try:
+            self._load_store()
+            if self._store:
+                now = _now_ms()
+                due_jobs = [
+                    j
+                    for j in self._store.jobs
+                    if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
+                ]
+                for job in due_jobs:
+                    await self._execute_job(job)
+                self._save_store()
+        finally:
+            self._timer_running = False
+            self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
@@ -255,9 +267,8 @@ class CronService:
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
         try:
-            response = None
             if self.on_job:
-                response = await self.on_job(job)
+                await self.on_job(job)
 
             job.state.last_status = "ok"
             job.state.last_error = None
@@ -273,14 +284,30 @@ class CronService:
 
         # Handle one-shot jobs
         if job.schedule.kind == "at":
-            if job.delete_after_run:
+            if job.delete_after_run and self._store:
                 self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
             else:
                 job.enabled = False
                 job.state.next_run_at_ms = None
         else:
-            # Compute next run
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+            job.state.next_run_at_ms = self._next_repeat_run(job)
+
+    @staticmethod
+    def _next_repeat_run(job: CronJob) -> int | None:
+        """Next run time for a repeating job.
+
+        ``every`` is anchored to the scheduled (due) time rather than to the
+        execution-finish time, so slow runs don't accumulate as cadence drift;
+        intervals missed while a run was in progress are skipped to the next
+        future tick. ``cron`` defers to croniter from now.
+        """
+        sched = job.schedule
+        if sched.kind == "every" and sched.every_ms and sched.every_ms > 0:
+            base = job.state.next_run_at_ms or _now_ms()  # the time this run was due
+            now = _now_ms()
+            missed = max(0, (now - base) // sched.every_ms)
+            return base + (missed + 1) * sched.every_ms
+        return _compute_next_run(sched, _now_ms())
 
     # ========== Public API ==========
 
