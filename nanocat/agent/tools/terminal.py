@@ -398,8 +398,6 @@ class TerminalManager:
         return json.dumps({"ok": True, "closed": session_id}, ensure_ascii=False)
 
     def list(self) -> str:
-        if not self._sessions:
-            return json.dumps([], ensure_ascii=False)
         items = []
         for sid, s in self._sessions.items():
             items.append(
@@ -410,7 +408,7 @@ class TerminalManager:
                 }
                 | self._describe_item(s)
             )
-        return json.dumps(items, ensure_ascii=False)
+        return json.dumps({"ok": True, "sessions": items}, ensure_ascii=False)
 
     def context_block(self) -> str | None:
         """One compact line per session for the per-turn CONTEXT block. Ended-but-

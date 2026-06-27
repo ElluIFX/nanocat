@@ -1,7 +1,26 @@
 """Base class for agent tools."""
 
+import json
 from abc import ABC, abstractmethod
 from typing import Any
+
+
+def tool_ok(**fields: Any) -> str:
+    """JSON success envelope shared by every tool: ``{"ok": true, ...fields}``.
+
+    Content-bearing tools put their payload under a ``content`` key alongside any
+    metadata (e.g. ``tool_ok(content=text, path=p, truncated=False)``)."""
+    return json.dumps({"ok": True, **fields}, ensure_ascii=False)
+
+
+def tool_err(error: str, hint: str | None = None, **fields: Any) -> str:
+    """JSON error envelope shared by every tool: ``{"ok": false, "error": ...,
+    "hint"?: ..., ...fields}``."""
+    payload: dict[str, Any] = {"ok": False, "error": error}
+    if hint:
+        payload["hint"] = hint
+    payload.update(fields)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 class Tool(ABC):

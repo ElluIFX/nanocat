@@ -10,13 +10,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 from nanocat.utils.helpers import detect_image_mime
 
-_APPROVE_HINT = (
-    "\nIf you believe this action is necessary, explain the reason to the user "
-    "and ask them to use /approve to temporarily bypass this check."
-)
+_err = tool_err  # local alias to keep error call sites short
 
 
 def _resolve_path(
@@ -144,9 +141,9 @@ class ReadFileTool(_FsTool):
         try:
             fp = self._resolve(path)
             if not fp.exists():
-                return f"Error: File not found: {path}"
+                return _err(f"File not found: {path}")
             if not fp.is_file():
-                return f"Error: Not a file: {path}"
+                return _err(f"Not a file: {path}")
 
             all_lines = fp.read_text(encoding=encoding).splitlines()
             total = len(all_lines)
@@ -154,9 +151,9 @@ class ReadFileTool(_FsTool):
             if offset < 1:
                 offset = 1
             if total == 0:
-                return json.dumps({"path": str(fp), "total_lines": 0, "content": ""})
+                return tool_ok(path=str(fp), total_lines=0, content="")
             if offset > total:
-                return f"Error: offset {offset} is beyond end of file ({total} lines)"
+                return _err(f"offset {offset} is beyond end of file ({total} lines)")
 
             start = offset - 1
             end = min(start + (limit or self._DEFAULT_LIMIT), total)
@@ -173,26 +170,24 @@ class ReadFileTool(_FsTool):
                 end = start + len(trimmed)
                 content = "\n".join(trimmed)
 
-            return json.dumps(
-                {
-                    "path": str(fp),
-                    "total_lines": total,
-                    "showing": [offset, end],
-                    "truncated": end < total,
-                    "next_offset": end + 1 if end < total else None,
-                    "content": content,
-                },
-                ensure_ascii=False,
+            return tool_ok(
+                path=str(fp),
+                total_lines=total,
+                showing=[offset, end],
+                truncated=end < total,
+                next_offset=end + 1 if end < total else None,
+                content=content,
             )
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except (UnicodeDecodeError, LookupError) as e:
-            return (
-                f"Error: cannot decode {path} as {encoding!r}: {e}. Try another encoding "
-                f"(e.g. encoding='gbk' for Simplified Chinese, 'big5', or 'latin-1')."
+            return _err(
+                f"cannot decode {path} as {encoding!r}: {e}",
+                "Try another encoding (e.g. encoding='gbk' for Simplified Chinese, "
+                "'big5', or 'latin-1').",
             )
         except Exception as e:
-            return f"Error reading file: {e}"
+            return _err(f"Error reading file: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +196,7 @@ class ReadFileTool(_FsTool):
 
 
 class LoadImageTool(_FsTool):
-    """Load image content from file and include EXIF metadata.
-
-    When the currently-active model lacks native vision (e.g. DeepSeek) the
-    tool delegates to a vision-capable model via ParseImageTool's backend.
-    """
+    """Load image content from file and include EXIF metadata."""
 
     _MAX_BYTES = 12 * 1024 * 1024  # 12MB
 
@@ -225,7 +216,8 @@ class LoadImageTool(_FsTool):
     def description(self) -> str:
         return (
             "Load content of an image file into your context, including its EXIF metadata. "
-            "Use compress=True to downscale and compress oversized images before loading."
+            "Use compress=True to downscale and compress oversized images before loading. "
+            "ONLY AVAILABLE FOR VISION-CAPABLE MODEL."
         )
 
     @property
@@ -248,39 +240,42 @@ class LoadImageTool(_FsTool):
     async def execute(
         self, path: str, compress: bool = False, **kwargs: Any
     ) -> str | list[dict[str, Any]]:
-        from nanocat.agent.tools.vision import parse_image_via_model
-
         fp = self._resolve(path)
         if not fp.exists():
-            return f"Error: File not found: {path}"
+            return _err(f"File not found: {path}")
         if not fp.is_file():
-            return f"Error: Not a file: {path}"
+            return _err(f"Not a file: {path}")
 
-        # When the current model lacks native vision, delegate to a vision model.
+        # The active model lacks native vision: do NOT silently fall back to a
+        # vision model here — return an error so the agent explicitly routes the
+        # image through parse_image instead.
         if self._is_vision_lacking_model():
-            return await parse_image_via_model(
-                str(fp), str(self._workspace) if self._workspace else None
+            return _err(
+                "The active model has no native vision support; load_image cannot "
+                "inline this image.",
+                "Call parse_image on this path to obtain a text description via a "
+                "vision-capable model instead.",
             )
 
         try:
             raw = fp.read_bytes()
             if not raw:
-                return f"Error: Empty file: {path}"
+                return _err(f"Empty file: {path}")
 
             if compress:
                 raw, mime = self._compress_image(raw)
             else:
                 if len(raw) > self._MAX_BYTES:
                     size_mb = len(raw) / (1024 * 1024)
-                    return (
-                        f"Error: File too large: {path} ({size_mb:.1f} MB). "
-                        f"Maximum supported size is {self._MAX_BYTES // (1024 * 1024)} MB. "
-                        f"Use load_image(path, compress=True) to read it as compressed image."
+                    return _err(
+                        f"File too large: {path} ({size_mb:.1f} MB). Maximum supported "
+                        f"size is {self._MAX_BYTES // (1024 * 1024)} MB.",
+                        "Use load_image(path, compress=True) to read it as a compressed image.",
                     )
                 mime = detect_image_mime(raw) or mimetypes.guess_type(str(fp))[0]
 
             if not mime or not mime.startswith("image/"):
-                return f"Error: Unsupported or non-image file: {path}"
+                return _err(f"Unsupported or non-image file: {path}")
 
             exif = self._extract_exif(fp)
             b64 = base64.b64encode(raw).decode("ascii")
@@ -291,9 +286,9 @@ class LoadImageTool(_FsTool):
                 {"type": "text", "text": f"Image EXIF:\n{meta_text}"},
             ]
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except Exception as e:
-            return f"Error reading image file: {e}"
+            return _err(f"Error reading image file: {e}")
 
     @staticmethod
     def _compress_image(raw: bytes, max_edge: int = 3840, quality: int = 95) -> tuple[bytes, str]:
@@ -375,11 +370,11 @@ class WriteFileTool(_FsTool):
             fp = self._resolve(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
-            return json.dumps({"path": str(fp), "bytes_written": len(content.encode("utf-8"))})
+            return tool_ok(path=str(fp), bytes_written=len(content.encode("utf-8")))
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except Exception as e:
-            return f"Error writing file: {e}"
+            return _err(f"Error writing file: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +465,7 @@ class EditFileTool(_FsTool):
         try:
             fp = self._resolve(path)
             if not fp.exists():
-                return f"Error: File not found: {path}"
+                return _err(f"File not found: {path}")
 
             raw = fp.read_bytes()
             uses_crlf = b"\r\n" in raw
@@ -479,11 +474,14 @@ class EditFileTool(_FsTool):
             # Line-range replace mode
             if line_start is not None or line_end is not None:
                 if line_start is None or line_end is None:
-                    return "Error: both line_start and line_end are required for line-range replace"
+                    return _err("both line_start and line_end are required for line-range replace")
                 lines = content.splitlines(keepends=True)
                 total = len(lines)
                 if line_start < 1 or line_end > total or line_start > line_end:
-                    return f"Error: line range {line_start}-{line_end} out of bounds (file has {total} lines)"
+                    return _err(
+                        f"line range {line_start}-{line_end} out of bounds "
+                        f"(file has {total} lines)"
+                    )
                 norm_new = new_text.replace("\r\n", "\n")
                 if norm_new and not norm_new.endswith("\n"):
                     norm_new += "\n"
@@ -492,18 +490,18 @@ class EditFileTool(_FsTool):
                 if uses_crlf:
                     new_content = new_content.replace("\n", "\r\n")
                 fp.write_bytes(new_content.encode("utf-8"))
-                return json.dumps({"path": str(fp), "lines_replaced": [line_start, line_end]})
+                return tool_ok(path=str(fp), lines_replaced=[line_start, line_end])
 
             # Text-match replace mode
             if old_text is None:
-                return "Error: old_text is required when not using line_start/line_end"
+                return _err("old_text is required when not using line_start/line_end")
             match, count = _find_match(content, old_text.replace("\r\n", "\n"))
             if match is None:
                 return self._not_found_msg(old_text, content, path)
             if count > 1 and not replace_all:
-                return (
-                    f"Warning: old_text appears {count} times. "
-                    "Provide more context to make it unique, or set replace_all=true."
+                return _err(
+                    f"old_text appears {count} times.",
+                    "Provide more context to make it unique, or set replace_all=true.",
                 )
             norm_new = new_text.replace("\r\n", "\n")
             replacements = count if replace_all else 1
@@ -515,11 +513,11 @@ class EditFileTool(_FsTool):
             if uses_crlf:
                 new_content = new_content.replace("\n", "\r\n")
             fp.write_bytes(new_content.encode("utf-8"))
-            return json.dumps({"path": str(fp), "replacements": replacements})
+            return tool_ok(path=str(fp), replacements=replacements)
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except Exception as e:
-            return f"Error editing file: {e}"
+            return _err(f"Error editing file: {e}")
 
     @staticmethod
     def _not_found_msg(old_text: str, content: str, path: str) -> str:
@@ -543,9 +541,12 @@ class EditFileTool(_FsTool):
                     lineterm="",
                 )
             )
-            return f"Error: old_text not found in {path}.\nBest match ({best_ratio:.0%} similar) at line {best_start + 1}:\n{diff}"
-        return (
-            f"Error: old_text not found in {path}. No similar text found. Verify the file content."
+            return _err(
+                f"old_text not found in {path}.",
+                f"Best match ({best_ratio:.0%} similar) at line {best_start + 1}:\n{diff}",
+            )
+        return _err(
+            f"old_text not found in {path}. No similar text found. Verify the file content."
         )
 
 
@@ -614,9 +615,9 @@ class ListDirTool(_FsTool):
         try:
             dp = self._resolve(path)
             if not dp.exists():
-                return f"Error: Directory not found: {path}"
+                return _err(f"Directory not found: {path}")
             if not dp.is_dir():
-                return f"Error: Not a directory: {path}"
+                return _err(f"Not a directory: {path}")
 
             cap = max_entries or self._DEFAULT_MAX
             items: list[str] = []
@@ -640,20 +641,18 @@ class ListDirTool(_FsTool):
                         items.append(f"{pfx}{item.name}")
 
             if not items and total == 0:
-                return json.dumps({"path": str(dp), "entries": [], "total": 0, "truncated": False})
+                return tool_ok(path=str(dp), entries=[], total=0, truncated=False)
 
-            return json.dumps(
-                {
-                    "path": str(dp),
-                    "entries": items,
-                    "total": total,
-                    "truncated": total > cap,
-                }
+            return tool_ok(
+                path=str(dp),
+                entries=items,
+                total=total,
+                truncated=total > cap,
             )
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except Exception as e:
-            return f"Error listing directory: {e}"
+            return _err(f"Error listing directory: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -712,20 +711,20 @@ class GrepFileTool(_FsTool):
         try:
             fp = self._resolve(path)
             if not fp.exists():
-                return f"Error: File not found: {path}"
+                return _err(f"File not found: {path}")
             lines = fp.read_text(encoding=encoding).splitlines()
             rx = _re.compile(pattern)
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except _re.error as e:
-            return f"Error: Invalid regex: {e}"
+            return _err(f"Invalid regex: {e}")
         except (UnicodeDecodeError, LookupError) as e:
-            return (
-                f"Error: cannot decode {path} as {encoding!r}: {e}. "
-                f"Try another encoding (e.g. encoding='gbk', 'big5', or 'latin-1')."
+            return _err(
+                f"cannot decode {path} as {encoding!r}: {e}",
+                "Try another encoding (e.g. encoding='gbk', 'big5', or 'latin-1').",
             )
         except Exception as e:
-            return f"Error: {e}"
+            return _err(str(e))
 
         results: list[dict[str, Any]] = []
         seen: set[int] = set()
@@ -750,15 +749,12 @@ class GrepFileTool(_FsTool):
                         )
 
         truncated = match_count > max_matches
-        return json.dumps(
-            {
-                "path": str(fp),
-                "pattern": pattern,
-                "matches": match_count if not truncated else f"{max_matches}+",
-                "truncated": truncated,
-                "results": results,
-            },
-            ensure_ascii=False,
+        return tool_ok(
+            path=str(fp),
+            pattern=pattern,
+            matches=match_count if not truncated else f"{max_matches}+",
+            truncated=truncated,
+            results=results,
         )
 
 
@@ -807,13 +803,13 @@ class InsertLinesTool(_FsTool):
         try:
             fp = self._resolve(path)
             if not fp.exists():
-                return f"Error: File not found: {path}"
+                return _err(f"File not found: {path}")
             raw = fp.read_bytes()
             uses_crlf = b"\r\n" in raw
             lines = raw.decode("utf-8").replace("\r\n", "\n").splitlines(keepends=True)
             total = len(lines)
             if line < 1 or line > total:
-                return f"Error: line {line} out of bounds (file has {total} lines)"
+                return _err(f"line {line} out of bounds (file has {total} lines)")
             insert_text = text.replace("\r\n", "\n")
             if not insert_text.endswith("\n"):
                 insert_text += "\n"
@@ -823,11 +819,11 @@ class InsertLinesTool(_FsTool):
             if uses_crlf:
                 new_content = new_content.replace("\n", "\r\n")
             fp.write_bytes(new_content.encode("utf-8"))
-            return json.dumps({"path": str(fp), "inserted_at": line, "after": after})
+            return tool_ok(path=str(fp), inserted_at=line, after=after)
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except Exception as e:
-            return f"Error inserting lines: {e}"
+            return _err(f"Error inserting lines: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -870,29 +866,30 @@ class DeleteLinesTool(_FsTool):
         try:
             fp = self._resolve(path)
             if not fp.exists():
-                return f"Error: File not found: {path}"
+                return _err(f"File not found: {path}")
             raw = fp.read_bytes()
             uses_crlf = b"\r\n" in raw
             lines = raw.decode("utf-8").replace("\r\n", "\n").splitlines(keepends=True)
             total = len(lines)
             if line_start < 1 or line_end > total or line_start > line_end:
-                return f"Error: line range {line_start}-{line_end} out of bounds (file has {total} lines)"
+                return _err(
+                    f"line range {line_start}-{line_end} out of bounds "
+                    f"(file has {total} lines)"
+                )
             del lines[line_start - 1 : line_end]
             new_content = "".join(lines)
             if uses_crlf:
                 new_content = new_content.replace("\n", "\r\n")
             fp.write_bytes(new_content.encode("utf-8"))
-            return json.dumps(
-                {
-                    "path": str(fp),
-                    "deleted_lines": [line_start, line_end],
-                    "lines_remaining": len(lines),
-                }
+            return tool_ok(
+                path=str(fp),
+                deleted_lines=[line_start, line_end],
+                lines_remaining=len(lines),
             )
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except Exception as e:
-            return f"Error deleting lines: {e}"
+            return _err(f"Error deleting lines: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -964,7 +961,9 @@ class DeleteTool(_FsTool):
         """Resolve a literal path or expand a glob, enforcing the workspace guard."""
         if any(c in entry for c in "*?["):
             raw = Path(entry).expanduser()
-            pattern = str(raw if raw.is_absolute() or not self._workspace else self._workspace / raw)
+            pattern = str(
+                raw if raw.is_absolute() or not self._workspace else self._workspace / raw
+            )
             matched: list[Path] = []
             for hit in glob.glob(pattern, recursive=True):
                 try:
@@ -1063,7 +1062,7 @@ class DeleteTool(_FsTool):
             entries.append(kwargs["path"])
         entries = [e for e in entries if e and e.strip()]
         if not entries:
-            return json.dumps({"ok": False, "error": "No paths provided."}, ensure_ascii=False)
+            return _err("No paths provided.")
 
         # Resolve the deletion mode. Trash is forced, or permanent needs approval.
         if self._force_to_trash:
@@ -1072,14 +1071,10 @@ class DeleteTool(_FsTool):
             from nanocat.security import safety_bypass
 
             if not safety_bypass.get():
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "Permanent deletion requires approval.",
-                        "hint": "Ask the user to run /approve, then retry; or omit permanent "
-                        "to send the targets to the recycle bin instead.",
-                    },
-                    ensure_ascii=False,
+                return _err(
+                    "Permanent deletion requires approval.",
+                    "Ask the user to run /approve, then retry; or omit permanent "
+                    "to send the targets to the recycle bin instead.",
                 )
 
         candidates: list[Path] = []
@@ -1180,25 +1175,25 @@ class FileHexTool(_FsTool):
             fp = self._resolve(path)
             if mode == "write":
                 if not hex_data:
-                    return "Error: hex_data is required for write mode"
+                    return _err("hex_data is required for write mode")
                 hex_data = hex_data.replace(" ", "").replace("\n", "")
                 try:
                     data = bytes.fromhex(hex_data)
                 except ValueError as e:
-                    return f"Error: invalid hex_data: {e}"
+                    return _err(f"invalid hex_data: {e}")
                 if not fp.exists():
-                    return f"Error: File not found: {path}"
+                    return _err(f"File not found: {path}")
                 raw = bytearray(fp.read_bytes())
                 end = offset + len(data)
                 if end > len(raw):
                     raw.extend(b"\x00" * (end - len(raw)))
                 raw[offset:end] = data
                 fp.write_bytes(bytes(raw))
-                return json.dumps({"path": str(fp), "offset": offset, "bytes_written": len(data)})
+                return tool_ok(path=str(fp), offset=offset, bytes_written=len(data))
 
             # read mode
             if not fp.exists():
-                return f"Error: File not found: {path}"
+                return _err(f"File not found: {path}")
             n = min(length or self._DEFAULT_LENGTH, self._MAX_LENGTH)
             raw = fp.read_bytes()
             file_size = len(raw)
@@ -1214,19 +1209,16 @@ class FileHexTool(_FsTool):
                 ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
                 lines.append(f"{addr}  {hex_part}  {ascii_part}")
 
-            return json.dumps(
-                {
-                    "path": str(fp),
-                    "offset": offset,
-                    "length": actual,
-                    "file_size": file_size,
-                    "truncated": (offset + actual) < file_size,
-                    "next_offset": offset + actual if (offset + actual) < file_size else None,
-                    "hex_dump": "\n".join(lines),
-                },
-                ensure_ascii=False,
+            return tool_ok(
+                path=str(fp),
+                offset=offset,
+                length=actual,
+                file_size=file_size,
+                truncated=(offset + actual) < file_size,
+                next_offset=offset + actual if (offset + actual) < file_size else None,
+                hex_dump="\n".join(lines),
             )
         except PermissionError as e:
-            return f"Error: {e}"
+            return _err(str(e))
         except Exception as e:
-            return f"Error in file_hex: {e}"
+            return _err(f"Error in file_hex: {e}")

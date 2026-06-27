@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 from datetime import datetime
 from typing import Any
 
@@ -22,7 +21,7 @@ except ImportError:
     _PIL_AVAILABLE = False
     Image = None  # type: ignore[assignment]
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 from nanocat.utils.helpers import detect_image_mime
 
 # Max total pixels before down‑scaling (~4K resolution budget).
@@ -114,9 +113,8 @@ async def parse_image_via_model(
     from nanocat.providers.manager import get_provider
 
     if not _PIL_AVAILABLE:
-        return (
-            "Error: Pillow is not installed. Install it with 'pip install Pillow' "
-            "to use image parsing."
+        return tool_err(
+            "Pillow is not installed. Install it with 'pip install Pillow' to use image parsing."
         )
 
     img_path = _Path(path).expanduser()
@@ -125,14 +123,14 @@ async def parse_image_via_model(
     img_path = img_path.resolve()
 
     if not img_path.is_file():
-        return f"Error: file not found: {path}"
+        return tool_err(f"file not found: {path}")
 
     try:
         raw = img_path.read_bytes()
         img = Image.open(io.BytesIO(raw))
         img.load()
     except Exception as e:
-        return f"Error: cannot open image: {e}"
+        return tool_err(f"cannot open image: {e}")
 
     original_w, original_h = img.size
     img, _mime = _downscale_image(img, raw)
@@ -174,10 +172,10 @@ async def parse_image_via_model(
             temperature=0.3,
         )
         if response.content:
-            return response.content.strip()
-        return "Error: vision model returned empty response."
+            return tool_ok(content=response.content.strip())
+        return tool_err("vision model returned empty response.")
     except Exception as e:
-        return f"Error calling vision model: {e}"
+        return tool_err(f"Error calling vision model: {e}")
 
 
 class ParseImageTool(Tool):
@@ -227,7 +225,7 @@ class ParseImageTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         path: str = kwargs.get("path", "")
         if not path:
-            return "Error: 'path' parameter is required."
+            return tool_err("'path' parameter is required.")
         focus: str | None = kwargs.get("focus") or None
         return await parse_image_via_model(path, self._workspace, focus=focus)
 
@@ -267,7 +265,7 @@ class ScreenshotTool(Tool):
         try:
             from PIL import ImageGrab
         except Exception as e:
-            return json.dumps({"error": f"Pillow ImageGrab unavailable: {e}"}, ensure_ascii=False)
+            return tool_err(f"Pillow ImageGrab unavailable: {e}")
 
         from nanocat.config.paths import get_media_dir
 
@@ -278,20 +276,17 @@ class ScreenshotTool(Tool):
             except TypeError:
                 img = ImageGrab.grab(bbox=bbox)  # older Pillow / non-Windows
         except Exception as e:
-            return json.dumps({"error": f"screenshot failed: {e}"}, ensure_ascii=False)
+            return tool_err(f"screenshot failed: {e}")
 
         path = get_media_dir("screenshot") / f"{datetime.now():%Y%m%d_%H%M%S_%f}.png"
         try:
             img.save(path)
         except Exception as e:
-            return json.dumps({"error": f"failed to save screenshot: {e}"}, ensure_ascii=False)
+            return tool_err(f"failed to save screenshot: {e}")
 
-        return json.dumps(
-            {
-                "saved_to": str(path),
-                "width": img.width,
-                "height": img.height,
-                "hint": "use load_image(path) or parse_image(path) to view it",
-            },
-            ensure_ascii=False,
+        return tool_ok(
+            saved_to=str(path),
+            width=img.width,
+            height=img.height,
+            hint="use load_image(path) or parse_image(path) to view it",
         )

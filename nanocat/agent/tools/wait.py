@@ -3,7 +3,7 @@
 import asyncio
 from typing import Any, Awaitable, Callable
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_ok
 from nanocat.bus.events import OutboundMessage
 from nanocat.utils.helpers import current_time_str
 
@@ -81,4 +81,8 @@ class WaitTool(Tool):
                 pass  # Don't let notification failure abort the wait
 
         await asyncio.sleep(wait_s)
-        return f"Waited {wait_s}s, now is {current_time_str(timezone=False)}"
+        return tool_ok(
+            waited_s=wait_s,
+            now=current_time_str(timezone=False),
+            message=f"Waited {wait_s}s, now is {current_time_str(timezone=False)}",
+        )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from nanocat.agent.skills import SkillsLoader
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err
 
 
 class ToolRegistry:
@@ -38,15 +38,18 @@ class ToolRegistry:
         fallback_skill_loader: SkillsLoader | None = None,
     ) -> str:
         """Execute a tool by name with given parameters."""
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+        retry_hint = "Analyze the error and try a different approach."
 
         tool = self._tools.get(name)
         if not tool:
             if fallback_skill_loader:
                 skill = fallback_skill_loader.load_skill(name)
                 if skill:
-                    return f"Error: You can't execute the skill `{name}` as a tool. The description of the skill is:\n{skill}"
-            return f"Error: Tool '{name}' not found."
+                    return tool_err(
+                        f"'{name}' is a skill, not a tool, and cannot be executed as one.",
+                        hint=f"Skill description:\n{skill}",
+                    )
+            return tool_err(f"Tool '{name}' not found.")
 
         from nanocat.security import safety_bypass
 
@@ -59,13 +62,14 @@ class ToolRegistry:
             # Validate parameters
             errors = tool.validate_params(params)
             if errors:
-                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
-            result = await tool.execute(**params)
-            if isinstance(result, str) and result.startswith("Error"):
-                return result + _HINT
-            return result
+                return tool_err(
+                    f"Invalid parameters for tool '{name}': " + "; ".join(errors),
+                    hint=retry_hint,
+                )
+            # Tools self-report success/failure in their JSON envelope; pass through.
+            return await tool.execute(**params)
         except Exception as e:
-            return f"Error executing {name}: {str(e)}" + _HINT
+            return tool_err(f"Error executing {name}: {str(e)}", hint=retry_hint)
         finally:
             if token is not None:
                 safety_bypass.reset(token)

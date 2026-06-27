@@ -1,11 +1,10 @@
 """Todo tool for managing multi-step task lists within a session."""
 
-import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 from nanocat.bus.events import OutboundMessage
 from nanocat.session.manager import Session
 
@@ -179,7 +178,7 @@ class TodoTool(Tool):
 
     async def execute(self, action: str, **kwargs: Any) -> str:
         if self._session is None:
-            return "Error: TodoTool has no session context"
+            return tool_err("TodoTool has no session context")
 
         if action == "create":
             return await self._create(**kwargs)
@@ -191,7 +190,7 @@ class TodoTool(Tool):
             return await self._append(**kwargs)
         if action == "complete":
             return await self._complete(**kwargs)
-        return f"Error: Unknown action '{action}'"
+        return tool_err(f"Unknown action '{action}'")
 
     async def _create(
         self,
@@ -201,9 +200,9 @@ class TodoTool(Tool):
         **_: Any,
     ) -> str:
         if not name:
-            return "Error: 'name' is required for create"
+            return tool_err("'name' is required for create")
         if not tasks:
-            return "Error: 'tasks' is required for create"
+            return tool_err("'tasks' is required for create")
         todo = TodoList(
             id=_short_id(),
             name=name,
@@ -212,18 +211,20 @@ class TodoTool(Tool):
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
-        return f"Created todo list '{name}' with ID {todo.id} ({len(tasks)} tasks)"
+        return tool_ok(
+            id=todo.id,
+            name=name,
+            task_count=len(tasks),
+            message=f"Created todo list '{name}' with ID {todo.id} ({len(tasks)} tasks)",
+        )
 
     async def _check(self, id: str | None = None, **_: Any) -> str:
         if not id:
-            return "Error: 'id' is required for check"
+            return tool_err("'id' is required for check")
         todo = _load(self._session, id)
         if todo is None:
-            return f"Error: Todo list '{id}' not found"
-        return json.dumps(
-            {"id": todo.id, "name": todo.name, "tasks": [asdict(t) for t in todo.tasks]},
-            ensure_ascii=False,
-        )
+            return tool_err(f"Todo list '{id}' not found")
+        return tool_ok(id=todo.id, name=todo.name, tasks=[asdict(t) for t in todo.tasks])
 
     async def _update(
         self,
@@ -234,52 +235,63 @@ class TodoTool(Tool):
         **_: Any,
     ) -> str:
         if not id or index is None or not status:
-            return "Error: 'id', 'index', and 'status' are required for update"
+            return tool_err("'id', 'index', and 'status' are required for update")
         todo = _load(self._session, id)
         if todo is None:
-            return f"Error: Todo list '{id}' not found"
+            return tool_err(f"Todo list '{id}' not found")
         item = next((t for t in todo.tasks if t.index == index), None)
         if item is None:
-            return f"Error: Task index {index} not found"
+            return tool_err(f"Task index {index} not found")
         if _STATUS_ORDER.get(status, -1) <= _STATUS_ORDER.get(item.status, -1):
-            return f"Error: Cannot downgrade status from {item.status} to {status}"
+            return tool_err(f"Cannot downgrade status from {item.status} to {status}")
         item.status = status
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
         if status != "COMPLETED":
-            return f"Task {index} updated to {status}"
+            return tool_ok(index=index, status=status, message=f"Task {index} updated to {status}")
         if index + 1 >= len(todo.tasks):
-            return f"Task {index} updated to COMPLETED, all tasks completed"
-        return f"Task {index} updated to COMPLETED, next task is #{index + 1} {todo.tasks[index + 1].task}"
+            return tool_ok(
+                index=index,
+                status=status,
+                all_completed=True,
+                message=f"Task {index} updated to COMPLETED, all tasks completed",
+            )
+        return tool_ok(
+            index=index,
+            status=status,
+            next_index=index + 1,
+            message=f"Task {index} updated to COMPLETED, next task is #{index + 1} "
+            f"{todo.tasks[index + 1].task}",
+        )
 
     async def _append(
         self, id: str | None = None, task: str | None = None, notify: bool = False, **_: Any
     ) -> str:
         if not id or not task:
-            return "Error: 'id' and 'task' are required for append"
+            return tool_err("'id' and 'task' are required for append")
         todo = _load(self._session, id)
         if todo is None:
-            return f"Error: Todo list '{id}' not found"
+            return tool_err(f"Todo list '{id}' not found")
         new_index = max((t.index for t in todo.tasks), default=0) + 1
         todo.tasks.append(TodoItem(index=new_index, task=task))
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
-        return f"Appended task {new_index}: {task}"
+        return tool_ok(index=new_index, message=f"Appended task {new_index}: {task}")
 
     async def _complete(self, id: str | None = None, notify: bool = False, **_: Any) -> str:
         if not id:
-            return "Error: 'id' is required for complete"
+            return tool_err("'id' is required for complete")
         todo = _load(self._session, id)
         if todo is None:
-            return f"Error: Todo list '{id}' not found"
+            return tool_err(f"Todo list '{id}' not found")
         incomplete = [t for t in todo.tasks if t.status != "COMPLETED"]
         if incomplete:
             names = ", ".join(f"#{t.index} {t.task}" for t in incomplete)
-            return f"Error: {len(incomplete)} task(s) not completed: {names}"
+            return tool_err(f"{len(incomplete)} task(s) not completed: {names}")
         store = _get_store(self._session)
         store.pop(id, None)
         if notify:
             await self._notify(todo)
-        return f"Todo list '{todo.name}' completed and removed"
+        return tool_ok(message=f"Todo list '{todo.name}' completed and removed")

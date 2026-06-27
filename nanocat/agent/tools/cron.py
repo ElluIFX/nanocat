@@ -1,14 +1,13 @@
 """Cron tool for scheduling reminders and tasks."""
 
-import json
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 from nanocat.cron.service import CronService
-from nanocat.cron.types import CronJobState, CronSchedule
+from nanocat.cron.types import CronSchedule
 
 
 def _local_tz() -> ZoneInfo:
@@ -122,13 +121,13 @@ class CronTool(Tool):
     ) -> str:
         if action == "add":
             if self._in_cron_context.get():
-                return json.dumps({"error": "cannot schedule new jobs from within a cron job execution"})
+                return tool_err("cannot schedule new jobs from within a cron job execution")
             return self._add_job(task_description, notify, every_seconds, cron_expr, tz, at)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
             return self._remove_job(job_id)
-        return json.dumps({"error": f"unknown action: {action}"})
+        return tool_err(f"unknown action: {action}")
 
     def _add_job(
         self,
@@ -140,16 +139,16 @@ class CronTool(Tool):
         at: str | None,
     ) -> str:
         if not task_description:
-            return json.dumps({"error": "task_description is required for add"})
+            return tool_err("task_description is required for add")
         if not self._channel or not self._chat_id:
-            return json.dumps({"error": "no session context (channel/chat_id)"})
+            return tool_err("no session context (channel/chat_id)")
         if tz and not cron_expr:
-            return json.dumps({"error": "tz can only be used with cron_expr"})
+            return tool_err("tz can only be used with cron_expr")
         if tz:
             try:
                 ZoneInfo(tz)
             except (KeyError, Exception):
-                return json.dumps({"error": f"unknown timezone '{tz}'"})
+                return tool_err(f"unknown timezone '{tz}'")
 
         # Build schedule
         delete_after = False
@@ -160,25 +159,25 @@ class CronTool(Tool):
             schedule_summary = {"kind": "every", "interval_seconds": every_seconds}
         elif cron_expr:
             if not tz:
-                return json.dumps({
-                    "error": "tz is required when using cron_expr. Provide an explicit IANA timezone, e.g. 'Asia/Shanghai'."
-                })
+                return tool_err(
+                    "tz is required when using cron_expr. Provide an explicit IANA "
+                    "timezone, e.g. 'Asia/Shanghai'."
+                )
             schedule = CronSchedule(kind="cron", expr=cron_expr, tz=tz)
             schedule_summary = {"kind": "cron", "expr": cron_expr, "tz": tz}
         elif at:
             try:
                 dt = datetime.fromisoformat(at)
             except ValueError:
-                return json.dumps({
-                    "error": f"invalid ISO datetime format '{at}'. Expected format with offset: YYYY-MM-DDTHH:MM:SS+HH:MM"
-                })
+                return tool_err(
+                    f"invalid ISO datetime format '{at}'. Expected format with "
+                    "offset: YYYY-MM-DDTHH:MM:SS+HH:MM"
+                )
             if dt.tzinfo is None:
-                return json.dumps({
-                    "error": (
-                        f"datetime '{at}' has no timezone offset. "
-                        "Provide an explicit offset, e.g. '2026-03-19T10:30:00+08:00'."
-                    )
-                })
+                return tool_err(
+                    f"datetime '{at}' has no timezone offset. "
+                    "Provide an explicit offset, e.g. '2026-03-19T10:30:00+08:00'."
+                )
             at_ms = int(dt.timestamp() * 1000)
             schedule = CronSchedule(kind="at", at_ms=at_ms)
             delete_after = True
@@ -187,7 +186,7 @@ class CronTool(Tool):
                 "scheduled_time": _ms_to_local_iso(at_ms),
             }
         else:
-            return json.dumps({"error": "either every_seconds, cron_expr, or at is required"})
+            return tool_err("either every_seconds, cron_expr, or at is required")
 
         job = self._cron.add_job(
             name=task_description[:30],
@@ -207,7 +206,7 @@ class CronTool(Tool):
         if job.state.next_run_at_ms:
             result["next_run"] = _ms_to_local_iso(job.state.next_run_at_ms)
 
-        return json.dumps(result, ensure_ascii=False)
+        return tool_ok(**result)
 
     @staticmethod
     def _job_to_dict(j) -> dict[str, Any]:
@@ -247,13 +246,11 @@ class CronTool(Tool):
 
     def _list_jobs(self) -> str:
         jobs = self._cron.list_jobs()
-        if not jobs:
-            return json.dumps({"jobs": []})
-        return json.dumps({"jobs": [self._job_to_dict(j) for j in jobs]}, ensure_ascii=False)
+        return tool_ok(jobs=[self._job_to_dict(j) for j in jobs])
 
     def _remove_job(self, job_id: str | None) -> str:
         if not job_id:
-            return json.dumps({"error": "job_id is required for remove"})
+            return tool_err("job_id is required for remove")
         if self._cron.remove_job(job_id):
-            return json.dumps({"removed": job_id})
-        return json.dumps({"error": f"job {job_id} not found"})
+            return tool_ok(removed=job_id)
+        return tool_err(f"job {job_id} not found")

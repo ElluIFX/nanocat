@@ -755,7 +755,7 @@ class AgentLoop:
                                     "id": tc.id,
                                     "name": tc.name,
                                     "status": "error"
-                                    if isinstance(r, str) and r.startswith("Error")
+                                    if self._tool_result_failed(r)
                                     else "ok",
                                     "preview": self._preview_text(r)[:160],
                                 }
@@ -1290,6 +1290,23 @@ class AgentLoop:
         else:
             text = "" if content is None else str(content)
         return " ".join(text.split())
+
+    @staticmethod
+    def _tool_result_failed(result: Any) -> bool:
+        """True when a tool result is a JSON envelope reporting ``ok: false``.
+
+        Tools return a ``{"ok": bool, ...}`` JSON string; content payloads (raw
+        text, image-block lists) are treated as success."""
+        if not isinstance(result, str):
+            return False
+        s = result.lstrip()
+        if not s.startswith("{"):
+            return False
+        try:
+            obj = json.loads(s)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(obj, dict) and obj.get("ok") is False
 
     @staticmethod
     def _format_session_turns(session: Session, turns: int = 3, width: int = 46) -> str:

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 
 if TYPE_CHECKING:
     from nanocat.agent.memory import NowledgeClient
-
-import json
 
 
 def _clean_search_result(r: dict) -> dict:
@@ -92,8 +90,8 @@ class MemorySearchTool(Tool):
     async def execute(self, query: str, limit: int = 5, **_: Any) -> str:
         results = await self._client.search_memories(query=query, limit=limit)
         if not results:
-            return "No memories found."
-        return json.dumps([_clean_search_result(r) for r in results], ensure_ascii=False)
+            return tool_ok(results=[], message="No memories found.")
+        return tool_ok(results=[_clean_search_result(r) for r in results])
 
 
 class MemoryGetTool(Tool):
@@ -126,8 +124,8 @@ class MemoryGetTool(Tool):
     async def execute(self, memory_id: str, **_: Any) -> str:
         result = await self._client.get_memory(memory_id)
         if not result:
-            return "Failed to get memory."
-        return json.dumps(result, ensure_ascii=False)
+            return tool_err("Failed to get memory.")
+        return tool_ok(memory=result)
 
 
 class MemoryAddTool(Tool):
@@ -196,9 +194,9 @@ class MemoryAddTool(Tool):
             importance=importance,
         )
         if not result:
-            return "Failed to save memory (Nowledge Mem may be unavailable)."
+            return tool_err("Failed to save memory (Nowledge Mem may be unavailable).")
         mem_id = result.get("id") or result.get("memory_id") or "unknown"
-        return f"Memory saved (id: {mem_id})."
+        return tool_ok(id=mem_id, message=f"Memory saved (id: {mem_id}).")
 
 
 class MemoryUpdateTool(Tool):
@@ -262,11 +260,11 @@ class MemoryUpdateTool(Tool):
         if importance is not None:
             fields["importance"] = importance
         if not fields:
-            return "No fields provided to update."
+            return tool_err("No fields provided to update.")
         result = await self._client.update_memory(memory_id, **fields)
         if not result:
-            return f"Failed to update memory {memory_id} (Nowledge Mem may be unavailable)."
-        return f"Memory {memory_id} updated."
+            return tool_err(f"Failed to update memory {memory_id} (Nowledge Mem may be unavailable).")
+        return tool_ok(id=memory_id, message=f"Memory {memory_id} updated.")
 
 
 class MemoryDeleteTool(Tool):
@@ -307,8 +305,8 @@ class MemoryDeleteTool(Tool):
     async def execute(self, memory_id: str, cascade_delete: bool = True, **_: Any) -> str:
         success = await self._client.delete_memory(memory_id, cascade_delete=cascade_delete)
         if success:
-            return f"Memory {memory_id} deleted."
-        return f"Failed to delete memory {memory_id}."
+            return tool_ok(id=memory_id, message=f"Memory {memory_id} deleted.")
+        return tool_err(f"Failed to delete memory {memory_id}.")
 
 
 class ReadWorkingMemoryTool(Tool):
@@ -346,5 +344,5 @@ class ReadWorkingMemoryTool(Tool):
     async def execute(self, timeout: int = 5, **_: Any) -> str:
         content = await self._client.get_working_memory()
         if not content:
-            return "Working memory is empty."
-        return content
+            return tool_ok(content="", message="Working memory is empty.")
+        return tool_ok(content=content)

@@ -150,7 +150,7 @@ class SubagentManager:
                     "uptime_s": int(now - info.get("created_at", now)),
                 }
             )
-        return json.dumps(items, ensure_ascii=False)
+        return json.dumps({"ok": True, "subagents": items}, ensure_ascii=False)
 
     async def steer(self, task_id: str, text: str) -> str:
         if task_id not in self._running_tasks or self._running_tasks[task_id].done():

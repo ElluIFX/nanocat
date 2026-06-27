@@ -239,6 +239,7 @@ class HttpRequestTool(Tool):
         )
         self._mgr.track_stream(stream_id, task)
         result = {
+            "ok": True,
             "streaming": True,
             "stream_id": stream_id,
             "streaming_to": path,

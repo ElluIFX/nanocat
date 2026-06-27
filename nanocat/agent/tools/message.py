@@ -2,7 +2,7 @@
 
 from typing import Any, Awaitable, Callable
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 from nanocat.bus.events import OutboundMessage
 
 
@@ -78,10 +78,10 @@ class MessageTool(Tool):
         message_id = message_id or self._default_message_id
 
         if not channel or not chat_id:
-            return "Error: No target channel/chat specified"
+            return tool_err("No target channel/chat specified")
 
         if not self._send_callback:
-            return "Error: Message sending not configured"
+            return tool_err("Message sending not configured")
 
         msg = OutboundMessage(
             channel=channel,
@@ -98,6 +98,11 @@ class MessageTool(Tool):
             if channel == self._default_channel and chat_id == self._default_chat_id:
                 self._sent_in_turn = True
             media_info = f" with {len(attachments)} attachments" if attachments else ""
-            return f"Message sent to {channel}:{chat_id}{media_info}"
+            return tool_ok(
+                channel=channel,
+                chat_id=chat_id,
+                attachments=len(attachments) if attachments else 0,
+                message=f"Message sent to {channel}:{chat_id}{media_info}",
+            )
         except Exception as e:
-            return f"Error sending message: {str(e)}"
+            return tool_err(f"Error sending message: {str(e)}")

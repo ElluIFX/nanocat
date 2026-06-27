@@ -13,10 +13,10 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 
 _APPROVE_HINT = (
-    "\nIf you believe this action is necessary, explain the reason to the user "
+    "If you believe this action is necessary, explain the reason to the user "
     "and ask them to use /approve to temporarily bypass this check."
 )
 
@@ -64,17 +64,19 @@ def _validate_url_safe(url: str) -> tuple[bool, str]:
 
 
 def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
-    """Format provider results into shared plaintext output."""
-    if not items:
-        return f"No results for: {query}"
+    """Format provider results into the shared JSON tool envelope (content holds
+    the human-readable list)."""
+    shown = items[:n]
+    if not shown:
+        return tool_ok(query=query, count=0, content=f"No results for: {query}")
     lines = [f"Results for: {query}\n"]
-    for i, item in enumerate(items[:n], 1):
+    for i, item in enumerate(shown, 1):
         title = _normalize(_strip_tags(item.get("title", "")))
         snippet = _normalize(_strip_tags(item.get("content", "")))
         lines.append(f"{i}. {title}\n   {item.get('url', '')}")
         if snippet:
             lines.append(f"   {snippet}")
-    return "\n".join(lines)
+    return tool_ok(query=query, count=len(shown), content="\n".join(lines))
 
 
 class WebSearchTool(Tool):
@@ -117,7 +119,7 @@ class WebSearchTool(Tool):
         elif provider == "brave":
             return await self._search_brave(query, n)
         else:
-            return f"Error: unknown search provider '{provider}'"
+            return tool_err(f"unknown search provider '{provider}'")
 
     async def _search_brave(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("BRAVE_API_KEY", "")
@@ -143,7 +145,7 @@ class WebSearchTool(Tool):
             ]
             return _format_results(query, items, n)
         except Exception as e:
-            return f"Error: {e}"
+            return tool_err(str(e))
 
     async def _search_tavily(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("TAVILY_API_KEY", "")
@@ -161,7 +163,7 @@ class WebSearchTool(Tool):
                 r.raise_for_status()
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
-            return f"Error: {e}"
+            return tool_err(str(e))
 
     async def _search_searxng(self, query: str, n: int) -> str:
         base_url = (self.config.base_url or os.environ.get("SEARXNG_BASE_URL", "")).strip()
@@ -174,7 +176,7 @@ class WebSearchTool(Tool):
         check = _validate_url_safe if not safety_bypass.get() else _validate_url
         is_valid, error_msg = check(endpoint)
         if not is_valid:
-            return f"Error: invalid SearXNG URL: {error_msg}"
+            return tool_err(f"invalid SearXNG URL: {error_msg}")
         try:
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
@@ -186,7 +188,7 @@ class WebSearchTool(Tool):
                 r.raise_for_status()
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
-            return f"Error: {e}"
+            return tool_err(str(e))
 
     async def _search_jina(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "")
@@ -214,7 +216,7 @@ class WebSearchTool(Tool):
             ]
             return _format_results(query, items, n)
         except Exception as e:
-            return f"Error: {e}"
+            return tool_err(str(e))
 
     async def _search_duckduckgo(self, query: str, n: int) -> str:
         try:
@@ -223,7 +225,7 @@ class WebSearchTool(Tool):
             ddgs = DDGS(timeout=10)
             raw = await asyncio.to_thread(ddgs.text, query, max_results=n)
             if not raw:
-                return f"No results for: {query}"
+                return _format_results(query, [], n)
             items = [
                 {
                     "title": r.get("title", ""),
@@ -235,7 +237,7 @@ class WebSearchTool(Tool):
             return _format_results(query, items, n)
         except Exception as e:
             logger.warning("DuckDuckGo search failed: {}", e)
-            return f"Error: DuckDuckGo search failed ({e})"
+            return tool_err(f"DuckDuckGo search failed ({e})")
 
 
 class WebFetchTool(Tool):
@@ -273,10 +275,7 @@ class WebFetchTool(Tool):
         else:
             is_valid, error_msg = _validate_url(url)
         if not is_valid:
-            return json.dumps(
-                {"error": f"URL validation failed: {error_msg}{_APPROVE_HINT}", "url": url},
-                ensure_ascii=False,
-            )
+            return tool_err(f"URL validation failed: {error_msg}", hint=_APPROVE_HINT, url=url)
 
         result = await self._fetch_jina(url, max_chars)
         if result is None:
@@ -310,18 +309,15 @@ class WebFetchTool(Tool):
                 text = text[:max_chars]
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
-            return json.dumps(
-                {
-                    "url": url,
-                    "finalUrl": data.get("url", url),
-                    "status": r.status_code,
-                    "extractor": "jina",
-                    "truncated": truncated,
-                    "length": len(text),
-                    "untrusted": True,
-                    "text": text,
-                },
-                ensure_ascii=False,
+            return tool_ok(
+                url=url,
+                finalUrl=data.get("url", url),
+                status=r.status_code,
+                extractor="jina",
+                truncated=truncated,
+                length=len(text),
+                untrusted=True,
+                content=text,
             )
         except Exception as e:
             logger.debug("Jina Reader failed for {}, falling back to readability: {}", url, e)
@@ -347,10 +343,7 @@ class WebFetchTool(Tool):
             if not safety_bypass.get():
                 redir_ok, redir_err = validate_resolved_url(str(r.url))
                 if not redir_ok:
-                    return json.dumps(
-                        {"error": f"Redirect blocked: {redir_err}{_APPROVE_HINT}", "url": url},
-                        ensure_ascii=False,
-                    )
+                    return tool_err(f"Redirect blocked: {redir_err}", hint=_APPROVE_HINT, url=url)
 
             ctype = r.headers.get("content-type", "")
 
@@ -379,25 +372,22 @@ class WebFetchTool(Tool):
                 text = text[:max_chars]
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
-            return json.dumps(
-                {
-                    "url": url,
-                    "finalUrl": str(r.url),
-                    "status": r.status_code,
-                    "extractor": extractor,
-                    "truncated": truncated,
-                    "length": len(text),
-                    "untrusted": True,
-                    "text": text,
-                },
-                ensure_ascii=False,
+            return tool_ok(
+                url=url,
+                finalUrl=str(r.url),
+                status=r.status_code,
+                extractor=extractor,
+                truncated=truncated,
+                length=len(text),
+                untrusted=True,
+                content=text,
             )
         except httpx.ProxyError as e:
             logger.error("WebFetch proxy error for {}: {}", url, e)
-            return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)
+            return tool_err(f"Proxy error: {e}", url=url)
         except Exception as e:
             logger.error("WebFetch error for {}: {}", url, e)
-            return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
+            return tool_err(str(e), url=url)
 
     def _to_markdown(self, html_content: str) -> str:
         """Convert HTML to markdown."""
