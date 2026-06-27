@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, exc_message
 
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
 _MAX_BODY = 100_000  # cap; oversized bodies also hit the global tool-result truncation
@@ -167,7 +167,7 @@ class HttpRequestTool(Tool):
                     for h in handles:
                         h.close()
                     return json.dumps(
-                        {"ok": False, "error": f"cannot open file {path!r}", "detail": str(e)}
+                        {"ok": False, "error": f"cannot open file {path!r}", "detail": exc_message(e)}
                     )
                 handles.append(fh)
                 files_arg[field] = (os.path.basename(path), fh)
@@ -186,7 +186,9 @@ class HttpRequestTool(Tool):
                 async with self._mgr.new_client() as client:
                     resp = await client.request(method.upper(), url, **req)
         except Exception as e:
-            return json.dumps({"ok": False, "error": "request failed", "detail": str(e)})
+            return json.dumps(
+                {"ok": False, "error": "request failed", "detail": exc_message(e)}
+            )
         finally:
             for h in handles:
                 h.close()

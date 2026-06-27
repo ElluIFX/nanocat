@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 
-from nanocat.agent.tools.base import Tool, tool_err, tool_ok
+from nanocat.agent.tools.base import Tool, exc_message, tool_err, tool_ok
 
 _APPROVE_HINT = (
     "If you believe this action is necessary, explain the reason to the user "
@@ -145,7 +145,7 @@ class WebSearchTool(Tool):
             ]
             return _format_results(query, items, n)
         except Exception as e:
-            return tool_err(str(e))
+            return tool_err(exc_message(e))
 
     async def _search_tavily(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("TAVILY_API_KEY", "")
@@ -163,7 +163,7 @@ class WebSearchTool(Tool):
                 r.raise_for_status()
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
-            return tool_err(str(e))
+            return tool_err(exc_message(e))
 
     async def _search_searxng(self, query: str, n: int) -> str:
         base_url = (self.config.base_url or os.environ.get("SEARXNG_BASE_URL", "")).strip()
@@ -188,7 +188,7 @@ class WebSearchTool(Tool):
                 r.raise_for_status()
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
-            return tool_err(str(e))
+            return tool_err(exc_message(e))
 
     async def _search_jina(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "")
@@ -216,7 +216,7 @@ class WebSearchTool(Tool):
             ]
             return _format_results(query, items, n)
         except Exception as e:
-            return tool_err(str(e))
+            return tool_err(exc_message(e))
 
     async def _search_duckduckgo(self, query: str, n: int) -> str:
         try:
@@ -237,7 +237,7 @@ class WebSearchTool(Tool):
             return _format_results(query, items, n)
         except Exception as e:
             logger.warning("DuckDuckGo search failed: {}", e)
-            return tool_err(f"DuckDuckGo search failed ({e})")
+            return tool_err(f"DuckDuckGo search failed: {exc_message(e)}")
 
 
 class WebFetchTool(Tool):
@@ -384,10 +384,10 @@ class WebFetchTool(Tool):
             )
         except httpx.ProxyError as e:
             logger.error("WebFetch proxy error for {}: {}", url, e)
-            return tool_err(f"Proxy error: {e}", url=url)
+            return tool_err(f"Proxy error: {exc_message(e)}", url=url)
         except Exception as e:
             logger.error("WebFetch error for {}: {}", url, e)
-            return tool_err(str(e), url=url)
+            return tool_err(exc_message(e), url=url)
 
     def _to_markdown(self, html_content: str) -> str:
         """Convert HTML to markdown."""

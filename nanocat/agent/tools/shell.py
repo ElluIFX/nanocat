@@ -15,7 +15,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanocat.agent.tools.base import Tool
+from nanocat.agent.tools.base import Tool, exc_message
 
 
 def _decode_output(data: bytes) -> str:
@@ -147,7 +147,8 @@ class ExecTool(Tool):
             )
             if error:
                 return json.dumps(
-                    {"stdout": "", "stderr": error, "returncode": -1}, ensure_ascii=False
+                    {"ok": False, "stdout": "", "stderr": error, "returncode": -1},
+                    ensure_ascii=False,
                 )
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
@@ -177,6 +178,7 @@ class ExecTool(Tool):
                     pass
                 return json.dumps(
                     {
+                        "ok": False,
                         "stdout": "",
                         "stderr": f"Command timed out after {effective_timeout} seconds",
                         "returncode": -1,
@@ -190,6 +192,7 @@ class ExecTool(Tool):
 
             return json.dumps(
                 {
+                    "ok": process.returncode == 0,
                     "stdout": stdout_text,
                     "stderr": stderr_text,
                     "returncode": process.returncode,
@@ -200,7 +203,8 @@ class ExecTool(Tool):
 
         except Exception as e:
             return json.dumps(
-                {"stdout": "", "stderr": str(e), "returncode": -1}, ensure_ascii=False
+                {"ok": False, "stdout": "", "stderr": exc_message(e), "returncode": -1},
+                ensure_ascii=False,
             )
 
     @staticmethod

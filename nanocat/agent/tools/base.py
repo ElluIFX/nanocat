@@ -13,6 +13,16 @@ def tool_ok(**fields: Any) -> str:
     return json.dumps({"ok": True, **fields}, ensure_ascii=False)
 
 
+def exc_message(e: BaseException) -> str:
+    """One-line, always non-empty description of an exception.
+
+    Many network errors stringify to an empty string (e.g. a DNS failure raises
+    ``httpx.ConnectError('')``), which would leave an error field blank. Prefix
+    the type name so the cause is always identifiable."""
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
 def tool_err(error: str, hint: str | None = None, **fields: Any) -> str:
     """JSON error envelope shared by every tool: ``{"ok": false, "error": ...,
     "hint"?: ..., ...fields}``."""
