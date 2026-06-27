@@ -187,31 +187,18 @@ class EnabledBuiltinToolsConfig(Base):
     """Per-tool registration switches. Each field gates whether that built-in tool
     is registered; all default enabled except ssh, which is opt-in."""
 
-    read_file: bool = True
-    write_file: bool = True
-    edit_file: bool = True
-    list_dir: bool = True
-    grep_file: bool = True
-    insert_lines: bool = True
-    delete_lines: bool = True
+    file_tools: bool = True
+    image_tools: bool = True  # Image tools (read/parse)
+    screenshot: bool = False
     delete: bool = True
-    file_hex: bool = True
-    load_image: bool = True
-    parse_image: bool = True
     exec: bool = True
     web_search: bool = True
     web_fetch: bool = True
-    message: bool = True
     wait: bool = True
     todo: bool = True
-    subagent_spawn: bool = True
-    subagent_gather: bool = True
-    subagent_list: bool = True
-    subagent_steer: bool = True
-    subagent_kill: bool = True
-    ssh: bool = False  # SSH tools (ssh_open/send/read/close/list); powerful + networked, opt-in
-    proc: bool = True  # background process tools (proc_start/read/stop/list)
-    screenshot: bool = False  # screen capture tool; opt-in (privacy/desktop access)
+    subagent_tools: bool = True
+    ssh_tools: bool = False  # SSH tools (ssh_open/send/read/close/list)
+    proc_tools: bool = True  # background process tools (proc_start/read/stop/list)
     http_request: bool = True  # structured HTTP request tool
 
 
@@ -301,33 +288,33 @@ class TipsConfig(Base):
     background_done: str = "Background task completed."
     # /help (full text, newlines supported)
     help: str = (
-        "🐈 NanoCat commands:\n"
-        "/new — Start a new conversation\n"
-        "/stop — Stop the current task\n"
-        "/restart — Restart the bot\n"
-        "/model — View or configure models\n"
-        "/context — Show current context info\n"
-        "/whoami — Show channel/chat identity\n"
-        "/help — Show available commands\n"
-        "/compact — Manually compact old session turns\n"
-        "/session — View and switch sessions\n"
-        "/status — Show agent status and recent logs\n"
-        "/approve <N=5> — Approve safety check for N minutes\n"
-        "/max <prompt> — Use high-capability model for this turn"
+        "## 🐈 NanoCat commands:\n"
+        "- /new — Start a new conversation\n"
+        "- /stop — Stop the current task\n"
+        "- /restart — Restart the bot\n"
+        "- /model — View or configure models\n"
+        "- /context — Show current context info\n"
+        "- /whoami — Show channel/chat identity\n"
+        "- /help — Show available commands\n"
+        "- /compact — Manually compact old session turns\n"
+        "- /session — View and switch sessions\n"
+        "- /status — Show agent status and recent logs\n"
+        "- /approve <N=5> — Approve safety check for N minutes\n"
+        "- /max <prompt> — Use high-capability model for this turn"
     )
     # /model (no args) — {model_name}, {provider_name}
     model_info: str = (
-        "🐈 Model info\n"
-        "Main Model: {main_model}\n"
-        "Max Model: {max_model}\n"
-        "Assistant Model: {assistant_model}\n"
-        "Subagent Model: {subagent_model}\n"
-        "Provider: {provider_name}\n\n"
-        "Available models:\n{model_choice}\n"
-        "Usage:\n"
-        "/model add <provider> <model_name>\n"
-        "/model agent|subagent|assistant|max <N>\n"
-        "/model delete <N>"
+        "## 🐈 Model info\n"
+        "- Main Model: {main_model}\n"
+        "- Max Model: {max_model}\n"
+        "- Assistant Model: {assistant_model}\n"
+        "- Subagent Model: {subagent_model}\n"
+        "- Provider: {provider_name}\n\n"
+        "- Available models:\n{model_choice}\n\n"
+        "## Usage:\n"
+        "- /model add <provider> <model_name>\n"
+        "- /model agent|subagent|assistant|max <N>\n"
+        "- /model delete <N>"
     )
     # /model set (success) — {target}, {model_name}
     model_set: str = "{target} model set: {model_name}"
@@ -341,33 +328,35 @@ class TipsConfig(Base):
     model_choice_invalid: str = "Invalid choice number: {choice_number}"
     # /session - usage shown when subcommand is unknown or missing
     session_usage: str = (
-        "Usage:\n  /session list [N=10]\n  /session view <id>\n  /session switch <id>"
+        "## Usage:\n\n- /session list [N=10]\n- /session view <id>\n- /session switch <id>"
     )
     # /session list — no eligible sessions
     session_list_empty: str = "No named sessions yet. Keep chatting to auto-generate session names."
     # /session list — {items} (pre-formatted markdown list)
-    session_list: str = "Sessions:\n{items}\n\nUsage:\n  /session view <id>\n  /session switch <id>"
+    session_list: str = (
+        "## Sessions:\n\n{items}\n\n## Usage:\n\n- /session view <id>\n- /session switch <id>"
+    )
     # /session view — {name}, {id}, {turns}
-    session_view: str = "--- {name} ({id}) ---\n{turns}"
+    session_view: str = "## {name} ({id})\n\n{turns}"
     # /session switch — {session_id}, {name}
     session_switched: str = "Switched to session `{session_id}` ({name})."
     # /session view/switch — not found — {session_id}
     session_not_found: str = "Session `{session_id}` not found."
     # /whoami — {channel}, {chat_id}, {session_id}, {session_key}
     whoami_info: str = (
-        "🐈 Session Identity\n"
-        "Channel: {channel}\n"
-        "Chat ID: {chat_id}\n"
-        "Session: {session_id}\n"
-        "Key: {session_key}"
+        "## 🐈 Session Identity\n\n"
+        "- Channel: {channel}\n"
+        "- Chat ID: {chat_id}\n"
+        "- Session: {session_id}\n"
+        "- Key: {session_key}"
     )
     # /context panel body
     context_panel: str = (
-        "🐈 Context Usage ({model_name})\n"
-        "prompt={estimated_prompt_tokens}/{context_window_tokens} ({context_usage_percent}%)\n"
-        "overflow={overflow_tokens}/{context_window_tokens} ({overflow_percent}%)\n"
-        "msgs={messages_uncompacted}/{messages_total} ({uncompacted_percent}%)\n"
-        "history={history_messages}/{messages_total}\n"
+        "## 🐈 Context Usage ({model_name})\n\n"
+        "- prompt = {estimated_prompt_tokens}/{context_window_tokens} ({context_usage_percent}%)\n"
+        "- overflow = {overflow_tokens}/{context_window_tokens} ({overflow_percent}%)\n"
+        "- msgs = {messages_uncompacted}/{messages_total} ({uncompacted_percent}%)\n"
+        "- history = {history_messages}/{messages_total}\n"
     )
     # agent loop finished with no content
     no_response: str = "I've completed processing but have no response to give."
