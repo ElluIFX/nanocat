@@ -277,19 +277,19 @@ class AgentLoop:
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         extra_read = [BUILTIN_SKILLS_DIR, Path(tempfile.gettempdir())]
-        self._reg(ReadFileTool(workspace=self.workspace, extra_allowed_dirs=extra_read))
-        self._reg(LoadImageTool(workspace=self.workspace, extra_allowed_dirs=extra_read))
-        self._reg(ParseImageTool(workspace=str(self.workspace)))
-        for cls in (
-            WriteFileTool,
-            EditFileTool,
-            ListDirTool,
-            GrepFileTool,
-            InsertLinesTool,
-            DeleteLinesTool,
-            FileHexTool,
-        ):
-            self._reg(cls(workspace=self.workspace, extra_allowed_dirs=extra_read))
+        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
+        if self._config.tools.enabled_builtin_tools.file_tools:
+            for cls in (
+                ReadFileTool,
+                WriteFileTool,
+                EditFileTool,
+                ListDirTool,
+                GrepFileTool,
+                InsertLinesTool,
+                DeleteLinesTool,
+                FileHexTool,
+            ):
+                self.tools.register(cls(workspace=self.workspace, extra_allowed_dirs=extra_read))
         self._reg(
             DeleteTool(
                 workspace=self.workspace,
@@ -297,6 +297,13 @@ class AgentLoop:
                 force_to_trash=self._config.tools.filesystem.force_del_to_trash,
             )
         )
+        if self._config.tools.enabled_builtin_tools.image_tools:
+            self.tools.register(
+                LoadImageTool(workspace=self.workspace, extra_allowed_dirs=extra_read)
+            )
+            self.tools.register(ParseImageTool(workspace=str(self.workspace)))
+        if self._config.tools.enabled_builtin_tools.screenshot:
+            self.tools.register(ScreenshotTool())
         self._reg(
             ExecTool(
                 working_dir=str(self.workspace),
@@ -314,17 +321,18 @@ class AgentLoop:
                 self.http_sessions, proxy=self.web_proxy, safety_check=self.web_safety_check
             )
         )
-        self._reg(MessageTool(send_callback=self.bus.publish_outbound))
         self._reg(WaitTool(send_callback=self.bus.publish_outbound))
         self._reg(TodoTool(send_callback=self.bus.publish_outbound))
-        self._reg(SubagentSpawnTool(manager=self.subagents))
-        self._reg(SubagentGatherTool(manager=self.subagents))
-        self._reg(SubagentListTool(manager=self.subagents))
-        self._reg(SubagentSteerTool(manager=self.subagents))
-        self._reg(SubagentKillTool(manager=self.subagents))
-        if self._config.tools.enabled_builtin_tools.screenshot:
-            self.tools.register(ScreenshotTool())
-        if self._config.tools.enabled_builtin_tools.ssh:
+        if self._config.tools.enabled_builtin_tools.subagent_tools:
+            for tool in (
+                SubagentSpawnTool(manager=self.subagents),
+                SubagentGatherTool(manager=self.subagents),
+                SubagentListTool(manager=self.subagents),
+                SubagentSteerTool(manager=self.subagents),
+                SubagentKillTool(manager=self.subagents),
+            ):
+                self.tools.register(tool)
+        if self._config.tools.enabled_builtin_tools.ssh_tools:
             for tool in (
                 SSHOpenTool(self.ssh),
                 SSHSendTool(self.ssh),
@@ -333,7 +341,7 @@ class AgentLoop:
                 SSHListTool(self.ssh),
             ):
                 self.tools.register(tool)
-        if self._config.tools.enabled_builtin_tools.proc:
+        if self._config.tools.enabled_builtin_tools.proc_tools:
             for tool in (
                 ProcStartTool(
                     self.procs,
@@ -1015,7 +1023,7 @@ class AgentLoop:
         parts = raw_args.split() if raw_args else []
 
         def _format_choices(models: list[str]) -> str:
-            return "\n".join(f" {i + 1}. {model}" for i, model in enumerate(models)) or " (empty)"
+            return "\n".join(f"\t{i + 1}. {model}" for i, model in enumerate(models)) or " (empty)"
 
         if not parts:
             return OutboundMessage(
@@ -1224,11 +1232,11 @@ class AgentLoop:
             if not items:
                 return _reply(self.tips.session_list_empty)
             lines = []
-            for item in items:
+            for i, item in enumerate(items):
                 sid = item["id"]
                 name = item["name"] or "Unnamed session"
                 last = item.get("last_active", "")[:16].replace("T", " ")
-                lines.append(f"`{sid}` · {name} · {last}")
+                lines.append(f"{i + 1}. `{sid}` · {name} · {last}")
             return _reply(self.tips.session_list.format(items="\n".join(lines)))
 
         # /session view [id]
@@ -1305,10 +1313,10 @@ class AgentLoop:
                 if len(text) > width:
                     text = text[: width - 1].rstrip() + "…"
                 prefix = "[Q]" if role == "user" else "[A]"
-                lines.append(f"{prefix} {text}")
+                lines.append(f"`{prefix}` {text}")
             if lines:
-                turn_texts.append(f"Turn {first_num + offset}:\n" + "\n".join(lines))
-        return "\n\n".join(turn_texts) if turn_texts else "(no preview)"
+                turn_texts.append(f"### Turn {first_num + offset}:\n\n" + "\n\n".join(lines))
+        return "\n\n".join(turn_texts) if turn_texts else "> (no preview)"
 
     async def _handle_context(self, msg: InboundMessage, session: Session) -> OutboundMessage:
         """Handle /context command — show compact numeric context panel."""
