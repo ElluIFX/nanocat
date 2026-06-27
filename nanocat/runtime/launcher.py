@@ -173,6 +173,7 @@ def build_runtime(
 
     cron.on_job = on_cron_job
     channels = ChannelManager(config, bus, force_channel="tui" if local_mode else None)
+    logger.info("NanoCat v{} ready — workspace: {}", __version__, config.workspace_path)
 
     def pick_heartbeat_target() -> tuple[str, str]:
         enabled = set(channels.enabled_channels)
@@ -276,7 +277,10 @@ def run_local_tui(
     # Preload the local session transcript so it renders on startup.
     try:
         session = runtime.session_manager.get_or_create("tui", "local")
-        tui.preload_history(session.get_history())  # type: ignore[attr-defined]
+        history = session.get_history()
+        if history:
+            logger.info("Restoring {} prior message(s)…", len(history))
+        tui.preload_history(history)  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning("Could not preload TUI session history: {}", e)
 
