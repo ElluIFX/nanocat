@@ -33,10 +33,16 @@ def _short_id() -> str:
 
 
 def _render_md(todo: TodoList) -> str:
-    lines = [f"**{todo.name}** `#{todo.id}`"]
+    rows = [
+        f"**{todo.name}** `#{todo.id}`",
+        "",
+        "| # | State | Task |",
+        "|--:|:-:|---|",
+    ]
     for item in todo.tasks:
-        lines.append(f"{_STATUS_MARK[item.status]} {item.index}. {item.task}")
-    return "\n".join(lines)
+        task = item.task.replace("|", "\\|").replace("\n", " ")
+        rows.append(f"| {item.index} | {_STATUS_MARK[item.status]} | {task} |")
+    return "\n".join(rows)
 
 
 def _get_store(session: Session) -> dict[str, Any]:
