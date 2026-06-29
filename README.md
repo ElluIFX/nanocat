@@ -29,24 +29,27 @@
 
 ## 二、内置工具
 
-开箱即用的内置工具（按类别）：
+大幅增强了开箱即用的内置工具（按类别）：
 
-| 类别 | 工具 | 说明 |
-|------|------|------|
-| **文件** | `read_file` · `write_file` · `edit_file` | 读取 / 写入 / 精确编辑文件 |
-| | `insert_lines` · `delete_lines` · `file_hex` | 按行插入 / 删除、十六进制查看 |
-| | `list_dir` · `grep_file` | 列目录、按内容搜索 |
-| **视觉** | `parse_image` · `load_image` | 解析图片内容、加载图片 |
-| **命令** | `exec` | 执行 Shell 命令（沙箱受限） |
-| **联网** | `web_search` · `web_fetch` | 网页搜索、抓取网页正文 |
-| **记忆** | `memory_search` · `memory_get` | 检索记忆、按 ID 取全文 |
-| | `memory_add` · `memory_update` · `memory_delete` | 增 / 改 / 删记忆 |
-| | `read_working_memory` | 读取工作记忆 |
-| **任务** | `todo` · `cron` | 待办清单、定时任务 |
-| **协作** | `spawn` · `gather` · `wait` · `message` | 后台子代理、汇总结果、等待、主动发消息 |
-| **扩展** | *MCP* | 任意 [MCP](https://modelcontextprotocol.io/) 服务器的工具会自动接入 |
+| 类别     | 工具                                                                              | 说明                                                                |
+| -------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **文件** | `read_file` · `write_file` · `edit_file`                                          | 读取 / 写入 / 精确编辑文件                                          |
+|          | `insert_lines` · `delete_lines` · `delete`                                        | 按行插入 / 删除、删除文件或目录                                     |
+|          | `list_dir` · `grep_file` · `file_hex`                                             | 列目录、按内容搜索、十六进制查看                                    |
+| **视觉** | `parse_image` · `load_image` · `screenshot`                                        | 解析图片、加载图片、截屏（需开启）                                  |
+| **命令** | `exec`                                                                             | 执行 Shell 命令（沙箱受限）                                         |
+| **终端** | `ssh_open` · `ssh_send` · `ssh_read` · `ssh_close` · `ssh_list`                    | 持久 SSH 远程会话（需开启）                                         |
+|          | `proc_start` · `proc_send` · `proc_read` · `proc_stop` · `proc_list`              | 本地后台进程管理                                                    |
+| **联网** | `web_search` · `web_fetch` · `http_request`                                        | 网页搜索、抓取正文、自定义 HTTP 请求                                |
+| **记忆** | `memory_search` · `memory_get`                                                    | 检索记忆、按 ID 取全文                                              |
+|          | `memory_add` · `memory_update` · `memory_delete`                                  | 增 / 改 / 删记忆                                                    |
+|          | `read_working_memory`                                                             | 读取工作记忆                                                        |
+| **任务** | `todo` · `cron`                                                                    | 待办清单、定时任务                                                  |
+| **协作** | `subagent_spawn` · `subagent_gather` · `subagent_list` · `subagent_steer` · `subagent_kill` | 后台子代理：派发 / 汇总 / 列表 / 引导 / 终止                        |
+|          | `wait` · `message`                                                                | 等待、主动发消息                                                    |
+| **扩展** | *MCP*                                                                             | 任意 [MCP](https://modelcontextprotocol.io/) 服务器的工具会自动接入 |
 
-> 记忆类工具依赖记忆库 [Nowledge](https://mem.nowledge.co/)（需自行部署并在配置中连接）；MCP 工具按配置动态加载。
+> 记忆类工具依赖记忆库 [Nowledge](https://mem.nowledge.co/)（需自行部署并在配置中连接）；`ssh_*` 与 `screenshot` 默认关闭，需在配置中开启；MCP 工具按配置动态加载。
 
 ## 三、简要使用教程
 
@@ -103,14 +106,14 @@ nanocat
 
 **5. 常用对话命令**
 
-| 命令 | 作用 |
-|------|------|
-| `/session list` · `/session switch <id>` | 查看 / 切换会话 |
-| `/model <角色> <序号>` | 切换某个角色使用的模型 |
-| `/context` | 查看当前上下文用量 |
-| `/compact` | 手动整理压缩当前会话 |
-| `/status` · `/whoami` | 查看运行状态 / 身份信息 |
-| `/new` · `/stop` · `/restart` | 新会话 / 停止当前任务 / 重启 |
+| 命令                                     | 作用                         |
+| ---------------------------------------- | ---------------------------- |
+| `/session list` · `/session switch <id>` | 查看 / 切换会话              |
+| `/model <角色> <序号>`                   | 切换某个角色使用的模型       |
+| `/context`                               | 查看当前上下文用量           |
+| `/compact`                               | 手动整理压缩当前会话         |
+| `/status` · `/whoami`                    | 查看运行状态 / 身份信息      |
+| `/new` · `/stop` · `/restart`            | 新会话 / 停止当前任务 / 重启 |
 
 ---
 
