@@ -4,9 +4,9 @@ Information about the user to help personalize interactions.
 
 ## Basic Information
 
-- **Name**: (your name)
-- **Timezone**: (your timezone, e.g., UTC+8)
-- **Language**: (preferred language)
+- **Name**:
+- **Timezone**:
+- **Prefer Language**:
 
 ## Preferences
 
@@ -36,13 +36,13 @@ Information about the user to help personalize interactions.
 
 ## Topics of Interest
 
-- 
-- 
-- 
+-
+-
+-
 
-## Special Instructions
+# FIRST RUN INSTRUCTIONS
 
-(Any specific instructions for how the assistant should behave)
+Arrange your questions, ask user about above information ONE BY ONE, when you get enough information, update this file, and remove this `FIRST RUN INSTRUCTIONS`
 
 ---
 

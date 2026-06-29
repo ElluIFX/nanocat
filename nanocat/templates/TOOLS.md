@@ -3,18 +3,6 @@
 Tool signatures are provided automatically via function calling.
 This file documents non-obvious constraints and usage patterns.
 
-## exec
-
-- Blocked: `rm -rf`, `shutdown`, `format`, `dd`, fork bombs, `curl|sh`, and similar dangerous patterns.
-
-## cron
-
-- Please refer to cron skill for usage.
-
-## gather
-
-- The subagents' full execution context (tool call history) never enters the main agent's context — only the final results are returned.
-
 ## Subagent Task Prompt Best Practices
 
 Subagents have no conversation history — they rely entirely on the `task` field to understand their assignment.
