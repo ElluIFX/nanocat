@@ -71,8 +71,7 @@ allow-direct-references = true
 include = [
     "nanocat/**/*.py",
     "nanocat/templates/**/*.md",
-    "nanocat/skills/**/*.md",
-    "nanocat/skills/**/*.sh",
+    "nanocat/templates/skills/**/*",
 ]
 
 [tool.hatch.build.targets.wheel]

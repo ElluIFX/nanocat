@@ -153,11 +153,28 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         dest.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
         added.append(str(dest.relative_to(workspace)))
 
+    def _copytree(src, dest: Path):
+        dest.mkdir(parents=True, exist_ok=True)
+        for child in src.iterdir():
+            target = dest / child.name
+            if child.is_dir():
+                _copytree(child, target)
+            else:
+                target.write_bytes(child.read_bytes())
+
     for item in tpl.iterdir():
         if item.name.endswith(".md") and not item.name.startswith("."):
             _write(item, workspace / item.name)
     _write(tpl / "MEMORY.md", workspace / "MEMORY.md")
-    (workspace / "skills").mkdir(exist_ok=True)
+
+    skills_dst = workspace / "skills"
+    skills_dst.mkdir(exist_ok=True)
+    skills_src = tpl / "skills"
+    if skills_src.is_dir():
+        for skill in skills_src.iterdir():
+            if skill.is_dir() and not (skills_dst / skill.name).exists():
+                _copytree(skill, skills_dst / skill.name)
+                added.append(str((skills_dst / skill.name).relative_to(workspace)))
 
     if added and not silent:
         for name in added:

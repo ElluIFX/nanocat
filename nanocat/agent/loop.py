@@ -25,7 +25,6 @@ from nanocat.agent.memory import (
     NowledgeMemoryManager,
     NowledgeThreadManager,
 )
-from nanocat.agent.skills import BUILTIN_SKILLS_DIR
 from nanocat.agent.subagent import (
     SubagentGatherTool,
     SubagentKillTool,
@@ -276,7 +275,7 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        extra_read = [BUILTIN_SKILLS_DIR, Path(tempfile.gettempdir())]
+        extra_read = [Path(tempfile.gettempdir())]
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         if self._config.tools.enabled_builtin_tools.file_tools:
             for cls in (

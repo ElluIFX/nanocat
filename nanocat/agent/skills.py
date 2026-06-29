@@ -6,22 +6,20 @@ import re
 import shutil
 from pathlib import Path
 
-# Default builtin skills directory (relative to this file)
-BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
-
 
 class SkillsLoader:
     """
     Loader for agent skills.
 
     Skills are markdown files (SKILL.md) that teach the agent how to use
-    specific tools or perform certain tasks.
+    specific tools or perform certain tasks. Built-in skills are synced into
+    the workspace on startup (see sync_workspace_templates), so the loader only
+    ever reads from ``workspace/skills``.
     """
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+    def __init__(self, workspace: Path):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
-        self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
@@ -34,8 +32,6 @@ class SkillsLoader:
             List of skill info dicts with 'name', 'path', 'source'.
         """
         skills = []
-
-        # Workspace skills (highest priority)
         if self.workspace_skills.exists():
             for skill_dir in self.workspace_skills.iterdir():
                 if skill_dir.is_dir():
@@ -43,15 +39,6 @@ class SkillsLoader:
                     if skill_file.exists():
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
 
-        # Built-in skills
-        if self.builtin_skills and self.builtin_skills.exists():
-            for skill_dir in self.builtin_skills.iterdir():
-                if skill_dir.is_dir():
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
-
-        # Filter by requirements
         if filter_unavailable:
             return [s for s in skills if self._check_requirements(self._get_skill_meta(s["name"]))]
         return skills
@@ -66,17 +53,9 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
-        # Check workspace first
         workspace_skill = self.workspace_skills / name / "SKILL.md"
         if workspace_skill.exists():
             return workspace_skill.read_text(encoding="utf-8")
-
-        # Check built-in
-        if self.builtin_skills:
-            builtin_skill = self.builtin_skills / name / "SKILL.md"
-            if builtin_skill.exists():
-                return builtin_skill.read_text(encoding="utf-8")
-
         return None
 
     def load_skills_for_context(self, skill_names: list[str]) -> str:
