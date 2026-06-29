@@ -375,6 +375,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.workdir is None:
+        repo_root = Path(__file__).resolve().parents[2]
+        if Path.cwd().resolve() == repo_root:
+            args.workdir = str(repo_root / "data")
+
     run_gateway(
         workdir=args.workdir,
         verbose=args.verbose,

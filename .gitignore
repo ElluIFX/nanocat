@@ -27,6 +27,7 @@ AGENT.md
 CLAUDE.md
 
 # nanocat runtime state (anchored at the working dir, default = CWD)
+/data/
 /config.json
 /workspace/
 /sessions/
