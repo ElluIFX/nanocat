@@ -9,8 +9,10 @@ def tool_ok(**fields: Any) -> str:
     """JSON success envelope shared by every tool: ``{"ok": true, ...fields}``.
 
     Content-bearing tools put their payload under a ``content`` key alongside any
-    metadata (e.g. ``tool_ok(content=text, path=p, truncated=False)``)."""
-    return json.dumps({"ok": True, **fields}, ensure_ascii=False)
+    metadata (e.g. ``tool_ok(content=text, path=p)``)."""
+    data = {"ok": True}
+    data.update({k: v for k, v in fields.items() if v is not None})
+    return json.dumps(data, ensure_ascii=False)
 
 
 def exc_message(e: BaseException) -> str:

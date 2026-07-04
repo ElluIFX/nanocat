@@ -91,7 +91,6 @@ class _FsTool(Tool):
 class ReadFileTool(_FsTool):
     """Read file contents with optional line-based pagination."""
 
-    _MAX_CHARS = 128_000
     _DEFAULT_LIMIT = 2000
 
     @property
@@ -151,7 +150,7 @@ class ReadFileTool(_FsTool):
             if offset < 1:
                 offset = 1
             if total == 0:
-                return tool_ok(path=str(fp), total_lines=0, content="")
+                return tool_ok(total_lines=0, content="")
             if offset > total:
                 return _err(f"offset {offset} is beyond end of file ({total} lines)")
 
@@ -160,21 +159,9 @@ class ReadFileTool(_FsTool):
             numbered = [f"{start + i + 1}| {line}" for i, line in enumerate(all_lines[start:end])]
             content = "\n".join(numbered)
 
-            if len(content) > self._MAX_CHARS:
-                trimmed, chars = [], 0
-                for line in numbered:
-                    chars += len(line) + 1
-                    if chars > self._MAX_CHARS:
-                        break
-                    trimmed.append(line)
-                end = start + len(trimmed)
-                content = "\n".join(trimmed)
-
             return tool_ok(
-                path=str(fp),
                 total_lines=total,
                 showing=[offset, end],
-                truncated=end < total,
                 next_offset=end + 1 if end < total else None,
                 content=content,
             )
@@ -365,7 +352,7 @@ class WriteFileTool(_FsTool):
             fp = self._resolve(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
-            return tool_ok(path=str(fp), bytes_written=len(content.encode("utf-8")))
+            return tool_ok(bytes_written=len(content.encode("utf-8")))
         except PermissionError as e:
             return _err(str(e))
         except Exception as e:
@@ -474,8 +461,7 @@ class EditFileTool(_FsTool):
                 total = len(lines)
                 if line_start < 1 or line_end > total or line_start > line_end:
                     return _err(
-                        f"line range {line_start}-{line_end} out of bounds "
-                        f"(file has {total} lines)"
+                        f"line range {line_start}-{line_end} out of bounds (file has {total} lines)"
                     )
                 norm_new = new_text.replace("\r\n", "\n")
                 if norm_new and not norm_new.endswith("\n"):
@@ -485,7 +471,7 @@ class EditFileTool(_FsTool):
                 if uses_crlf:
                     new_content = new_content.replace("\n", "\r\n")
                 fp.write_bytes(new_content.encode("utf-8"))
-                return tool_ok(path=str(fp), lines_replaced=[line_start, line_end])
+                return tool_ok(lines_replaced=[line_start, line_end])
 
             # Text-match replace mode
             if old_text is None:
@@ -508,7 +494,7 @@ class EditFileTool(_FsTool):
             if uses_crlf:
                 new_content = new_content.replace("\n", "\r\n")
             fp.write_bytes(new_content.encode("utf-8"))
-            return tool_ok(path=str(fp), replacements=replacements)
+            return tool_ok(replacements=replacements)
         except PermissionError as e:
             return _err(str(e))
         except Exception as e:
@@ -636,14 +622,9 @@ class ListDirTool(_FsTool):
                         items.append(f"{pfx}{item.name}")
 
             if not items and total == 0:
-                return tool_ok(path=str(dp), entries=[], total=0, truncated=False)
+                return tool_ok(entries=[], total=0)
 
-            return tool_ok(
-                path=str(dp),
-                entries=items,
-                total=total,
-                truncated=total > cap,
-            )
+            return tool_ok(entries=items, total=total, showing=len(items))
         except PermissionError as e:
             return _err(str(e))
         except Exception as e:
@@ -743,11 +724,8 @@ class GrepFileTool(_FsTool):
                             }
                         )
 
-        truncated = match_count > max_matches
         return tool_ok(
-            path=str(fp),
-            matches=match_count if not truncated else f"{max_matches}+",
-            truncated=truncated,
+            matches=match_count if match_count <= max_matches else f"{max_matches}+",
             results=results,
         )
 
@@ -813,7 +791,7 @@ class InsertLinesTool(_FsTool):
             if uses_crlf:
                 new_content = new_content.replace("\n", "\r\n")
             fp.write_bytes(new_content.encode("utf-8"))
-            return tool_ok(path=str(fp), inserted_at=line, after=after)
+            return tool_ok(inserted_at=line, after=after)
         except PermissionError as e:
             return _err(str(e))
         except Exception as e:
@@ -867,8 +845,7 @@ class DeleteLinesTool(_FsTool):
             total = len(lines)
             if line_start < 1 or line_end > total or line_start > line_end:
                 return _err(
-                    f"line range {line_start}-{line_end} out of bounds "
-                    f"(file has {total} lines)"
+                    f"line range {line_start}-{line_end} out of bounds (file has {total} lines)"
                 )
             del lines[line_start - 1 : line_end]
             new_content = "".join(lines)
@@ -876,7 +853,6 @@ class DeleteLinesTool(_FsTool):
                 new_content = new_content.replace("\n", "\r\n")
             fp.write_bytes(new_content.encode("utf-8"))
             return tool_ok(
-                path=str(fp),
                 deleted_lines=[line_start, line_end],
                 lines_remaining=len(lines),
             )
@@ -965,15 +941,15 @@ class DeleteTool(_FsTool):
                 except PermissionError:
                     continue
             if not matched:
-                return [], {"path": entry, "error": f"No paths matched pattern: {entry}"}
+                return [], {"error": f"No paths matched pattern: {entry}"}
             return matched, None
 
         try:
             fp = self._resolve(entry)
         except PermissionError as e:
-            return [], {"path": entry, "error": str(e)}
+            return [], {"error": str(e)}
         if not fp.exists() and not fp.is_symlink():
-            return [], {"path": entry, "error": f"Path not found: {entry}"}
+            return [], {"error": f"Path not found: {entry}"}
         return [fp], None
 
     def _delete_one(self, fp: Path, to_trash: bool, recursive: bool) -> dict[str, Any]:
@@ -1113,7 +1089,6 @@ class FileHexTool(_FsTool):
     """Read or write raw bytes at a given offset, with hex+ASCII display."""
 
     _DEFAULT_LENGTH = 256
-    _MAX_LENGTH = 4096
 
     @property
     def name(self) -> str:
@@ -1183,12 +1158,12 @@ class FileHexTool(_FsTool):
                     raw.extend(b"\x00" * (end - len(raw)))
                 raw[offset:end] = data
                 fp.write_bytes(bytes(raw))
-                return tool_ok(path=str(fp), offset=offset, bytes_written=len(data))
+                return tool_ok(offset=offset, bytes_written=len(data))
 
             # read mode
             if not fp.exists():
                 return _err(f"File not found: {path}")
-            n = min(length or self._DEFAULT_LENGTH, self._MAX_LENGTH)
+            n = length or self._DEFAULT_LENGTH
             raw = fp.read_bytes()
             file_size = len(raw)
             chunk = raw[offset : offset + n]
@@ -1204,11 +1179,9 @@ class FileHexTool(_FsTool):
                 lines.append(f"{addr}  {hex_part}  {ascii_part}")
 
             return tool_ok(
-                path=str(fp),
                 offset=offset,
                 length=actual,
                 file_size=file_size,
-                truncated=(offset + actual) < file_size,
                 next_offset=offset + actual if (offset + actual) < file_size else None,
                 hex_dump="\n".join(lines),
             )

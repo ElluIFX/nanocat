@@ -23,7 +23,6 @@ import httpx
 from nanocat.agent.tools.base import Tool, exc_message
 
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
-_MAX_BODY = 100_000  # cap; oversized bodies also hit the global tool-result truncation
 _RESP_HEADER_KEYS = ("content-type", "content-length", "location", "server", "set-cookie")
 
 
@@ -199,9 +198,6 @@ class HttpRequestTool(Tool):
                 return json.dumps({"ok": False, "error": "redirect blocked", "detail": err})
 
         text = resp.text
-        truncated = len(text) > _MAX_BODY
-        if truncated:
-            text = text[:_MAX_BODY]
 
         result: dict[str, Any] = {
             "ok": True,
@@ -209,7 +205,6 @@ class HttpRequestTool(Tool):
             "url": str(resp.url),
             "headers": {k: resp.headers.get(k) for k in _RESP_HEADER_KEYS if k in resp.headers},
             "body": text,
-            "body_truncated": truncated,
             "elapsed_s": round(resp.elapsed.total_seconds(), 3),
         }
         if sid:
