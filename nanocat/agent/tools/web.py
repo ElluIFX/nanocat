@@ -80,29 +80,37 @@ def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
 
 
 class WebSearchTool(Tool):
-    """Search the web using configured provider."""
-
-    name = "web_search"
-    description = "Search the web. Returns titles, URLs, and snippets."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search query"},
-            "count": {
-                "type": "integer",
-                "description": "Results (1-10)",
-                "minimum": 1,
-                "maximum": 10,
-            },
-        },
-        "required": ["query"],
-    }
+    """Search the web using the configured provider."""
 
     def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None):
         from nanocat.config.schema import WebSearchConfig
 
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
+
+    @property
+    def name(self) -> str:
+        return "web_search"
+
+    @property
+    def description(self) -> str:
+        return "Search the web. Returns titles, URLs, and snippets."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "count": {
+                    "type": "integer",
+                    "description": "Results (1-10)",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+            },
+            "required": ["query"],
+        }
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         provider = self.config.provider.strip().lower() or "brave"
@@ -241,28 +249,36 @@ class WebSearchTool(Tool):
 
 
 class WebFetchTool(Tool):
-    """Fetch and extract content from a URL."""
-
-    name = "web_fetch"
-    description = "Fetch URL and extract readable content."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "URL to fetch"},
-            "extract_mode": {
-                "type": "string",
-                "enum": ["markdown", "text", "raw"],
-                "default": "markdown",
-                "description": "raw HTML -> text / markdown",
-            },
-            "max_chars": {"type": "integer", "minimum": 100},
-        },
-        "required": ["url"],
-    }
+    """Fetch and extract readable content from a URL."""
 
     def __init__(self, max_chars: int = 50000, proxy: str | None = None):
         self.max_chars = max_chars
         self.proxy = proxy
+
+    @property
+    def name(self) -> str:
+        return "web_fetch"
+
+    @property
+    def description(self) -> str:
+        return "Fetch URL and extract readable content."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch"},
+                "extract_mode": {
+                    "type": "string",
+                    "enum": ["markdown", "text", "raw"],
+                    "default": "markdown",
+                    "description": "raw HTML -> text / markdown",
+                },
+                "max_chars": {"type": "integer", "minimum": 100},
+            },
+            "required": ["url"],
+        }
 
     async def execute(
         self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any
