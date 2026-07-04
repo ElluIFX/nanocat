@@ -112,12 +112,14 @@ class ReadFileTool(_FsTool):
                 "path": {"type": "string", "description": "The file path to read"},
                 "offset": {
                     "type": "integer",
-                    "description": "Line number to start reading from (1-indexed, default 1)",
+                    "default": 1,
+                    "description": "Line number to start reading from (1-indexed)",
                     "minimum": 1,
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to read (default 2000)",
+                    "default": 2000,
+                    "description": "Maximum number of lines to read",
                     "minimum": 1,
                 },
                 "encoding": {
@@ -390,6 +392,18 @@ def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
     return None, 0
 
 
+def _py_syntax_error(text: str) -> str | None:
+    """Return a short description if *text* is not valid Python, else None."""
+    import ast
+
+    try:
+        ast.parse(text)
+        return None
+    except SyntaxError as e:
+        loc = f"line {e.lineno}" + (f":{e.offset}" if e.offset else "")
+        return f"{loc}: {e.msg}"
+
+
 class EditFileTool(_FsTool):
     """Edit a file by replacing text with fallback matching."""
 
@@ -400,9 +414,12 @@ class EditFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Edit a file by replacing old_text with new_text. "
-            "Supports minor whitespace/line-ending differences. "
-            "Set replace_all=true to replace every occurrence."
+            "Edit a file by replacing old_text with new_text (text-match), or a line range "
+            "(line_start/line_end). Supports minor whitespace/line-ending differences. "
+            "Line numbers shift after any edit: in line-range mode also pass old_text so the "
+            "tool verifies those lines still match and rejects the edit (asking you to re-read) "
+            "if they don't. For .py files, an edit that would introduce a syntax error into a "
+            "previously-valid file is rejected. Set replace_all=true to replace every occurrence."
         )
 
     @property
@@ -418,7 +435,8 @@ class EditFileTool(_FsTool):
                 "new_text": {"type": "string", "description": "Replacement text"},
                 "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all occurrences (default false)",
+                    "default": False,
+                    "description": "Replace all occurrences",
                 },
                 "line_start": {
                     "type": "integer",
@@ -461,17 +479,34 @@ class EditFileTool(_FsTool):
                 total = len(lines)
                 if line_start < 1 or line_end > total or line_start > line_end:
                     return _err(
-                        f"line range {line_start}-{line_end} out of bounds (file has {total} lines)"
+                        f"line range {line_start}-{line_end} out of bounds (file has {total} lines).",
+                        "Line numbers shift after any prior edit — re-read the file, or pass old_text "
+                        "to match by content instead of line numbers.",
                     )
+                # Guard against stale line numbers: if the caller states what those lines
+                # currently hold (old_text), verify it before overwriting blindly.
+                if old_text is not None:
+                    target = "".join(lines[line_start - 1 : line_end])
+                    if target.strip() != old_text.replace("\r\n", "\n").strip():
+                        return _err(
+                            f"lines {line_start}-{line_end} no longer match old_text; "
+                            "the file changed since it was read.",
+                            "Re-read the file to get current line numbers and content, then retry.",
+                        )
                 norm_new = new_text.replace("\r\n", "\n")
                 if norm_new and not norm_new.endswith("\n"):
                     norm_new += "\n"
-                new_lines = lines[: line_start - 1] + [norm_new] + lines[line_end:]
-                new_content = "".join(new_lines)
-                if uses_crlf:
-                    new_content = new_content.replace("\n", "\r\n")
+                lf_content = "".join(lines[: line_start - 1] + [norm_new] + lines[line_end:])
+                guard = self._py_syntax_guard(fp, content, lf_content)
+                new_content = lf_content.replace("\n", "\r\n") if uses_crlf else lf_content
                 fp.write_bytes(new_content.encode("utf-8"))
-                return tool_ok(lines_replaced=[line_start, line_end])
+                new_total = len(lf_content.splitlines())
+                return tool_ok(
+                    lines_replaced=[line_start, line_end],
+                    new_total_lines=new_total,
+                    line_delta=new_total - total,
+                    py_syntax=guard,
+                )
 
             # Text-match replace mode
             if old_text is None:
@@ -486,19 +521,39 @@ class EditFileTool(_FsTool):
                 )
             norm_new = new_text.replace("\r\n", "\n")
             replacements = count if replace_all else 1
-            new_content = (
+            lf_content = (
                 content.replace(match, norm_new)
                 if replace_all
                 else content.replace(match, norm_new, 1)
             )
-            if uses_crlf:
-                new_content = new_content.replace("\n", "\r\n")
+            guard = self._py_syntax_guard(fp, content, lf_content)
+            if guard:
+                return guard
+            new_content = lf_content.replace("\n", "\r\n") if uses_crlf else lf_content
             fp.write_bytes(new_content.encode("utf-8"))
-            return tool_ok(replacements=replacements)
+            return tool_ok(replacements=replacements, new_total_lines=len(lf_content.splitlines()))
         except PermissionError as e:
             return _err(str(e))
         except Exception as e:
             return _err(f"Error editing file: {e}")
+
+    @staticmethod
+    def _py_syntax_guard(fp: Path, before: str, after: str) -> str | None:
+        """Reject a .py edit that turns a valid file invalid (inputs are LF-normalised).
+
+        Only fires when the file *was* syntactically valid, so it never blocks a
+        legitimate multi-step edit that passes through a temporarily-broken state.
+        """
+        if fp.suffix != ".py":
+            return None
+        after_err = _py_syntax_error(after)
+        if after_err and _py_syntax_error(before) is None:
+            return _err(
+                f"edit would introduce a Python syntax error ({after_err}); file left unchanged.",
+                "Re-read the file (line numbers may have shifted) and retry; for tangled "
+                "multi-edit sessions, rewrite the whole function via an old_text match.",
+            )
+        return None
 
     @staticmethod
     def _not_found_msg(old_text: str, content: str, path: str) -> str:
@@ -575,11 +630,13 @@ class ListDirTool(_FsTool):
                 "path": {"type": "string", "description": "The directory path to list"},
                 "recursive": {
                     "type": "boolean",
-                    "description": "Recursively list all files (default false)",
+                    "default": False,
+                    "description": "Recursively list all files",
                 },
                 "max_entries": {
                     "type": "integer",
-                    "description": "Maximum entries to return (default 200)",
+                    "default": 200,
+                    "description": "Maximum entries to return",
                     "minimum": 1,
                 },
             },
@@ -657,12 +714,14 @@ class GrepFileTool(_FsTool):
                 "context_lines": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Lines of context before/after each match (default 0)",
+                    "default": 0,
+                    "description": "Lines of context before/after each match",
                 },
                 "max_matches": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max matches to return (default 50)",
+                    "default": 50,
+                    "description": "Max matches to return",
                 },
                 "encoding": {
                     "type": "string",
@@ -763,7 +822,8 @@ class InsertLinesTool(_FsTool):
                 },
                 "after": {
                     "type": "boolean",
-                    "description": "Insert after the line (default true); false = insert before",
+                    "default": True,
+                    "description": "Insert after the line; false = insert before",
                 },
             },
             "required": ["path", "line", "text"],
@@ -1111,17 +1171,20 @@ class FileHexTool(_FsTool):
                 "mode": {
                     "type": "string",
                     "enum": ["read", "write"],
-                    "description": "read or write (default read)",
+                    "default": "read",
+                    "description": "read or write",
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Byte offset (default 0)",
+                    "default": 0,
+                    "description": "Byte offset",
                 },
                 "length": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": f"Bytes to read (default {self._DEFAULT_LENGTH}, max {self._MAX_LENGTH})",
+                    "default": self._DEFAULT_LENGTH,
+                    "description": "Bytes to read",
                 },
                 "hex_data": {
                     "type": "string",

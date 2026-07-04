@@ -123,7 +123,7 @@ class ProcStartTool(Tool):
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Shell command to run"},
-                "cwd": {"type": "string", "description": "Working directory (default: workspace)"},
+                "cwd": {"type": "string", "description": "Working directory; defaults to the workspace"},
                 "cols": {
                     "type": "integer",
                     "default": _DEFAULT_COLS,

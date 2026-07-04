@@ -115,9 +115,10 @@ class ExecTool(Tool):
                 },
                 "timeout": {
                     "type": "integer",
+                    "default": 60,
                     "description": (
                         "Timeout in seconds. Increase for long-running commands "
-                        "like compilation or installation (default 60, max 600)."
+                        "like compilation or installation."
                     ),
                     "minimum": 1,
                     "maximum": 600,
@@ -126,7 +127,7 @@ class ExecTool(Tool):
                     "type": "boolean",
                     "default": True,
                     "description": (
-                        "subprocess shell=. True (default): via system shell "
+                        "subprocess shell=. True: via system shell "
                         "(pipes/redirects/builtins). False: direct exec of argv-split command."
                     ),
                 },
