@@ -181,9 +181,7 @@ class HeartbeatService:
                 response = await self.on_execute(tasks)
 
                 if response:
-                    should_notify = await evaluate_response(
-                        response, tasks, self.provider, self.model,
-                    )
+                    should_notify = await evaluate_response(response, tasks)
                     if should_notify and self.on_notify:
                         logger.info("Heartbeat: completed, delivering response")
                         await self.on_notify(response)
