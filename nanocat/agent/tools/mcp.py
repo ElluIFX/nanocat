@@ -78,7 +78,9 @@ async def connect_mcp_servers(
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.sse import sse_client
     from mcp.client.stdio import stdio_client
-    from mcp.client.streamable_http import streamable_http_client
+    from mcp.client.streamable_http import (
+        streamable_http_client,  # pyright: ignore[reportAttributeAccessIssue]
+    )
 
     for name, cfg in mcp_servers.items():
         try:

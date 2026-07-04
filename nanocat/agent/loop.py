@@ -67,7 +67,6 @@ from nanocat.agent.tools.ssh import (
     SSHSendTool,
 )
 from nanocat.agent.tools.todo import TodoTool
-from nanocat.agent.tools.vision import ParseImageTool, ScreenshotTool
 from nanocat.agent.tools.wait import WaitTool
 from nanocat.agent.tools.web import WebFetchTool, WebSearchTool
 from nanocat.bus.events import InboundMessage, OutboundMessage
@@ -303,13 +302,20 @@ class AgentLoop:
                 force_to_trash=self._config.tools.filesystem.force_del_to_trash,
             )
         )
-        if self._config.tools.enabled_builtin_tools.image_tools:
-            self.tools.register(
-                LoadImageTool(workspace=self.workspace, extra_allowed_dirs=extra_read)
-            )
-            self.tools.register(ParseImageTool(workspace=str(self.workspace)))
-        if self._config.tools.enabled_builtin_tools.screenshot:
-            self.tools.register(ScreenshotTool())
+
+        try:
+            from nanocat.agent.tools.vision import ParseImageTool, ScreenshotTool
+
+            if self._config.tools.enabled_builtin_tools.image_tools:
+                self.tools.register(
+                    LoadImageTool(workspace=self.workspace, extra_allowed_dirs=extra_read)
+                )
+                self.tools.register(ParseImageTool(workspace=str(self.workspace)))
+            if self._config.tools.enabled_builtin_tools.screenshot:
+                self.tools.register(ScreenshotTool())
+        except ImportError:
+            logger.debug("Vision tools are not available due to PIL missing, skipping registration")
+
         self._reg(
             ExecTool(
                 working_dir=str(self.workspace),
@@ -417,13 +423,13 @@ class AgentLoop:
         for name in ("message", "ask", "wait", "subagent_spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))  # pyright: ignore
         if (ask := self.tools.get("ask")) and hasattr(ask, "set_session_key"):
-            ask.set_session_key(session_key or f"{channel}:{chat_id}")
+            ask.set_session_key(session_key or f"{channel}:{chat_id}")  # pyright: ignore
         if session is not None:
             if todo_tool := self.tools.get("todo"):
                 if hasattr(todo_tool, "set_context"):
-                    todo_tool.set_context(channel, chat_id, session)
+                    todo_tool.set_context(channel, chat_id, session)  # pyright: ignore
 
     async def _wait_for_reply(self, session_key: str, timeout: float | None) -> str | None:
         """Block until the user's next message for *session_key* arrives, or timeout.
@@ -786,9 +792,7 @@ class AgentLoop:
                                 {
                                     "id": tc.id,
                                     "name": tc.name,
-                                    "status": "error"
-                                    if self._tool_result_failed(r)
-                                    else "ok",
+                                    "status": "error" if self._tool_result_failed(r) else "ok",
                                     "preview": self._preview_text(r)[:160],
                                 }
                                 for _, tc, r in sorted(_results, key=lambda x: x[0])

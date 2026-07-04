@@ -269,7 +269,7 @@ Keep MEMORY.md concise — it is loaded on every turn."""
 
         system_content = self.build_system_prompt(skill_names)
 
-        messages = [{"role": "system", "content": system_content}]
+        messages: list[dict] = [{"role": "system", "content": system_content}]
         if compacted_msg:
             messages.append(compacted_msg)
         messages.extend(history)

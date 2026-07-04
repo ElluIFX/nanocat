@@ -183,16 +183,19 @@ class Tool(ABC):
         if "enum" in schema and val not in schema["enum"]:
             errors.append(f"{label} must be one of {schema['enum']}")
         if t in ("integer", "number"):
+            assert isinstance(val, (int, float, bool))
             if "minimum" in schema and val < schema["minimum"]:
                 errors.append(f"{label} must be >= {schema['minimum']}")
             if "maximum" in schema and val > schema["maximum"]:
                 errors.append(f"{label} must be <= {schema['maximum']}")
         if t == "string":
+            assert isinstance(val, str)
             if "minLength" in schema and len(val) < schema["minLength"]:
                 errors.append(f"{label} must be at least {schema['minLength']} chars")
             if "maxLength" in schema and len(val) > schema["maxLength"]:
                 errors.append(f"{label} must be at most {schema['maxLength']} chars")
         if t == "object":
+            assert isinstance(val, dict)
             props = schema.get("properties", {})
             for k in schema.get("required", []):
                 if k not in val:
@@ -201,6 +204,7 @@ class Tool(ABC):
                 if k in props:
                     errors.extend(self._validate(v, props[k], path + "." + k if path else k))
         if t == "array" and "items" in schema:
+            assert isinstance(val, (list, tuple))
             for i, item in enumerate(val):
                 errors.extend(
                     self._validate(item, schema["items"], f"{path}[{i}]" if path else f"[{i}]")

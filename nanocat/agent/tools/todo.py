@@ -45,13 +45,17 @@ def _render_md(todo: TodoList) -> str:
     return "\n".join(rows)
 
 
-def _get_store(session: Session) -> dict[str, Any]:
+def _get_store(session: Session | None) -> dict[str, Any]:
+    if session is None:
+        return {}
     if _SESSION_KEY not in session.metadata:
         session.metadata[_SESSION_KEY] = {}
     return session.metadata[_SESSION_KEY]
 
 
-def _load(session: Session, todo_id: str) -> TodoList | None:
+def _load(session: Session | None, todo_id: str) -> TodoList | None:
+    if session is None:
+        return None
     store = _get_store(session)
     raw = store.get(todo_id)
     if raw is None:
@@ -63,7 +67,9 @@ def _load(session: Session, todo_id: str) -> TodoList | None:
     )
 
 
-def _save(session: Session, todo: TodoList) -> None:
+def _save(session: Session | None, todo: TodoList) -> None:
+    if session is None:
+        return
     store = _get_store(session)
     store[todo.id] = {
         "id": todo.id,

@@ -12,14 +12,7 @@ import io
 from datetime import datetime
 from typing import Any
 
-# Soft import — Pillow is an optional dependency.
-try:
-    from PIL import Image
-
-    _PIL_AVAILABLE = True
-except ImportError:
-    _PIL_AVAILABLE = False
-    Image = None  # type: ignore[assignment]
+from PIL import Image
 
 from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 from nanocat.utils.helpers import detect_image_mime
@@ -111,11 +104,6 @@ async def parse_image_via_model(
 
     from nanocat.config.loader import get_runtime_config
     from nanocat.providers.manager import get_provider
-
-    if not _PIL_AVAILABLE:
-        return tool_err(
-            "Pillow is not installed. Install it with 'pip install Pillow' to use image parsing."
-        )
 
     img_path = _Path(path).expanduser()
     if not img_path.is_absolute() and workspace:
