@@ -164,7 +164,6 @@ class ReadFileTool(_FsTool):
             return tool_ok(
                 total_lines=total,
                 showing=[offset, end],
-                next_offset=end + 1 if end < total else None,
                 content=content,
             )
         except PermissionError as e:
@@ -1245,7 +1244,6 @@ class FileHexTool(_FsTool):
                 offset=offset,
                 length=actual,
                 file_size=file_size,
-                next_offset=offset + actual if (offset + actual) < file_size else None,
                 hex_dump="\n".join(lines),
             )
         except PermissionError as e:
