@@ -293,7 +293,7 @@ class LoadImageTool(_FsTool):
             scale = max_edge / longest
             new_w = int(w * scale)
             new_h = int(h * scale)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
+            img = img.resize((new_w, new_h), Image.LANCZOS)  # pyright: ignore[reportAttributeAccessIssue]
 
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
@@ -496,7 +496,6 @@ class EditFileTool(_FsTool):
                 if norm_new and not norm_new.endswith("\n"):
                     norm_new += "\n"
                 lf_content = "".join(lines[: line_start - 1] + [norm_new] + lines[line_end:])
-                guard = self._py_syntax_guard(fp, content, lf_content)
                 new_content = lf_content.replace("\n", "\r\n") if uses_crlf else lf_content
                 fp.write_bytes(new_content.encode("utf-8"))
                 new_total = len(lf_content.splitlines())
@@ -504,7 +503,7 @@ class EditFileTool(_FsTool):
                     lines_replaced=[line_start, line_end],
                     new_total_lines=new_total,
                     line_delta=new_total - total,
-                    py_syntax=guard,
+                    py_syntax_error=_py_syntax_error(lf_content) if fp.suffix == ".py" else None,
                 )
 
             # Text-match replace mode
@@ -525,34 +524,17 @@ class EditFileTool(_FsTool):
                 if replace_all
                 else content.replace(match, norm_new, 1)
             )
-            guard = self._py_syntax_guard(fp, content, lf_content)
-            if guard:
-                return guard
             new_content = lf_content.replace("\n", "\r\n") if uses_crlf else lf_content
             fp.write_bytes(new_content.encode("utf-8"))
-            return tool_ok(replacements=replacements, new_total_lines=len(lf_content.splitlines()))
+            return tool_ok(
+                replacements=replacements,
+                new_total_lines=len(lf_content.splitlines()),
+                py_syntax_error=_py_syntax_error(lf_content) if fp.suffix == ".py" else None,
+            )
         except PermissionError as e:
             return _err(str(e))
         except Exception as e:
             return _err(f"Error editing file: {e}")
-
-    @staticmethod
-    def _py_syntax_guard(fp: Path, before: str, after: str) -> str | None:
-        """Reject a .py edit that turns a valid file invalid (inputs are LF-normalised).
-
-        Only fires when the file *was* syntactically valid, so it never blocks a
-        legitimate multi-step edit that passes through a temporarily-broken state.
-        """
-        if fp.suffix != ".py":
-            return None
-        after_err = _py_syntax_error(after)
-        if after_err and _py_syntax_error(before) is None:
-            return _err(
-                f"edit would introduce a Python syntax error ({after_err}); file left unchanged.",
-                "Re-read the file (line numbers may have shifted) and retry; for tangled "
-                "multi-edit sessions, rewrite the whole function via an old_text match.",
-            )
-        return None
 
     @staticmethod
     def _not_found_msg(old_text: str, content: str, path: str) -> str:
