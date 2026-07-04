@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, Literal
 
 from loguru import logger
 
@@ -198,13 +198,22 @@ class CronService:
             self._timer_task = None
 
     def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
+        """Recompute next run times for enabled jobs.
+
+        Interval ("every") jobs keep their persisted next_run, so a restart does not
+        push the cadence forward by a partial interval; ticks missed during downtime
+        are caught up at fire time by _next_repeat_run. "at"/"cron" jobs are absolute
+        times, so they are recomputed.
+        """
         if not self._store:
             return
         now = _now_ms()
         for job in self._store.jobs:
-            if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+            if not job.enabled:
+                continue
+            if job.schedule.kind == "every" and job.state.next_run_at_ms:
+                continue
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
 
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
@@ -325,7 +334,7 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
-        notify_mode: str = "smart",
+        notify_mode: Literal["never", "always", "smart"] = "smart",
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()

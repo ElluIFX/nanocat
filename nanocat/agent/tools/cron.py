@@ -157,7 +157,7 @@ class CronTool(Tool):
         if tz:
             try:
                 ZoneInfo(tz)
-            except (KeyError, Exception):
+            except Exception:
                 return tool_err(f"unknown timezone '{tz}'")
 
         # Build schedule
