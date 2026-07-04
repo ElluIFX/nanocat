@@ -47,7 +47,7 @@ from nanocat.agent.tools.filesystem import (
     WriteFileTool,
 )
 from nanocat.agent.tools.http import HttpRequestTool, HttpSessionManager
-from nanocat.agent.tools.message import MessageTool
+from nanocat.agent.tools.message import AskTool, MessageTool
 from nanocat.agent.tools.proc import (
     ProcListTool,
     ProcManager,
@@ -277,6 +277,13 @@ class AgentLoop:
         """Register the default set of tools."""
         extra_read = [Path(tempfile.gettempdir())]
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
+        if self._config.tools.enabled_builtin_tools.ask:
+            self.tools.register(
+                AskTool(
+                    send_callback=self.bus.publish_outbound,
+                    reply_waiter=self._wait_for_reply,
+                )
+            )
         if self._config.tools.enabled_builtin_tools.file_tools:
             for cls in (
                 ReadFileTool,
@@ -404,16 +411,42 @@ class AgentLoop:
         chat_id: str,
         message_id: str | None = None,
         session: Session | None = None,
+        session_key: str | None = None,
     ) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "wait", "subagent_spawn", "cron"):
+        for name in ("message", "ask", "wait", "subagent_spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+        if (ask := self.tools.get("ask")) and hasattr(ask, "set_session_key"):
+            ask.set_session_key(session_key or f"{channel}:{chat_id}")
         if session is not None:
             if todo_tool := self.tools.get("todo"):
                 if hasattr(todo_tool, "set_context"):
                     todo_tool.set_context(channel, chat_id, session)
+
+    async def _wait_for_reply(self, session_key: str, timeout: float | None) -> str | None:
+        """Block until the user's next message for *session_key* arrives, or timeout.
+
+        Backs the ``ask`` tool. The turn is in-flight while ``ask`` runs, so an
+        incoming reply lands in the steer buffer (see ``run``); consume it here so
+        it is delivered as the ask answer instead of steering the turn. Returns the
+        reply text, or None on timeout / loop shutdown. A ``/stop`` cancels the
+        owning task, which unblocks this via CancelledError.
+        """
+        deadline = None if timeout is None else asyncio.get_event_loop().time() + timeout
+        while self._running:
+            buf = self._steer_buf.get(session_key)
+            if buf:
+                msg = buf.pop(0)
+                if not buf:
+                    self._steer_buf.pop(session_key, None)
+                content = msg.content
+                return content if isinstance(content, str) else self._preview_text(content)
+            if deadline is not None and asyncio.get_event_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.15)
+        return None
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1677,7 +1710,9 @@ class AgentLoop:
         if not transient:
             await self.memory_compactor.maybe_compact_by_tokens(session)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), session)
+        self._set_tool_context(
+            msg.channel, msg.chat_id, msg.metadata.get("message_id"), session, msg.session_key
+        )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()

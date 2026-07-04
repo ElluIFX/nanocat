@@ -195,6 +195,7 @@ class EnabledBuiltinToolsConfig(Base):
     web_search: bool = True
     web_fetch: bool = True
     wait: bool = True
+    ask: bool = True  # ask tool: pause mid-turn to block for a user reply (needs an interactive channel)
     todo: bool = True
     subagent_tools: bool = True
     ssh_tools: bool = False  # SSH tools (ssh_open/send/read/close/list)
