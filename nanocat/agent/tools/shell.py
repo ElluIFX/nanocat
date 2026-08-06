@@ -174,6 +174,7 @@ class ExecTool(Tool):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
+                    start_new_session=sys.platform != "win32",
                 )
             else:
                 import shlex
@@ -190,6 +191,7 @@ class ExecTool(Tool):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
+                    start_new_session=sys.platform != "win32",
                 )
 
             try:
@@ -247,7 +249,11 @@ class ExecTool(Tool):
                 )
             else:
                 try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    child_pgid = os.getpgid(process.pid)
+                    if child_pgid != os.getpgid(0):
+                        os.killpg(child_pgid, signal.SIGKILL)
+                    else:
+                        process.kill()
                 except (ProcessLookupError, OSError):
                     process.kill()
         except Exception:
