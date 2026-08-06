@@ -82,11 +82,17 @@ def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
 class WebSearchTool(Tool):
     """Search the web using the configured provider."""
 
-    def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None):
+    def __init__(
+        self,
+        config: WebSearchConfig | None = None,
+        proxy: str | None = None,
+        safety_check: bool = True,
+    ):
         from nanocat.config.schema import WebSearchConfig
 
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
+        self._safety_check = safety_check
 
     @property
     def name(self) -> str:
@@ -181,7 +187,11 @@ class WebSearchTool(Tool):
         endpoint = f"{base_url.rstrip('/')}/search"
         from nanocat.security import safety_bypass
 
-        check = _validate_url_safe if not safety_bypass.get() else _validate_url
+        check = (
+            _validate_url_safe
+            if self._safety_check and not safety_bypass.get()
+            else _validate_url
+        )
         is_valid, error_msg = check(endpoint)
         if not is_valid:
             return tool_err(f"invalid SearXNG URL: {error_msg}")
@@ -251,9 +261,15 @@ class WebSearchTool(Tool):
 class WebFetchTool(Tool):
     """Fetch and extract readable content from a URL."""
 
-    def __init__(self, max_chars: int = 50000, proxy: str | None = None):
+    def __init__(
+        self,
+        max_chars: int = 50000,
+        proxy: str | None = None,
+        safety_check: bool = True,
+    ):
         self.max_chars = max_chars
         self.proxy = proxy
+        self._safety_check = safety_check
 
     @property
     def name(self) -> str:
@@ -286,7 +302,7 @@ class WebFetchTool(Tool):
         from nanocat.security import safety_bypass
 
         max_chars = max_chars or self.max_chars
-        if not safety_bypass.get():
+        if self._safety_check and not safety_bypass.get():
             is_valid, error_msg = _validate_url_safe(url)
         else:
             is_valid, error_msg = _validate_url(url)
@@ -353,7 +369,7 @@ class WebFetchTool(Tool):
             from nanocat.security import safety_bypass
             from nanocat.security.network import validate_resolved_url
 
-            if not safety_bypass.get():
+            if self._safety_check and not safety_bypass.get():
                 redir_ok, redir_err = validate_resolved_url(str(r.url))
                 if not redir_ok:
                     return tool_err(f"Redirect blocked: {redir_err}", hint=_APPROVE_HINT, url=url)

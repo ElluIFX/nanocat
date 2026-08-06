@@ -36,7 +36,7 @@ def _resolve_path(
     resolved = p.resolve()
 
     fs_cfg = get_runtime_config().tools.filesystem
-    if not safety_bypass.get():
+    if fs_cfg.safety_check and not safety_bypass.get():
         # Path-pattern guard: matched against the resolved path, normalized to
         # forward slashes and lowercased (so patterns are cross-platform).
         target = str(resolved).replace("\\", "/").lower()
@@ -1079,9 +1079,13 @@ class DeleteTool(_FsTool):
         if self._force_to_trash:
             permanent = False
         elif permanent:
+            from nanocat.config.loader import get_runtime_config
             from nanocat.security import safety_bypass
 
-            if not safety_bypass.get():
+            if (
+                get_runtime_config().tools.filesystem.safety_check
+                and not safety_bypass.get()
+            ):
                 return _err(
                     "Permanent deletion requires approval.",
                     "Ask the user to run /approve, then retry; or omit permanent "

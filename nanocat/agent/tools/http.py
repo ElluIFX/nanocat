@@ -140,9 +140,11 @@ class HttpRequestTool(Tool):
         stream: bool = False,
         **kwargs: Any,
     ) -> str:
+        from nanocat.security import safety_bypass
         from nanocat.security.network import validate_resolved_url, validate_url_target
 
-        if self._safety_check:
+        safety_check = self._safety_check and not safety_bypass.get()
+        if safety_check:
             ok, err = validate_url_target(url)
             if not ok:
                 return json.dumps({"ok": False, "error": "blocked URL", "detail": err})
@@ -192,7 +194,7 @@ class HttpRequestTool(Tool):
             for h in handles:
                 h.close()
 
-        if self._safety_check:
+        if safety_check:
             ok, err = validate_resolved_url(str(resp.url))
             if not ok:
                 return json.dumps({"ok": False, "error": "redirect blocked", "detail": err})
@@ -259,6 +261,7 @@ class HttpRequestTool(Tool):
         timeout: float,
         path: str,
     ) -> None:
+        from nanocat.security import safety_bypass
         from nanocat.security.network import validate_resolved_url
 
         content = body if json_body is None else None
@@ -271,7 +274,7 @@ class HttpRequestTool(Tool):
                 content=content,
                 timeout=timeout,
             ) as resp:
-                if self._safety_check:
+                if self._safety_check and not safety_bypass.get():
                     ok, err = validate_resolved_url(str(resp.url))
                     if not ok:
                         with open(path, "w", encoding="utf-8") as f:

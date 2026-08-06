@@ -145,11 +145,16 @@ def guard_command(
     """
     from nanocat.config.loader import get_runtime_config
 
+    runtime_config = get_runtime_config()
+    cmd_config = runtime_config.tools.cmd
+    if not cmd_config.safety_check:
+        return None
+
     cmd = command.strip()
     lower = cmd.lower()
     workspace_path = Path(workspace).resolve()
     cwd_path = Path(cwd).resolve()
-    restrict = get_runtime_config().tools.cmd.restrict_to_workspace
+    restrict = cmd_config.restrict_to_workspace
 
     # Allow-list check (if configured, ALLOW_ALWAYS acts as strict allow-list)
     if _ALLOW_ALWAYS:
@@ -157,7 +162,7 @@ def guard_command(
             return "Error: Command blocked by safety guard (not in allow-list)"
 
     # Route local file-delete commands to the `delete` tool (recycle-bin aware).
-    if getattr(get_runtime_config().tools.enabled_builtin_tools, "delete", True):
+    if getattr(runtime_config.tools.enabled_builtin_tools, "delete", True):
         if redirect := _delete_redirect(lower):
             return redirect
 

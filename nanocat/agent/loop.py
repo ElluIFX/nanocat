@@ -147,6 +147,8 @@ class AgentLoop:
 
         self._running = False
         self._mcp_stack: AsyncExitStack | None = None
+        self._mcp_task: asyncio.Task[None] | None = None
+        self._mcp_stop: asyncio.Event | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
@@ -326,8 +328,14 @@ class AgentLoop:
                 allow_regex=self.cmd_config.allow_regex or None,
             )
         )
-        self._reg(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
-        self._reg(WebFetchTool(proxy=self.web_proxy))
+        self._reg(
+            WebSearchTool(
+                config=self.web_search_config,
+                proxy=self.web_proxy,
+                safety_check=self.web_safety_check,
+            )
+        )
+        self._reg(WebFetchTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
         self._reg(
             HttpRequestTool(
                 self.http_sessions, proxy=self.web_proxy, safety_check=self.web_safety_check
@@ -391,25 +399,45 @@ class AgentLoop:
         if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
             return
         self._mcp_connecting = True
-        from nanocat.agent.tools.mcp import connect_mcp_servers
-
         logger.info("Connecting to {} MCP server(s)…", len(self._mcp_servers))
+        ready = asyncio.Event()
+        self._mcp_stop = asyncio.Event()
+        self._mcp_task = asyncio.create_task(self._run_mcp_worker(ready, self._mcp_stop))
         try:
-            self._mcp_stack = AsyncExitStack()
-            await self._mcp_stack.__aenter__()
-            await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
-            self._mcp_connected = True
-            logger.info("MCP ready — {} server(s) connected", len(self._mcp_servers))
-        except BaseException as e:
-            logger.error("Failed to connect MCP servers (will retry next message): {}", e)
-            if self._mcp_stack:
-                try:
-                    await self._mcp_stack.aclose()
-                except Exception:
-                    pass
-                self._mcp_stack = None
+            await ready.wait()
         finally:
             self._mcp_connecting = False
+
+    async def _run_mcp_worker(self, ready: asyncio.Event, stop: asyncio.Event) -> None:
+        """Own MCP cancel scopes so transport failures cannot cancel the agent loop."""
+        from nanocat.agent.tools.mcp import connect_mcp_servers
+
+        stack = AsyncExitStack()
+        failure: BaseException | None = None
+        try:
+            await stack.__aenter__()
+            self._mcp_stack = stack
+            await connect_mcp_servers(self._mcp_servers, self.tools, stack)
+            self._mcp_connected = True
+            logger.info("MCP ready — {} server(s) connected", len(self._mcp_servers))
+            ready.set()
+            await stop.wait()
+        except BaseException as exc:
+            failure = exc
+        finally:
+            ready.set()
+            try:
+                await stack.aclose()
+            except BaseException as exc:
+                failure = exc
+            self._mcp_stack = None
+            self._mcp_connected = False
+            if failure is not None and not stop.is_set():
+                logger.error(
+                    "MCP transport stopped unexpectedly: {}: {}",
+                    type(failure).__name__,
+                    failure,
+                )
 
     def _set_tool_context(
         self,
@@ -1543,12 +1571,17 @@ class AgentLoop:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
-        if self._mcp_stack:
+        if self._mcp_task:
+            task = self._mcp_task
+            if self._mcp_stop:
+                self._mcp_stop.set()
             try:
-                await self._mcp_stack.aclose()
-            except (RuntimeError, BaseExceptionGroup):
-                pass  # MCP SDK cancel scope cleanup is noisy but harmless
-            self._mcp_stack = None
+                await task
+            except (asyncio.CancelledError, RuntimeError, BaseExceptionGroup):
+                pass
+            if self._mcp_task is task:
+                self._mcp_task = None
+            self._mcp_stop = None
 
     def _schedule_background(self, coro) -> None:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
