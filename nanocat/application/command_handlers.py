@@ -143,7 +143,7 @@ class RuntimeCommandHandlers:
     async def _memory_command(
         self, command: ParsedCommand, *, session: Any | None = None
     ) -> CommandResult:
-        usage = "/memory status|search|show|add|update|delete|preview|distill|processing"
+        usage = "/memory status|spaces|search|show|add|update|delete|preview|distill|processing"
         if self._memory is None:
             return _error(CommandErrorCode.INVALID_STATE, "Nowledge memory is unavailable.", usage)
         action = command.subcommand
@@ -168,6 +168,23 @@ class RuntimeCommandHandlers:
             if action == "processing":
                 result = await self._memory.processing_status()
                 return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
+            if action == "spaces":
+                result = await self._memory.list_spaces()
+                spaces = result.get("spaces") if isinstance(result, dict) else None
+                if isinstance(spaces, list):
+                    result = {
+                        "enabled": result.get("enabled"),
+                        "spaces": [
+                            {
+                                key: space.get(key)
+                                for key in ("id", "key", "name", "description", "defaultRetrievalMode")
+                                if space.get(key) is not None
+                            }
+                            for space in spaces
+                            if isinstance(space, dict)
+                        ],
+                    }
+                return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
             if action == "search":
                 query = str(options.get("query") or " ".join(args)).strip()
                 if not query:
@@ -183,7 +200,10 @@ class RuntimeCommandHandlers:
             if action == "show":
                 if len(args) != 1:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide exactly one memory id.", "/memory show <memory_id>")
-                result = await self._memory.get_memory(args[0])
+                result = await self._memory.get_memory(
+                    args[0],
+                    space_id=str(options["space-id"]) if options.get("space-id") else None,
+                )
                 return _ok(json.dumps(result or {}, ensure_ascii=False, default=str), effect="no-op")
             if action == "add":
                 content = str(options.get("content") or " ".join(args)).strip()
@@ -193,22 +213,53 @@ class RuntimeCommandHandlers:
                     content=content,
                     title=str(options["title"]) if options.get("title") else None,
                     importance=float(options.get("importance", 0.5)),
+                    labels=[
+                        item.strip()
+                        for item in str(options["labels"]).split(",")
+                        if item.strip()
+                    ]
+                    if options.get("labels")
+                    else None,
+                    unit_type=str(options["unit-type"]) if options.get("unit-type") else None,
+                    space_id=str(options["space-id"]) if options.get("space-id") else None,
+                    source="nanocat",
                 )
-                return _ok(f"Memory added: {result.get('id', 'unknown') if result else 'unavailable'}.")
+                memory = (result.get("memory") or result) if result else {}
+                memory_id = memory.get("id") or memory.get("memory_id") or "unknown"
+                return _ok(f"Memory added: {memory_id}.")
             if action == "update":
                 if len(args) != 1:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide exactly one memory id.", "/memory update <memory_id> --content=<text>")
-                fields = {key: options[key] for key in ("content", "title", "importance") if key in options}
+                fields = {
+                    key: options[key]
+                    for key in ("content", "title", "importance", "unit_type")
+                    if key in options
+                }
+                if "unit-type" in options:
+                    fields["unit_type"] = options["unit-type"]
+                if "labels" in options:
+                    fields["labels"] = [
+                        item.strip()
+                        for item in str(options["labels"]).split(",")
+                        if item.strip()
+                    ]
                 if "importance" in fields:
                     fields["importance"] = float(fields["importance"])
                 if not fields:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide at least one field to update.", usage)
-                result = await self._memory.update_memory(args[0], **fields)
+                result = await self._memory.update_memory(
+                    args[0],
+                    space_id=str(options["space-id"]) if options.get("space-id") else None,
+                    **fields,
+                )
                 return _ok(f"Memory `{args[0]}` updated." if result else f"Memory `{args[0]}` was not updated.")
             if action == "delete":
                 if len(args) != 1:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide exactly one memory id.", "/memory delete <memory_id>")
-                changed = await self._memory.delete_memory(args[0])
+                changed = await self._memory.delete_memory(
+                    args[0],
+                    space_id=str(options["space-id"]) if options.get("space-id") else None,
+                )
                 return _ok(f"Memory `{args[0]}` deleted." if changed else f"Memory `{args[0]}` was not deleted.")
             if action in {"preview", "distill"}:
                 thread_id = (session.metadata if session is not None else {}).get(

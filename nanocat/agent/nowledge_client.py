@@ -117,9 +117,15 @@ class NowledgeClient:
 
             if response.status_code >= 400:
                 retry_status = response.status_code in self._RETRYABLE_STATUS
+                if response.status_code == 404:
+                    error_code = "not_found"
+                elif response.status_code >= 500:
+                    error_code = "server"
+                else:
+                    error_code = "api_error"
                 last_error = NowledgeRequestError(
                     f"Nowledge API returned HTTP {response.status_code}",
-                    code="server" if response.status_code >= 500 else "api_error",
+                    code=error_code,
                     status_code=response.status_code,
                     retryable=retry_status,
                 )
@@ -163,7 +169,7 @@ class NowledgeClient:
         mode: str | None = None,
         include_entities: bool | None = None,
         filter_labels: list[str] | None = None,
-        metadata_filters: Mapping[str, Any] | None = None,
+        metadata_filters: Mapping[str, Any] | list[str] | None = None,
         space_id: str | None = None,
         unit_type: str | None = None,
         **filters: Any,
@@ -173,12 +179,18 @@ class NowledgeClient:
             "mode": mode,
             "include_entities": include_entities,
             "filter_labels": filter_labels,
-            "metadata_filters": metadata_filters,
             "space_id": space_id or self._space_id,
             "unit_type": unit_type,
             **filters,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
+        if metadata_filters:
+            if isinstance(metadata_filters, Mapping):
+                payload["metadata_filters"] = [
+                    f"{key}={value}" for key, value in metadata_filters.items()
+                ]
+            else:
+                payload["metadata_filters"] = metadata_filters
         result = await self._request("POST", "/memories/search", json=payload, retryable=True)
         return result if isinstance(result, list) else []
 
@@ -199,15 +211,30 @@ class NowledgeClient:
         result = await self._request("POST", "/memories", json=payload)
         return result if isinstance(result, dict) else {}
 
-    async def update_memory(self, memory_id: str, **fields: Any) -> dict[str, Any]:
-        result = await self._request("PATCH", f"/memories/{memory_id}", json=fields)
+    async def update_memory(
+        self, memory_id: str, *, space_id: str | None = None, **fields: Any
+    ) -> dict[str, Any]:
+        payload = {key: value for key, value in fields.items() if value is not None}
+        if space_id or self._space_id:
+            payload["space_id"] = space_id or self._space_id
+        result = await self._request("PATCH", f"/memories/{memory_id}", json=payload)
         return result if isinstance(result, dict) else {}
 
-    async def delete_memory(self, memory_id: str, cascade_delete: bool = True) -> bool:
+    async def delete_memory(
+        self,
+        memory_id: str,
+        cascade_delete: bool = True,
+        *,
+        space_id: str | None = None,
+    ) -> bool:
+        params = {
+            "cascade_delete": cascade_delete,
+            "space_id": space_id or self._space_id,
+        }
         await self._request(
             "DELETE",
             f"/memories/{memory_id}",
-            params={"cascade_delete": cascade_delete},
+            params={key: value for key, value in params.items() if value is not None},
         )
         return True
 
@@ -313,13 +340,14 @@ class NowledgeClient:
         mode: str = "full",
         limit: int = 20,
         source: str | None = None,
+        space_id: str | None = None,
     ) -> dict[str, Any]:
         params = {
             "query": query,
             "mode": mode,
             "limit": max(1, min(limit, 500)),
             "source": source,
-            "space_id": self._space_id,
+            "space_id": space_id or self._space_id,
         }
         result = await self._request(
             "GET",
@@ -327,7 +355,11 @@ class NowledgeClient:
             params={key: value for key, value in params.items() if value is not None},
             retryable=True,
         )
-        return result if isinstance(result, dict) else {}
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list):
+            return {"threads": result}
+        return {}
 
     async def get_thread(
         self,
@@ -335,8 +367,9 @@ class NowledgeClient:
         *,
         limit: int | None = None,
         offset: int = 0,
+        space_id: str | None = None,
     ) -> dict[str, Any]:
-        params = {"limit": limit, "offset": offset, "space_id": self._space_id}
+        params = {"limit": limit, "offset": offset, "space_id": space_id or self._space_id}
         result = await self._request(
             "GET",
             f"/threads/{thread_id}",
@@ -397,6 +430,11 @@ class NowledgeClient:
 
     async def agent_status(self) -> dict[str, Any]:
         result = await self._request("GET", "/agent/status", retryable=True)
+        return result if isinstance(result, dict) else {}
+
+    async def list_spaces(self) -> dict[str, Any]:
+        """Return the Nowledge Space roster and product-level settings."""
+        result = await self._request("GET", "/spaces", retryable=True)
         return result if isinstance(result, dict) else {}
 
     async def trigger(self, task: str) -> dict[str, Any]:

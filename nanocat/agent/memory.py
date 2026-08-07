@@ -693,8 +693,14 @@ class NowledgeThreadManager:
                 return
             formatted = self._format_messages(session.key, session.messages)
             content = "\n".join(f"{item['role']}: {item['content']}" for item in formatted)
+            if len(content) > 50_000:
+                content = (
+                    content[:24_900]
+                    + "\n...[middle of thread omitted for triage]...\n"
+                    + content[-24_900:]
+                )
             try:
-                triage = await self._client.triage(content[:50_000])
+                triage = await self._client.triage(content)
                 worth_saving = triage.get(
                     "should_distill",
                     triage.get(

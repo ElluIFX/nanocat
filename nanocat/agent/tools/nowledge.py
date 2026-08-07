@@ -61,6 +61,67 @@ def _clean_search_result(r: dict) -> dict:
     return out
 
 
+def _clean_thread_result(thread: dict[str, Any]) -> dict[str, Any]:
+    """Keep thread search results small while retaining provenance fields."""
+    out: dict[str, Any] = {}
+    for key in (
+        "id",
+        "thread_id",
+        "title",
+        "summary",
+        "message_count",
+        "messages",
+        "date",
+        "is_favorite",
+        "source",
+        "space_id",
+        "project",
+        "workspace",
+        "import_date",
+        "created_at",
+        "updated_at",
+    ):
+        if thread.get(key) is not None:
+            out[key] = thread[key]
+    for key in ("match_count", "matched_messages", "relevance_score"):
+        if thread.get(key) is not None:
+            out[key] = thread[key]
+    return out
+
+
+def _clean_thread(thread: dict[str, Any], *, max_message_chars: int = 8_000) -> dict[str, Any]:
+    """Return a bounded thread view suitable for an LLM observation."""
+    out = _clean_thread_result(thread.get("thread") or thread)
+    messages = thread.get("messages")
+    if isinstance(messages, list):
+        cleaned_messages = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = str(message.get("content") or "")
+            if len(content) > max_message_chars:
+                content = (
+                    content[: max_message_chars // 2]
+                    + "\n...[message clipped by NanoCat]...\n"
+                    + content[-max_message_chars // 2 :]
+                )
+            cleaned_messages.append(
+                {
+                    key: value
+                    for key, value in {
+                        "id": message.get("id"),
+                        "role": message.get("role"),
+                        "content": content,
+                        "order_index": message.get("order_index"),
+                        "timestamp": message.get("timestamp"),
+                    }.items()
+                    if value is not None
+                }
+            )
+        out["messages"] = cleaned_messages
+    return out
+
+
 class MemorySearchTool(Tool):
     def __init__(self, client: NowledgeClient):
         self._client = client
@@ -218,6 +279,24 @@ class MemoryAddTool(Tool):
                         "Relevance score: 0.8-1.0 critical, 0.4-0.7 useful, 0.1-0.3 background context."
                     ),
                 },
+                "unit_type": {
+                    "type": "string",
+                    "enum": [
+                        "fact",
+                        "preference",
+                        "decision",
+                        "plan",
+                        "procedure",
+                        "learning",
+                        "context",
+                        "event",
+                    ],
+                    "description": "Optional Nowledge knowledge unit type.",
+                },
+                "space_id": {
+                    "type": "string",
+                    "description": "Optional Nowledge Space for the new memory.",
+                },
             },
             "required": ["content"],
         }
@@ -228,6 +307,8 @@ class MemoryAddTool(Tool):
         title: str | None = None,
         labels: list[str] | None = None,
         importance: float = 0.5,
+        unit_type: str | None = None,
+        space_id: str | None = None,
         **_: Any,
     ) -> str:
         try:
@@ -236,12 +317,16 @@ class MemoryAddTool(Tool):
                 title=title or None,
                 labels=labels or None,
                 importance=importance,
+                unit_type=unit_type,
+                space_id=space_id,
+                source="nanocat",
             )
         except NowledgeRequestError as exc:
             return tool_err("Nowledge memory creation failed", code=exc.code)
         if not result:
             return tool_err("Failed to save memory (Nowledge Mem may be unavailable).")
-        mem_id = result.get("id") or result.get("memory_id") or "unknown"
+        memory = result.get("memory") or result
+        mem_id = memory.get("id") or memory.get("memory_id") or "unknown"
         return tool_ok(id=mem_id)
 
 
@@ -284,6 +369,29 @@ class MemoryUpdateTool(Tool):
                     "maximum": 1.0,
                     "description": "New importance score.",
                 },
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Replacement label set.",
+                },
+                "unit_type": {
+                    "type": "string",
+                    "enum": [
+                        "fact",
+                        "preference",
+                        "decision",
+                        "plan",
+                        "procedure",
+                        "learning",
+                        "context",
+                        "event",
+                    ],
+                    "description": "New Nowledge knowledge unit type.",
+                },
+                "space_id": {
+                    "type": "string",
+                    "description": "Optional Space guard for the update.",
+                },
             },
             "required": ["memory_id"],
         }
@@ -294,6 +402,9 @@ class MemoryUpdateTool(Tool):
         content: str | None = None,
         title: str | None = None,
         importance: float | None = None,
+        labels: list[str] | None = None,
+        unit_type: str | None = None,
+        space_id: str | None = None,
         **_: Any,
     ) -> str:
         fields: dict[str, Any] = {}
@@ -303,10 +414,14 @@ class MemoryUpdateTool(Tool):
             fields["title"] = title
         if importance is not None:
             fields["importance"] = importance
+        if labels is not None:
+            fields["labels"] = labels
+        if unit_type is not None:
+            fields["unit_type"] = unit_type
         if not fields:
             return tool_err("No fields provided to update.")
         try:
-            result = await self._client.update_memory(memory_id, **fields)
+            result = await self._client.update_memory(memory_id, space_id=space_id, **fields)
         except NowledgeRequestError as exc:
             return tool_err("Nowledge memory update failed", code=exc.code)
         if not result:
@@ -343,13 +458,27 @@ class MemoryDeleteTool(Tool):
                     "default": True,
                     "description": ("Delete related entities."),
                 },
+                "space_id": {
+                    "type": "string",
+                    "description": "Optional Space guard for the deletion.",
+                },
             },
             "required": ["memory_id"],
         }
 
-    async def execute(self, memory_id: str, cascade_delete: bool = True, **_: Any) -> str:
+    async def execute(
+        self,
+        memory_id: str,
+        cascade_delete: bool = True,
+        space_id: str | None = None,
+        **_: Any,
+    ) -> str:
         try:
-            success = await self._client.delete_memory(memory_id, cascade_delete=cascade_delete)
+            success = await self._client.delete_memory(
+                memory_id,
+                cascade_delete=cascade_delete,
+                space_id=space_id,
+            )
         except NowledgeRequestError as exc:
             return tool_err("Nowledge memory deletion failed", code=exc.code)
         if success:
@@ -388,3 +517,121 @@ class ReadWorkingMemoryTool(Tool):
         except NowledgeRequestError as exc:
             return tool_err("Nowledge Working Memory read failed", code=exc.code)
         return tool_ok(content=content or "")
+
+
+class MemoryThreadSearchTool(Tool):
+    def __init__(self, client: NowledgeClient):
+        self._client = client
+
+    @property
+    def name(self) -> str:
+        return "memory_thread_search"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search captured Nowledge conversation Threads. Use this when a memory summary "
+            "is insufficient and the original discussion or tool sequence is needed."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural language query."},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5,
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["full", "suggestions"],
+                    "default": "full",
+                },
+                "source": {"type": "string", "description": "Optional source filter."},
+                "space_id": {"type": "string", "description": "Optional Space filter."},
+            },
+            "required": ["query"],
+        }
+
+    async def execute(
+        self,
+        query: str,
+        limit: int = 5,
+        mode: str = "full",
+        source: str | None = None,
+        space_id: str | None = None,
+        **_: Any,
+    ) -> str:
+        try:
+            result = await self._client.search_threads(
+                query,
+                mode=mode,
+                limit=limit,
+                source=source,
+                space_id=space_id,
+            )
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge Thread search failed", code=exc.code)
+        threads = result.get("threads") or result.get("items") or result.get("results") or []
+        if not isinstance(threads, list):
+            threads = []
+        return tool_ok(threads=[_clean_thread_result(item) for item in threads if isinstance(item, dict)])
+
+
+class MemoryThreadGetTool(Tool):
+    def __init__(self, client: NowledgeClient):
+        self._client = client
+
+    @property
+    def name(self) -> str:
+        return "memory_thread_get"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read a captured Nowledge Thread by ID when exact conversation provenance, "
+            "tool calls, or the original reasoning sequence is required."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string", "description": "Nowledge Thread ID."},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                },
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "space_id": {"type": "string", "description": "Optional Space guard."},
+            },
+            "required": ["thread_id"],
+        }
+
+    async def execute(
+        self,
+        thread_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        space_id: str | None = None,
+        **_: Any,
+    ) -> str:
+        try:
+            result = await self._client.get_thread(
+                thread_id,
+                limit=limit,
+                offset=offset,
+                space_id=space_id,
+            )
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge Thread lookup failed", code=exc.code)
+        if not result:
+            return tool_err("Nowledge Thread was not found")
+        return tool_ok(thread=_clean_thread(result))

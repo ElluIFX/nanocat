@@ -155,9 +155,10 @@ class CommandRouter:
                     name="memory",
                     group="memory",
                     summary="Manage user-visible memory",
-                    usage="/memory status|search|show|add|update|delete|preview|distill|processing",
+                    usage="/memory status|spaces|search|show|add|update|delete|preview|distill|processing",
                     subcommands=(
                         "status",
+                        "spaces",
                         "search",
                         "show",
                         "add",

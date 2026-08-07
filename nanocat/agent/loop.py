@@ -442,6 +442,8 @@ class AgentLoop:
                 MemoryDeleteTool,
                 MemoryGetTool,
                 MemorySearchTool,
+                MemoryThreadGetTool,
+                MemoryThreadSearchTool,
                 MemoryUpdateTool,
                 ReadWorkingMemoryTool,
             )
@@ -451,6 +453,8 @@ class AgentLoop:
             self.tools.register(MemoryAddTool(self.nowledge_client))
             self.tools.register(MemoryUpdateTool(self.nowledge_client))
             self.tools.register(MemoryDeleteTool(self.nowledge_client))
+            self.tools.register(MemoryThreadSearchTool(self.nowledge_client))
+            self.tools.register(MemoryThreadGetTool(self.nowledge_client))
             self.tools.register(ReadWorkingMemoryTool(self.nowledge_client))
 
     async def _connect_mcp(self) -> None:
@@ -797,10 +801,13 @@ class AgentLoop:
             return None
         self._nowledge_working_memory_loaded.add(session.key)
         try:
-            return await asyncio.wait_for(
+            content = await asyncio.wait_for(
                 self.nowledge_client.get_working_memory(space_id=self._config.memory.space_id),
                 timeout=3.0,
-            ) or None
+            )
+            if not content:
+                return None
+            return content[:6_000]
         except (NowledgeRequestError, asyncio.TimeoutError) as exc:
             logger.debug("Nowledge Working Memory skipped for {}: {}", session.key, exc)
             return None
