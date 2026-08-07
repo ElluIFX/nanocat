@@ -1490,7 +1490,8 @@ class AgentLoop:
                 sid = item["id"]
                 name = item["name"] or "Unnamed session"
                 last = item.get("last_active", "")[:16].replace("T", " ")
-                lines.append(f"{i + 1}. `{sid}` · {name} · {last}")
+                turn_count = item.get("turn_count", 0)
+                lines.append(f"{i + 1}. `{sid}` · {name} · {turn_count} turns · {last}")
             return _reply(self.tips.session_list.format(items="\n".join(lines)))
 
         # /session view [id]

@@ -97,11 +97,10 @@ class CommandService:
             return CommandOutcome(handled=True, response=result)
 
         _raw_command, separator, command_tail = msg.content.strip().partition(" ")
-        if command_name in {"model", "session", "sid"}:
-            canonical = "session" if command_name == "sid" else command_name
+        if command_name in {"model", "session"}:
             msg = replace(
                 msg,
-                content=f"/{canonical}{(' ' + command_tail) if separator else ''}",
+                content=f"/{command_name}{(' ' + command_tail) if separator else ''}",
             )
 
         if command_name in {"cron", "memory"}:
@@ -132,7 +131,7 @@ class CommandService:
                 ),
             )
 
-        if command_name in {"help", "commands"}:
+        if command_name == "help":
             query = command_tail.strip() or None
             return CommandOutcome(
                 handled=True,

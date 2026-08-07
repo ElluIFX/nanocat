@@ -76,7 +76,6 @@ class CommandRouter:
         legacy_names = (
             "logs",
             "help",
-            "commands",
             "new",
             "stop",
             "restart",
@@ -89,7 +88,6 @@ class CommandRouter:
         metadata = {
             "logs": ("Show recent runtime logs", "/logs [N]"),
             "help": ("Show command help", "/help [command|group]"),
-            "commands": ("List command groups and usage", "/commands [command|group]"),
             "new": ("Start a new conversation", "/new"),
             "stop": ("Stop the current task", "/stop"),
             "restart": ("Restart the runtime", "/restart"),
@@ -111,7 +109,7 @@ class CommandRouter:
                 CommandSpec(
                     name=name,
                     group="legacy",
-                    aliases=("sid",) if name == "session" else (),
+                    aliases=(),
                     summary=summary,
                     usage=usage,
                     subcommands=("status",) if name == "compact" else (),
