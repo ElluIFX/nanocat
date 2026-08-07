@@ -48,7 +48,7 @@ def normalize_color(value):
 
 def run_ops(input_path: Path, output_path: Path, ops: list[dict]) -> list[dict]:
     openpyxl = require_openpyxl()
-    from openpyxl.styles import Font, PatternFill  # type: ignore
+    from openpyxl.styles import PatternFill  # type: ignore
 
     keep_vba = input_path.suffix.lower() == ".xlsm"
     workbook = openpyxl.load_workbook(str(input_path), keep_vba=keep_vba)

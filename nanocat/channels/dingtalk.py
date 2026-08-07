@@ -17,6 +17,7 @@ from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.schema import Base
+from nanocat.core.ports import ChannelCapabilities
 
 try:
     from dingtalk_stream import (
@@ -126,7 +127,7 @@ class NanoCatDingTalkHandler(CallbackHandler):
 
             # Forward to NanoCat via _on_message (non-blocking).
             # Store reference to prevent GC before task completes.
-            task = asyncio.create_task(
+            task = self.channel._track_task(asyncio.create_task(
                 self.channel._on_message(
                     content,
                     sender_id,
@@ -134,7 +135,7 @@ class NanoCatDingTalkHandler(CallbackHandler):
                     conversation_type,
                     conversation_id,
                 )
-            )
+            ))
             self.channel._background_tasks.add(task)
             task.add_done_callback(self.channel._background_tasks.discard)
 
@@ -168,6 +169,7 @@ class DingTalkChannel(BaseChannel):
 
     name = "dingtalk"
     display_name = "DingTalk"
+    capabilities = ChannelCapabilities(media=True)
     _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
     _AUDIO_EXTS = {".amr", ".mp3", ".wav", ".ogg", ".m4a", ".aac"}
     _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -236,6 +238,20 @@ class DingTalkChannel(BaseChannel):
     async def stop(self) -> None:
         """Stop the DingTalk bot."""
         self._running = False
+        client = self._client
+        self._client = None
+        if client is not None:
+            for method_name in ("stop", "close", "disconnect"):
+                method = getattr(client, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    result = method()
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception as e:
+                    logger.debug("DingTalk client {} failed: {}", method_name, e)
+                break
         # Close the shared HTTP client
         if self._http:
             await self._http.aclose()
@@ -244,6 +260,7 @@ class DingTalkChannel(BaseChannel):
         for task in self._background_tasks:
             task.cancel()
         self._background_tasks.clear()
+        await self._cancel_owned_tasks()
 
     async def _get_access_token(self) -> str | None:
         """Get or refresh Access Token."""
@@ -278,9 +295,12 @@ class DingTalkChannel(BaseChannel):
 
     def _guess_upload_type(self, media_ref: str) -> str:
         ext = Path(urlparse(media_ref).path).suffix.lower()
-        if ext in self._IMAGE_EXTS: return "image"
-        if ext in self._AUDIO_EXTS: return "voice"
-        if ext in self._VIDEO_EXTS: return "video"
+        if ext in self._IMAGE_EXTS:
+            return "image"
+        if ext in self._AUDIO_EXTS:
+            return "voice"
+        if ext in self._VIDEO_EXTS:
+            return "video"
         return "file"
 
     def _guess_filename(self, media_ref: str, upload_type: str) -> str:
@@ -401,8 +421,10 @@ class DingTalkChannel(BaseChannel):
             if resp.status_code != 200:
                 logger.error("DingTalk send failed msgKey={} status={} body={}", msg_key, resp.status_code, body[:500])
                 return False
-            try: result = resp.json()
-            except Exception: result = {}
+            try:
+                result = resp.json()
+            except Exception:
+                result = {}
             errcode = result.get("errcode")
             if errcode not in (None, 0):
                 logger.error("DingTalk send api error msgKey={} errcode={} body={}", msg_key, errcode, body[:500])

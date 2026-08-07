@@ -14,6 +14,11 @@ if (-not $py) {
     Write-Error "Python 3.11+ not found. Please install it first: https://www.python.org/downloads/"
     exit 1
 }
+& $py.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Python 3.11+ is required."
+    exit 1
+}
 
 # --- uv: install via pip if missing ---
 $hasUv = [bool](Get-Command uv -ErrorAction SilentlyContinue)
@@ -26,8 +31,8 @@ if (-not $hasUv) {
 # --- sync deps (textual lives in the optional `tui` extra) and launch ---
 if ($hasUv) {
     uv sync --extra tui
-    uv run nanocat tui
+    uv run nanocat tui -v
 } else {
     & $py.Source -m uv sync --extra tui
-    & $py.Source -m uv run nanocat tui
+    & $py.Source -m uv run nanocat tui -v
 }

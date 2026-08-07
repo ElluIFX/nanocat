@@ -51,32 +51,46 @@ class HeartbeatService:
         self,
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+        provider_resolver: Any | None = None,
+        config: Any | None = None,
     ):
         self.on_execute = on_execute
         self.on_notify = on_notify
+        self._provider_resolver = provider_resolver
+        self._config = config
         self._running = False
         self._task: asyncio.Task | None = None
+        self._tick_lock = asyncio.Lock()
 
     @property
     def workspace(self):
+        if self._config is not None:
+            return self._config.workspace_path
         from nanocat.config.loader import get_runtime_config
 
         return get_runtime_config().workspace_path
 
     @property
     def interval_s(self) -> int:
+        if self._config is not None:
+            return self._config.gateway.heartbeat.interval_s
         from nanocat.config.loader import get_runtime_config
 
         return get_runtime_config().gateway.heartbeat.interval_s
 
     @property
     def enabled(self) -> bool:
+        if self._config is not None:
+            return self._config.gateway.heartbeat.enabled
         from nanocat.config.loader import get_runtime_config
 
         return get_runtime_config().gateway.heartbeat.enabled
 
     @property
     def model(self) -> str:
+        if self._config is not None:
+            cfg = self._config.agents.defaults
+            return cfg.assistant_model or cfg.model
         from nanocat.config.loader import get_runtime_config
 
         cfg = get_runtime_config().agents.defaults
@@ -84,6 +98,8 @@ class HeartbeatService:
 
     @property
     def provider(self):
+        if self._provider_resolver is not None:
+            return self._provider_resolver.resolve(self.model)
         from nanocat.providers.manager import get_provider
 
         return get_provider(self.model)
@@ -146,13 +162,21 @@ class HeartbeatService:
             self._task.cancel()
             self._task = None
 
+    async def close(self) -> None:
+        """Stop the heartbeat loop and wait for its task to exit."""
+        task = self._task
+        self.stop()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _run_loop(self) -> None:
         """Main heartbeat loop."""
         while self._running:
             try:
                 await asyncio.sleep(self.interval_s)
                 if self._running:
-                    await self._tick()
+                    async with self._tick_lock:
+                        await self._tick()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -181,7 +205,12 @@ class HeartbeatService:
                 response = await self.on_execute(tasks)
 
                 if response:
-                    should_notify = await evaluate_response(response, tasks)
+                    should_notify = await evaluate_response(
+                        response,
+                        tasks,
+                        provider_resolver=self._provider_resolver,
+                        config=self._config,
+                    )
                     if should_notify and self.on_notify:
                         logger.info("Heartbeat: completed, delivering response")
                         await self.on_notify(response)
@@ -192,10 +221,14 @@ class HeartbeatService:
 
     async def trigger_now(self) -> str | None:
         """Manually trigger a heartbeat."""
-        content = self._read_heartbeat_file()
-        if not content:
+        if self._tick_lock.locked():
+            logger.debug("Heartbeat trigger skipped: another tick is running")
             return None
-        action, tasks = await self._decide(content)
-        if action != "run" or not self.on_execute:
-            return None
-        return await self.on_execute(tasks)
+        async with self._tick_lock:
+            content = self._read_heartbeat_file()
+            if not content:
+                return None
+            action, tasks = await self._decide(content)
+            if action != "run" or not self.on_execute:
+                return None
+            return await self.on_execute(tasks)

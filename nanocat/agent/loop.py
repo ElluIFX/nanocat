@@ -10,11 +10,12 @@ import re
 import sys
 import tempfile
 import uuid
+import weakref
 from collections import deque
-from contextlib import AsyncExitStack
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 
 from loguru import logger
 
@@ -29,7 +30,6 @@ from nanocat.agent.subagent import (
     SubagentGatherTool,
     SubagentKillTool,
     SubagentListTool,
-    SubagentManager,
     SubagentSpawnTool,
     SubagentSteerTool,
 )
@@ -46,31 +46,41 @@ from nanocat.agent.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-from nanocat.agent.tools.http import HttpRequestTool, HttpSessionManager
+from nanocat.agent.tools.http import HttpRequestTool
 from nanocat.agent.tools.message import AskTool, MessageTool
 from nanocat.agent.tools.proc import (
     ProcListTool,
-    ProcManager,
     ProcReadTool,
     ProcSendTool,
     ProcStartTool,
     ProcStopTool,
 )
-from nanocat.agent.tools.registry import ToolRegistry
 from nanocat.agent.tools.shell import ExecTool
-from nanocat.agent.tools.ssh import (
-    SSHCloseTool,
-    SSHListTool,
-    SSHManager,
-    SSHOpenTool,
-    SSHReadTool,
-    SSHSendTool,
-)
+from nanocat.agent.tools.ssh import SSHCloseTool, SSHListTool, SSHOpenTool, SSHReadTool, SSHSendTool
 from nanocat.agent.tools.todo import TodoTool
 from nanocat.agent.tools.wait import WaitTool
 from nanocat.agent.tools.web import WebFetchTool, WebSearchTool
+from nanocat.application.command_handlers import RuntimeCommandHandlers
+from nanocat.application.command_parser import CommandClassification
+from nanocat.application.command_router import CommandRouter
+from nanocat.application.command_service import CommandCallbacks, CommandService
+from nanocat.application.intervention import parse_intervention_action
+from nanocat.application.mcp_host import MCPHost
+from nanocat.application.providers import RuntimeProviderResolver
+from nanocat.application.text_catalog import USER_TEXT
+from nanocat.application.tool_executor import (
+    ToolExecutionContext,
+    ToolExecutor,
+    ToolTurnAbortedError,
+)
+from nanocat.application.tool_host import ToolHost
+from nanocat.application.turns import TurnCoordinator, TurnState
 from nanocat.bus.events import InboundMessage, OutboundMessage
-from nanocat.bus.queue import MessageBus
+from nanocat.bus.queue import BusClosedError, MessageBus
+from nanocat.core.commands import CommandErrorCode, CommandResult
+from nanocat.core.intervention import InterventionAction, InterventionState
+from nanocat.core.messages import ConversationRef
+from nanocat.security.policy import SecurityPolicy
 from nanocat.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -117,11 +127,16 @@ class AgentLoop:
         config: "Config",
         session_manager: SessionManager | None = None,
         cron_service: "CronService | None" = None,
+        intervention_broker: Any | None = None,
     ):
         from nanocat.config.loader import set_runtime_config
 
         self.bus = bus
         self._config = config
+        self._provider_resolver = RuntimeProviderResolver(config)
+        self._runtime_supervisor: Any | None = None
+        self.command_router = CommandRouter.legacy_compatibility()
+        self.intervention = intervention_broker
         set_runtime_config(config)
 
         _mem = config.memory
@@ -136,34 +151,35 @@ class AgentLoop:
 
         self.sessions = session_manager or SessionManager(get_sessions_dir())
         self.sessions.set_name_generator(self._generate_session_name)
-        self.tools = ToolRegistry()
-        self.subagents = SubagentManager(
-            bus=bus,
-            tools=self.tools,
-        )
-        self.ssh = SSHManager()
-        self.procs = ProcManager()
-        self.http_sessions = HttpSessionManager(proxy=config.tools.web.proxy)
+        self.tool_host = ToolHost(bus=bus, config=config, provider_resolver=self._provider_resolver)
+        self.tools = self.tool_host.registry
+        self.subagents = self.tool_host.subagents
+        self.ssh = self.tool_host.ssh
+        self.procs = self.tool_host.processes
+        self.http_sessions = self.tool_host.http_sessions
 
+        runtime_limits = config.runtime
+        self._turn_slots = asyncio.Semaphore(runtime_limits.max_concurrent_turns)
         self._running = False
-        self._mcp_stack: AsyncExitStack | None = None
-        self._mcp_task: asyncio.Task[None] | None = None
-        self._mcp_stop: asyncio.Event | None = None
-        self._mcp_connected = False
-        self._mcp_connecting = False
+        self._run_stop: asyncio.Event | None = None
+        self.turns = TurnCoordinator()
+        self.mcp_host = MCPHost(self._mcp_servers, self.tools)
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
         self._background_tasks: list[asyncio.Task] = []
-        self._processing_lock = asyncio.Lock()
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._session_gen: dict[str, int] = {}
         self._pending_buf: dict[str, InboundMessage] = {}
         self._steer_buf: dict[str, list[InboundMessage]] = {}
+        self._steer_events: dict[str, asyncio.Event] = {}
         self._progressed: dict[str, bool] = {}
         self.subagents._steer_inject = self._steer_buf
         self.subagents._is_live = lambda sk: any(
             not t.done() for t in self._active_tasks.get(sk, [])
         )
-        self._recent_logs: deque = deque(maxlen=10)
-        logger.add(
+        self._recent_logs: deque = deque(maxlen=1000)
+        self._recent_log_sink_id = logger.add(
             lambda msg: self._recent_logs.append(msg.strip()),
             format="[{time:HH:mm:ss}] [{level}] {message}",
         )
@@ -184,9 +200,31 @@ class AgentLoop:
             else None
         )
         self.nowledge_memory_manager: NowledgeMemoryManager | None = (
-            NowledgeMemoryManager(client=self.nowledge_client)
+            NowledgeMemoryManager(
+                client=self.nowledge_client,
+                provider_resolver=self._provider_resolver,
+                config=config,
+            )
             if self.nowledge_client and _nowledge_cfg.auto_extract_memories
             else None
+        )
+        self.command_handlers = RuntimeCommandHandlers(
+            self.cron_service,
+            self.nowledge_client,
+        )
+        self.command_service = CommandService(
+            self.command_router,
+            self.command_handlers,
+            CommandCallbacks(
+                new_session=self._command_new_session,
+                logs=self._command_logs,
+                intervention_response=self._command_intervention_response,
+                compact=self._command_compact,
+                context=self._handle_context,
+                whoami=self._handle_whoami,
+                model=self._handle_model,
+                session=self._handle_session,
+            ),
         )
 
         self.memory_compactor = MemoryCompactor(
@@ -196,8 +234,21 @@ class AgentLoop:
             threshold=_mem.compaction_threshold,
             no_compact_turns=_mem.no_compact_history_num,
             nowledge_manager=self.nowledge_memory_manager,
+            provider_resolver=self._provider_resolver,
+            config=config,
         )
         self._register_default_tools()
+        self.tool_executor = ToolExecutor(
+            self.tools,
+            SecurityPolicy(
+                config,
+                self.workspace,
+                extra_allowed_dirs=(Path(tempfile.gettempdir()),),
+            ),
+            intervention_broker,
+            max_concurrent_calls=runtime_limits.max_concurrent_tool_calls,
+        )
+        self.subagents.set_tool_executor(self.tool_executor)
 
     # ------------------------------------------------------------------
     # Config-derived properties (single source of truth)
@@ -217,9 +268,12 @@ class AgentLoop:
 
     @property
     def provider(self):
-        from nanocat.providers.manager import get_provider
+        return self._provider_resolver.resolve(self.model)
 
-        return get_provider(self.model)
+    @property
+    def provider_resolver(self) -> RuntimeProviderResolver:
+        """Expose the runtime-owned provider resolver to composed services."""
+        return self._provider_resolver
 
     @property
     def workspace(self):
@@ -243,7 +297,7 @@ class AgentLoop:
 
     @property
     def web_safety_check(self) -> bool:
-        return self._config.tools.web.safety_check
+        return self._config.tools.global_safty_check and self._config.tools.web.safety_check
 
     @property
     def cmd_config(self):
@@ -255,7 +309,7 @@ class AgentLoop:
 
     @property
     def tips(self):
-        return self._config.tips
+        return USER_TEXT
 
     @property
     def channels_config(self):
@@ -296,12 +350,19 @@ class AgentLoop:
                 DeleteLinesTool,
                 FileHexTool,
             ):
-                self.tools.register(cls(workspace=self.workspace, extra_allowed_dirs=extra_read))
+                self.tools.register(
+                    cls(
+                        workspace=self.workspace,
+                        extra_allowed_dirs=extra_read,
+                        filesystem_config=self._config.tools.filesystem,
+                    )
+                )
         self._reg(
             DeleteTool(
                 workspace=self.workspace,
                 extra_allowed_dirs=extra_read,
                 force_to_trash=self._config.tools.filesystem.force_del_to_trash,
+                filesystem_config=self._config.tools.filesystem,
             )
         )
 
@@ -310,9 +371,20 @@ class AgentLoop:
 
             if self._config.tools.enabled_builtin_tools.image_tools:
                 self.tools.register(
-                    LoadImageTool(workspace=self.workspace, extra_allowed_dirs=extra_read)
+                    LoadImageTool(
+                        workspace=self.workspace,
+                        extra_allowed_dirs=extra_read,
+                        filesystem_config=self._config.tools.filesystem,
+                        vision_model=self.model,
+                    )
                 )
-                self.tools.register(ParseImageTool(workspace=str(self.workspace)))
+                self.tools.register(
+                    ParseImageTool(
+                        workspace=str(self.workspace),
+                        provider_resolver=self._provider_resolver,
+                        config=self._config,
+                    )
+                )
             if self._config.tools.enabled_builtin_tools.screenshot:
                 self.tools.register(ScreenshotTool())
         except ImportError:
@@ -396,68 +468,7 @@ class AgentLoop:
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
-        if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
-            return
-        self._mcp_connecting = True
-        logger.info("Connecting to {} MCP server(s)…", len(self._mcp_servers))
-        ready = asyncio.Event()
-        self._mcp_stop = asyncio.Event()
-        self._mcp_task = asyncio.create_task(self._run_mcp_worker(ready, self._mcp_stop))
-        try:
-            await ready.wait()
-        finally:
-            self._mcp_connecting = False
-
-    async def _run_mcp_worker(self, ready: asyncio.Event, stop: asyncio.Event) -> None:
-        """Own MCP cancel scopes so transport failures cannot cancel the agent loop."""
-        from nanocat.agent.tools.mcp import connect_mcp_servers
-
-        stack = AsyncExitStack()
-        failure: BaseException | None = None
-        try:
-            await stack.__aenter__()
-            self._mcp_stack = stack
-            await connect_mcp_servers(self._mcp_servers, self.tools, stack)
-            self._mcp_connected = True
-            logger.info("MCP ready — {} server(s) connected", len(self._mcp_servers))
-            ready.set()
-            await stop.wait()
-        except BaseException as exc:
-            failure = exc
-        finally:
-            ready.set()
-            try:
-                await stack.aclose()
-            except BaseException as exc:
-                failure = exc
-            self._mcp_stack = None
-            self._mcp_connected = False
-            if failure is not None and not stop.is_set():
-                logger.error(
-                    "MCP transport stopped unexpectedly: {}: {}",
-                    type(failure).__name__,
-                    failure,
-                )
-
-    def _set_tool_context(
-        self,
-        channel: str,
-        chat_id: str,
-        message_id: str | None = None,
-        session: Session | None = None,
-        session_key: str | None = None,
-    ) -> None:
-        """Update context for all tools that need routing info."""
-        for name in ("message", "ask", "wait", "subagent_spawn", "cron"):
-            if tool := self.tools.get(name):
-                if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))  # pyright: ignore
-        if (ask := self.tools.get("ask")) and hasattr(ask, "set_session_key"):
-            ask.set_session_key(session_key or f"{channel}:{chat_id}")  # pyright: ignore
-        if session is not None:
-            if todo_tool := self.tools.get("todo"):
-                if hasattr(todo_tool, "set_context"):
-                    todo_tool.set_context(channel, chat_id, session)  # pyright: ignore
+        await self.mcp_host.connect()
 
     async def _wait_for_reply(self, session_key: str, timeout: float | None) -> str | None:
         """Block until the user's next message for *session_key* arrives, or timeout.
@@ -465,11 +476,16 @@ class AgentLoop:
         Backs the ``ask`` tool. The turn is in-flight while ``ask`` runs, so an
         incoming reply lands in the steer buffer (see ``run``); consume it here so
         it is delivered as the ask answer instead of steering the turn. Returns the
-        reply text, or None on timeout / loop shutdown. A ``/stop`` cancels the
-        owning task, which unblocks this via CancelledError.
+        reply text, or None on timeout / loop shutdown. A ``/stop`` or runtime stop
+        wakes this wait immediately.
         """
         deadline = None if timeout is None else asyncio.get_event_loop().time() + timeout
+        reply_event = self._steer_events.setdefault(session_key, asyncio.Event())
         while self._running:
+            # Clear before checking the buffer.  A message arriving after this
+            # point sets the event, while a message already buffered is found
+            # by the check below, so neither path loses a wakeup.
+            reply_event.clear()
             buf = self._steer_buf.get(session_key)
             if buf:
                 msg = buf.pop(0)
@@ -477,10 +493,43 @@ class AgentLoop:
                     self._steer_buf.pop(session_key, None)
                 content = msg.content
                 return content if isinstance(content, str) else self._preview_text(content)
-            if deadline is not None and asyncio.get_event_loop().time() >= deadline:
+            waiters: set[asyncio.Task[Any]] = {
+                asyncio.create_task(reply_event.wait(), name=f"nanocat.ask.{session_key}")
+            }
+            stop_task: asyncio.Task[Any] | None = None
+            if self._run_stop is not None:
+                stop_task = asyncio.create_task(
+                    self._run_stop.wait(), name=f"nanocat.ask-stop.{session_key}"
+                )
+                waiters.add(stop_task)
+            remaining = None
+            if deadline is not None:
+                remaining = max(0.0, deadline - asyncio.get_event_loop().time())
+                if remaining == 0:
+                    for task in waiters:
+                        task.cancel()
+                    await asyncio.gather(*waiters, return_exceptions=True)
+                    return None
+            done, pending = await asyncio.wait(
+                waiters,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if not done:
                 return None
-            await asyncio.sleep(0.15)
+            if stop_task is not None and stop_task in done:
+                return None
         return None
+
+    def _wake_reply_waiter(self, session_key: str) -> None:
+        """Wake an ask tool waiting for the next message in one session."""
+        event = self._steer_events.get(session_key)
+        if event is not None:
+            event.set()
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -511,6 +560,11 @@ class AgentLoop:
         # Telegram-style /cmd@botname support
         return token.split("@", 1)[0].strip().lower() or None
 
+    def _any_session_busy(self) -> bool:
+        """Return whether at least one user turn is actively executing."""
+        active_states = {TurnState.RUNNING, TurnState.WAITING_FOR_USER}
+        return any(record.state in active_states for record in self.turns.snapshot())
+
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
@@ -524,20 +578,9 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
-    # Slash commands that are independent queries and should NOT trigger
-    # cancellation of an in-flight LLM turn.
-    _STANDALONE_CMDS = frozenset(
-        {"/status", "/help", "/new", "/stop", "/restart", "/context", "/whoami", "/compact"}
-    )
-    _STANDALONE_PREFIXES = ("/model", "/session")
-
-    @staticmethod
-    def _is_standalone_cmd(msg: InboundMessage) -> bool:
+    def _is_standalone_cmd(self, msg: InboundMessage) -> bool:
         """Return True if *msg* is an independent command that must not interrupt LLM turns."""
-        cmd = msg.content.strip().lower()
-        if cmd in AgentLoop._STANDALONE_CMDS:
-            return True
-        return cmd.startswith(AgentLoop._STANDALONE_PREFIXES)
+        return self.command_router.is_standalone(msg.content)
 
     @staticmethod
     def _merge_messages(prev: InboundMessage, new: InboundMessage) -> InboundMessage:
@@ -555,6 +598,13 @@ class AgentLoop:
             media=merged_media,
             metadata=new.metadata or prev.metadata,
             session_key_override=new.session_key_override or prev.session_key_override,
+            event_id=new.event_id or prev.event_id,
+            correlation_id=new.correlation_id or prev.correlation_id,
+            priority=new.priority if new.priority is not None else prev.priority,
+            deadline_at=new.deadline_at or prev.deadline_at,
+            request_id=new.request_id or prev.request_id,
+            turn_id=new.turn_id or prev.turn_id,
+            principal_id=new.principal_id or prev.principal_id,
         )
 
     def _intercept_oversized_image(self, result: Any) -> Any:
@@ -721,15 +771,12 @@ class AgentLoop:
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
+        tool_context: ToolExecutionContext,
         on_progress: Callable[..., Awaitable[None]] | None = None,
-        bypass_safety_check: bool = False,
         on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
         session_key: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
-        from nanocat.security import safety_bypass
-
-        _bypass_token = safety_bypass.set(bypass_safety_check) if bypass_safety_check else None
         messages = initial_messages
 
         # Cacheable PULSE spec in system; per-turn trigger is in the user message.
@@ -743,6 +790,7 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        turn_model = tool_context.model or self.model
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -752,10 +800,11 @@ class AgentLoop:
 
             tool_defs = self.tools.get_definitions()
 
-            response = await self.provider.chat_with_retry(
+            provider = self._provider_resolver.resolve(turn_model)
+            response = await provider.chat_with_retry(
                 messages=messages,
                 tools=tool_defs,
-                model=self.model,
+                model=turn_model,
             )
 
             if response.has_tool_calls:
@@ -802,15 +851,17 @@ class AgentLoop:
                         }
                     )
 
-                async def _run_one(idx: int, tc: Any) -> tuple[int, Any, Any]:
-                    result = await self.tools.execute(
-                        tc.name, tc.arguments, bypass_safety_check, self.context.skills
-                    )
-                    return idx, tc, self._intercept_oversized_image(result)
-
-                _results = await asyncio.gather(
-                    *[_run_one(i, tc) for i, tc in enumerate(response.tool_calls)]
+                batch_results = await self.tool_executor.execute_batch(
+                    [(tc.name, tc.arguments) for tc in response.tool_calls],
+                    tool_context,
+                    fallback_skill_loader=self.context.skills,
                 )
+                _results = [
+                    (idx, tc, self._intercept_oversized_image(result))
+                    for idx, (tc, result) in enumerate(
+                        zip(response.tool_calls, batch_results, strict=True)
+                    )
+                ]
 
                 if on_tool_event:
                     await on_tool_event(
@@ -900,36 +951,80 @@ class AgentLoop:
 
         final_content = self._strip_pulse(final_content)
 
-        if _bypass_token is not None:
-            safety_bypass.reset(_bypass_token)
         return final_content, tools_used, messages
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
+        self._run_stop = asyncio.Event()
         await self._connect_mcp()
         logger.info("Agent loop started")
-        asyncio.create_task(self._dispatch_restart_notify())
+        self._schedule_background(self._dispatch_restart_notify())
 
         while self._running:
             try:
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
+                msg = await self._consume_inbound_or_stop()
+                if msg is None:
+                    break
+            except BusClosedError:
+                if not self._running or self.bus.closed:
+                    break
+                raise
             except Exception as e:
                 logger.warning("Error consuming inbound message: {}, continuing...", e)
                 continue
 
-            cmd = msg.content.strip().lower()
-            if cmd == "/stop":
+            intervention_response = await self.command_service.dispatch_intervention(msg)
+            if intervention_response is not None:
+                await self.bus.publish_outbound(
+                    intervention_response
+                )
+                continue
+
+            inspection = self.command_router.inspect(msg.content)
+            escaped_command = False
+            if inspection.classified.kind is CommandClassification.ESCAPED_TEXT:
+                msg = replace(msg, content=inspection.classified.text)
+                escaped_command = True
+            elif inspection.result is not None:
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=self.command_router.feedback(inspection.result),
+                        event_id=msg.event_id,
+                        correlation_id=msg.correlation_id,
+                        metadata={"_control": True},
+                    )
+                )
+                continue
+
+            command_name = self._extract_slash_command(msg.content)
+            is_control_command = not escaped_command and self._is_standalone_cmd(msg)
+            if (
+                self.intervention is not None
+                and not is_control_command
+                and self.intervention.defer(
+                    ConversationRef(msg.channel, msg.chat_id, msg.session_key), msg
+                )
+            ):
+                continue
+            if not escaped_command and command_name == "stop":
+                if self.intervention is not None:
+                    await self.intervention.cancel_session(msg.session_key)
+                self.turns.cancel_session(msg.session_key, "stopped by user")
                 await self._handle_stop(msg)
                 self._pending_buf.pop(msg.session_key, None)
                 self._session_gen.pop(msg.session_key, None)
                 self._steer_buf.pop(msg.session_key, None)
+                self._wake_reply_waiter(msg.session_key)
                 self._progressed.pop(msg.session_key, None)
-            elif cmd == "/restart":
+            elif not escaped_command and command_name == "restart":
+                if self.intervention is not None:
+                    await self.intervention.cancel_session(msg.session_key)
+                self.turns.cancel_session(msg.session_key, "restart requested")
                 await self._handle_restart(msg)
-            elif self._is_standalone_cmd(msg) or msg.channel == "system":
+            elif (not escaped_command and self._is_standalone_cmd(msg)) or msg.channel == "system":
                 # Standalone commands and system messages (e.g. subagent results):
                 # queue normally, do NOT interrupt an in-flight LLM turn.
                 task = asyncio.create_task(self._dispatch(msg))
@@ -954,6 +1049,7 @@ class AgentLoop:
                 # next step — don't cancel, keep its tool calls / thoughts.
                 if live and self._progressed.get(sk):
                     self._steer_buf.setdefault(sk, []).append(msg)
+                    self._wake_reply_waiter(sk)
                     continue
 
                 if live:
@@ -982,6 +1078,23 @@ class AgentLoop:
                         else None
                     )
                 )
+
+    async def _consume_inbound_or_stop(self) -> InboundMessage | None:
+        """Wait for input or stop without polling the bus on a fixed interval."""
+        if self._run_stop is None:
+            return await self.bus.consume_inbound()
+        consume_task = asyncio.create_task(self.bus.consume_inbound())
+        stop_task = asyncio.create_task(self._run_stop.wait())
+        done, _ = await asyncio.wait(
+            (consume_task, stop_task), return_when=asyncio.FIRST_COMPLETED
+        )
+        if consume_task in done:
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+            return consume_task.result()
+        consume_task.cancel()
+        await asyncio.gather(consume_task, return_exceptions=True)
+        return None
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
@@ -1013,6 +1126,10 @@ class AgentLoop:
             )
         )
 
+        if self._runtime_supervisor is not None:
+            await self._runtime_supervisor.request_restart(msg.channel, msg.chat_id)
+            return
+
         try:
             from nanocat.config.paths import get_restart_notify_path
 
@@ -1034,9 +1151,12 @@ class AgentLoop:
 
     async def _dispatch_restart_notify(self) -> None:
         """Send a restart-done notification if one was persisted before the last restart."""
-        from nanocat.config.paths import get_restart_notify_path
+        if self._runtime_supervisor is not None:
+            notify_path = self._runtime_supervisor.runtime.paths.restart_notification
+        else:
+            from nanocat.config.paths import get_restart_notify_path
 
-        notify_path = get_restart_notify_path()
+            notify_path = get_restart_notify_path()
         if not notify_path.exists():
             return
 
@@ -1066,25 +1186,30 @@ class AgentLoop:
     async def _handle_model(self, msg: InboundMessage) -> OutboundMessage:
         """Handle /model command — query or update the active model."""
         from nanocat.config.loader import save_config
-        from nanocat.providers.manager import clear_provider_cache
 
         raw_args = msg.content.strip()[len("/model") :].strip()
         parts = raw_args.split() if raw_args else []
 
         def _format_choices(models: list[str]) -> str:
-            return "\n".join(f"\t{i + 1}. {model}" for i, model in enumerate(models)) or " (empty)"
+            return "\n\n".join(
+                f"{i + 1}. `{model}`" for i, model in enumerate(models)
+            ) or "(empty)"
 
         if not parts:
+            defaults = self._config.agents.defaults
+            provider_name = self._config.get_provider_name(self.model) or "unknown"
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self.tips.model_info.format(
                     agent_model=self.model,
-                    max_model=self._config.agents.defaults.max_model,
                     assistant_model=self.assistant_model,
                     subagent_model=self.subagent_model,
-                    provider_name=self.provider.name,
-                    model_choice=_format_choices(self._config.agents.defaults.model_choice),
+                    provider_name=provider_name,
+                    max_tokens=defaults.max_tokens if defaults.max_tokens is not None else "unlimited",
+                    temperature=defaults.temperature if defaults.temperature is not None else "default",
+                    reasoning_effort=defaults.reasoning_effort or "auto",
+                    model_choice=_format_choices(defaults.model_choice),
                 ),
             )
 
@@ -1154,13 +1279,49 @@ class AgentLoop:
                     content=self.tips.model_error.format(error=str(e)),
                 )
 
-        if subcmd in ("agent", "subagent", "assistant", "max"):
+        if subcmd == "effort":
+            if len(parts) != 2:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(
+                        error="Usage: /model effort auto|low|medium|high|xhigh|max"
+                    ),
+                )
+            requested = parts[1].casefold()
+            clear_effort = requested in {"auto", "none", "off"}
+            if not clear_effort and requested not in {"low", "medium", "high", "xhigh", "max"}:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(
+                        error="Effort must be one of: auto, low, medium, high, xhigh, max"
+                    ),
+                )
+            effort = None if clear_effort else requested
+            try:
+                self._config.agents.defaults.reasoning_effort = effort
+                save_config(self._config)
+                self._provider_resolver.update_reasoning_effort(effort)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Reasoning effort set to `{effort or 'auto'}`.",
+                )
+            except Exception as e:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.tips.model_error.format(error=str(e)),
+                )
+
+        if subcmd in ("agent", "subagent", "assistant"):
             if len(parts) < 2 or not parts[1].isdigit():
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=self.tips.model_error.format(
-                        error="Usage: /model agent|subagent|assistant|max <N>"
+                        error="Usage: /model agent|subagent|assistant <N>"
                     ),
                 )
             choice_number = int(parts[1])
@@ -1175,7 +1336,6 @@ class AgentLoop:
                 "agent": "Main",
                 "subagent": "Subagent",
                 "assistant": "Assistant",
-                "max": "Max",
             }
             try:
                 if subcmd == "agent":
@@ -1184,10 +1344,7 @@ class AgentLoop:
                     self._config.agents.defaults.subagent_model = full_model
                 elif subcmd == "assistant":
                     self._config.agents.defaults.assistant_model = full_model
-                elif subcmd == "max":
-                    self._config.agents.defaults.max_model = full_model
                 save_config(self._config)
-                clear_provider_cache()
 
                 return OutboundMessage(
                     channel=msg.channel,
@@ -1211,8 +1368,6 @@ class AgentLoop:
 
     async def _generate_session_name(self, session: Session, _channel: str) -> str | None:
         """Generate a ≤10-char session name from text-only conversation history."""
-        from nanocat.providers.manager import get_provider
-
         # Extract text-only messages (user + assistant, no tool calls/results)
         text_lines = []
         for msg in session.messages:
@@ -1236,7 +1391,7 @@ class AgentLoop:
             {"role": "user", "content": f"Conversation:\n{history_text}"},
         ]
         try:
-            provider = get_provider(self.assistant_model)
+            provider = self._provider_resolver.resolve(self.assistant_model)
             # Budget must leave room for the title AFTER any chain-of-thought: reasoning
             # models (e.g. deepseek-v4*) spend the whole allowance on reasoning and return
             # empty content if the cap is tiny, so keep it comfortably above the CoT length.
@@ -1307,6 +1462,8 @@ class AgentLoop:
             ok = self.sessions.set_active(msg.channel, msg.chat_id, arg)
             if not ok:
                 return _reply(self.tips.session_not_found.format(session_id=arg))
+            if self.intervention is not None:
+                await self.intervention.cancel_session(msg.session_key)
             s = self.sessions.get_session(msg.channel, arg)
             name = (s.name if s else None) or "Unnamed session"
             return _reply(self.tips.session_switched.format(session_id=arg, name=name))
@@ -1491,108 +1648,242 @@ class AgentLoop:
             ),
         )
 
+    async def _command_new_session(self, msg: InboundMessage, session: Session) -> str:
+        """Reset the active conversation for the application command service."""
+        if self.intervention is not None:
+            await self.intervention.cancel_session(msg.session_key)
+        session.metadata.pop("nowledge_thread_id", None)
+        self.sessions._new_session(msg.channel, msg.chat_id)
+        self._pending_buf.pop(msg.session_key, None)
+        self._session_gen.pop(msg.session_key, None)
+        return self.tips.new_session
+
+    async def _command_compact(self, session: Session) -> str:
+        """Run explicit session compaction for the application command service."""
+        changed = await self.memory_compactor.maybe_compact_by_tokens(session, force=True)
+        return self.tips.compact_completed if changed else self.tips.compact_failed
+
+    def _command_logs(self, msg: InboundMessage) -> OutboundMessage:
+        """Return the requested tail of the in-memory runtime log buffer."""
+        raw_args = msg.content.strip()[len("/logs") :].strip()
+        parts = raw_args.split() if raw_args else []
+        if len(parts) > 1 or (parts and not parts[0].isdigit()):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Usage: /logs [N], where N is a positive integer.",
+            )
+
+        tail_lines = int(parts[0]) if parts else 12
+        if tail_lines <= 0:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Usage: /logs [N], where N is a positive integer.",
+            )
+
+        all_lines = "\n".join(self._recent_logs).splitlines()
+        logs = "\n".join(all_lines[-tail_lines:]) if all_lines else "(no recent logs)"
+        is_busy = self._any_session_busy()
+        status = "🔴 **Busy**" if is_busy else "🟢 **Idle**"
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=f"NanoCat is {status}\n\n## Recent logs (tail {tail_lines})\n\n```log\n{logs}\n```",
+        )
+
+    async def _command_intervention_response(self, msg: InboundMessage) -> OutboundMessage:
+        """Resolve an intervention response without exposing broker details to ingress."""
+        action = parse_intervention_action(msg.content)
+        if action is None:
+            raise ValueError("not an intervention response")
+        conversation = ConversationRef(msg.channel, msg.chat_id, msg.session_key)
+        accepted = False
+        if action.error or self.intervention is None:
+            result = CommandResult(
+                ok=False,
+                code=CommandErrorCode.INTERVENTION_NOT_FOUND,
+                title="Intervention response rejected",
+                message=action.error or "No pending intervention request.",
+                usage="/approve once|turn|forever|cancel, /deny, or /reject",
+            )
+            resolved = None
+        else:
+            resolved = await self.intervention.resolve(
+                msg.principal_id or msg.sender_id,
+                conversation,
+                action.action,
+            )
+            accepted = resolved is not None
+            if accepted and action.action is InterventionAction.REVOKE_SESSION:
+                title = "YOLO approval disabled"
+                message = "Session-wide tool approval is disabled immediately."
+            elif accepted and action.action is InterventionAction.APPROVE_FOREVER:
+                title = "YOLO approval enabled"
+                message = "Session-wide tool approval is enabled until `/approve cancel`."
+            elif accepted:
+                title = "Intervention response accepted"
+                message = "The scheduler accepted the response; the owning turn will resume."
+            else:
+                title = "Intervention response rejected"
+                message = "No matching pending intervention or session approval was found."
+            result = CommandResult(
+                ok=accepted,
+                code="ok" if accepted else CommandErrorCode.INTERVENTION_NOT_FOUND,
+                title=title,
+                message=message,
+                data={
+                    "intervention_action": action.action.value if action.action else "unknown",
+                    "intervention_state": resolved.state.value if resolved else "rejected",
+                },
+            )
+        mode = None
+        if resolved is not None and accepted:
+            if resolved.state is InterventionState.APPROVED_FOREVER:
+                mode = "yolo"
+            elif resolved.state is InterventionState.REVOKED:
+                mode = "auto"
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=self.command_router.feedback(result),
+            event_id=msg.event_id,
+            correlation_id=msg.correlation_id,
+            metadata={
+                "_control": True,
+                "_intervention": True,
+                "_intervention_update": True,
+                "request_id": resolved.request_id if resolved and resolved.request_id else None,
+                "intervention_state": resolved.state.value if resolved else "rejected",
+                "_intervention_mode": mode,
+                "_intervention_action": action.action.value if action.action else "unknown",
+            },
+        )
+
     async def _dispatch(self, msg: InboundMessage, gen: int = 0) -> None:
-        """Process a message under the global lock.
+        """Process a message under the session lock and runtime turn budget.
 
         When *gen* is non-zero, it carries the session generation number so
         that if a newer message arrived during processing (interrupt) this
         task can discard its results transparently.
         """
-        if msg.content.strip().lower() == "/status":
-            is_busy = self._processing_lock.locked()
-            status = "🔴 **Busy**" if is_busy else "🟢 **Idle**"
-            logs = (
-                "\n".join(list(self._recent_logs)[-12:])
-                if self._recent_logs
-                else "(no recent logs)"
-            )
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=f"NanoCat is {status}\n\n---\n\n```log\n{logs}\n```",
-                )
-            )
-            return
+        session_lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+        async with session_lock:
+            async with self._turn_slots:
+                try:
+                    response = await self._process_message(msg)
 
-        async with self._processing_lock:
-            try:
-                response = await self._process_message(msg)
+                    # Discard if a newer message for the same session arrived
+                    # during processing (hard interrupt / merge).
+                    if gen and self._session_gen.get(msg.session_key, 0) != gen:
+                        return
 
-                # Discard if a newer message for the same session arrived
-                # during processing (hard interrupt / merge).
-                if gen and self._session_gen.get(msg.session_key, 0) != gen:
-                    return
+                    if response is not None:
+                        await self.bus.publish_outbound(response)
+                    elif msg.channel == "cli":
+                        await self.bus.publish_outbound(
+                            OutboundMessage(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                content="",
+                                metadata=msg.metadata or {},
+                            )
+                        )
 
-                if response is not None:
-                    await self.bus.publish_outbound(response)
-                elif msg.channel == "cli":
+                    # Clear the pending buffer so the next message starts fresh.
+                    if gen and self._session_gen.get(msg.session_key, 0) == gen:
+                        self._pending_buf.pop(msg.session_key, None)
+
+                except asyncio.CancelledError:
+                    self.turns.cancel_session(msg.session_key, "turn task cancelled")
+                    logger.info("Task cancelled for session {}", msg.session_key)
+                    raise
+                except Exception:
+                    logger.exception("Error processing message for session {}", msg.session_key)
                     await self.bus.publish_outbound(
                         OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
-                            content="",
-                            metadata=msg.metadata or {},
+                            content=self.tips.error,
                         )
                     )
-
-                # Clear the pending buffer so the next message starts fresh.
-                if gen and self._session_gen.get(msg.session_key, 0) == gen:
-                    self._pending_buf.pop(msg.session_key, None)
-
-            except asyncio.CancelledError:
-                logger.info("Task cancelled for session {}", msg.session_key)
-                raise
-            except Exception:
-                logger.exception("Error processing message for session {}", msg.session_key)
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=self.tips.error,
-                    )
-                )
-            finally:
-                sk = msg.session_key
-                if not gen or self._session_gen.get(sk, 0) == gen:
-                    self._progressed.pop(sk, None)
-                    orphans = self._steer_buf.pop(sk, None)
-                    if orphans:
-                        merged = orphans[0]
-                        for extra in orphans[1:]:
-                            merged = self._merge_messages(merged, extra)
-                        await self.bus.publish_inbound(merged)
+                finally:
+                    sk = msg.session_key
+                    if not gen or self._session_gen.get(sk, 0) == gen:
+                        self._progressed.pop(sk, None)
+                        orphans = self._steer_buf.pop(sk, None)
+                        if orphans:
+                            merged = orphans[0]
+                            for extra in orphans[1:]:
+                                merged = self._merge_messages(merged, extra)
+                            await self.bus.publish_inbound(merged)
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, terminate ssh/proc sessions, close MCP."""
-        await self.ssh.close_all()
-        await self.procs.close_all()
-        await self.http_sessions.close_all()
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
-            self._background_tasks.clear()
-        if self._mcp_task:
-            task = self._mcp_task
-            if self._mcp_stop:
-                self._mcp_stop.set()
-            try:
-                await task
-            except (asyncio.CancelledError, RuntimeError, BaseExceptionGroup):
-                pass
-            if self._mcp_task is task:
-                self._mcp_task = None
-            self._mcp_stop = None
+        active_tasks = tuple(
+            task
+            for tasks in self._active_tasks.values()
+            for task in tasks
+            if task is not asyncio.current_task() and not task.done()
+        )
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        self._active_tasks.clear()
+
+        background_tasks = tuple(
+            task
+            for task in self._background_tasks
+            if task is not asyncio.current_task() and not task.done()
+        )
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
+
+        await self.mcp_host.close()
+        await self.tool_host.close()
+        await self.sessions.close()
+        await self._provider_resolver.close()
+        if self._recent_log_sink_id is not None:
+            logger.remove(self._recent_log_sink_id)
+            self._recent_log_sink_id = None
 
     def _schedule_background(self, coro) -> None:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
-        task.add_done_callback(self._background_tasks.remove)
+
+        def _forget(done: asyncio.Task) -> None:
+            try:
+                self._background_tasks.remove(done)
+            except ValueError:
+                pass
+
+        task.add_done_callback(_forget)
 
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        if self._run_stop is not None:
+            self._run_stop.set()
+        for event in self._steer_events.values():
+            event.set()
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        for tasks in self._active_tasks.values():
+            for task in tasks:
+                if task is not current and not task.done():
+                    task.cancel()
         logger.info("Agent loop stopping")
+
+    def set_runtime_supervisor(self, supervisor: Any) -> None:
+        """Attach the composition owner for runtime-control commands."""
+        self._runtime_supervisor = supervisor
 
     async def _process_message(
         self,
@@ -1611,11 +1902,11 @@ class AgentLoop:
             channel, chat_id = (
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
-            logger.info("Processing system message from {}", msg.sender_id)
+            principal_id = msg.principal_id or msg.sender_id
+            logger.info("Processing system message from {}", principal_id)
             session = self.sessions.get_or_create(channel, chat_id)
             if not transient:
                 await self.memory_compactor.maybe_compact_by_tokens(session)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), session)
             history = session.get_history(max_messages=0)
             # System messages (subagent results, etc.) enter as a user-role event so
             # the agent responds to them; matches the steer-injection path's role.
@@ -1632,7 +1923,38 @@ class AgentLoop:
                 subs=self.subagents.context_block(),
             )
             n_initial_sys = len(messages)
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            turn_id = uuid.uuid4().hex
+            self.turns.start(turn_id, msg.session_key, principal_id)
+            tool_context = ToolExecutionContext(
+                turn_id=turn_id,
+                session_key=msg.session_key,
+                conversation=ConversationRef(channel, chat_id, msg.session_key),
+                principal_id=principal_id,
+                state_hook=lambda state: self.turns.transition(turn_id, state),
+                message_id=msg.metadata.get("message_id"),
+                session=session,
+                model=self.model,
+            )
+            try:
+                final_content, _, all_msgs = await self._run_agent_loop(
+                    messages,
+                    tool_context=tool_context,
+                )
+            except ToolTurnAbortedError as exc:
+                self._forget_message_turn(tool_context.turn_id)
+                self.turns.fail(turn_id, exc.message)
+                return OutboundMessage(channel=channel, chat_id=chat_id, content=exc.message)
+            except asyncio.CancelledError:
+                self._forget_message_turn(tool_context.turn_id)
+                self.turns.cancel(turn_id, "turn task cancelled")
+                raise
+            except Exception:
+                self._forget_message_turn(tool_context.turn_id)
+                raise
+            finally:
+                if self.intervention is not None:
+                    await self.intervention.finish_turn(tool_context.turn_id)
+            self.turns.complete(turn_id)
             _old_msg_count_sys = len(session.messages)
             self._save_turn(session, all_msgs, n_initial_sys - 1)
             self.sessions.save(session)
@@ -1643,6 +1965,13 @@ class AgentLoop:
                     self._schedule_background(
                         self.thread_manager.append_turn(session, _new_msgs_sys)
                     )
+            if (message_tool := self.tools.get("message")) and isinstance(
+                message_tool, MessageTool
+            ):
+                sent_in_turn = message_tool.sent_in_turn(tool_context.turn_id)
+                message_tool.forget_turn(tool_context.turn_id)
+                if sent_in_turn:
+                    return None
             return OutboundMessage(
                 channel=channel,
                 chat_id=chat_id,
@@ -1656,103 +1985,14 @@ class AgentLoop:
             session = self.sessions.get_system_session(session_key)
         else:
             session = self.sessions.get_or_create(msg.channel, msg.chat_id)
+            session.metadata["_last_principal_id"] = msg.principal_id or msg.sender_id
 
-        # Slash commands
-        cmd = msg.content.strip().lower()
-        if cmd == "/new":
-            session.metadata.pop("nowledge_thread_id", None)
-            # Create a fresh session and switch to it
-            new_session = self.sessions._new_session(msg.channel, msg.chat_id)
-            self._pending_buf.pop(msg.session_key, None)
-            self._session_gen.pop(msg.session_key, None)
-            session = new_session
-
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=self.tips.new_session
-            )
-        if cmd == "/help":
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=self.tips.help,
-            )
-        if cmd == "/compact":
-            changed = await self.memory_compactor.maybe_compact_by_tokens(session, force=True)
-            content = self.tips.compact_completed if changed else self.tips.compact_failed
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-        if cmd == "/context":
-            return await self._handle_context(msg, session)
-        if cmd == "/whoami":
-            return await self._handle_whoami(msg, session)
-        if msg.content.strip().lower().startswith("/approve"):
-            parts = msg.content.strip().split()
-            if len(parts) > 1:
-                try:
-                    duration = int(parts[1])
-                except ValueError:
-                    duration = 5
-                until = datetime.now() + timedelta(minutes=duration)
-                session.metadata["approve_until"] = until.isoformat()
-                approve_text = f"for {duration} minute(s), expiring at {until.strftime('%H:%M:%S')}"
-            else:
-                session.metadata["approve_once"] = True
-                approve_text = "for this turn only"
-            self.sessions.save(session)
-            msg = InboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                sender_id=msg.sender_id,
-                content=(
-                    f"[APPROVE] You have been granted a temporary safety-check bypass "
-                    f"{approve_text}. Please continue your task."
-                ),
-                metadata=msg.metadata,
-                media=msg.media,
-            )
-            # Fall through to normal message processing
-        # Handle /max command
-        _max_restore: str | None = None
-        if msg.content.strip().lower().startswith("/max"):
-            max_model = self._config.agents.defaults.max_model
-            if max_model:
-                try:
-                    from nanocat.providers.manager import clear_provider_cache
-
-                    _max_restore = self._config.agents.defaults.model
-                    self._config.agents.defaults.model = max_model
-                    clear_provider_cache()
-                except Exception as e:
-                    return OutboundMessage(
-                        channel=msg.channel, chat_id=msg.chat_id, content=f"Error: {e}"
-                    )
-            # Rewrite message (remove /max prefix)
-            prompt = msg.content.strip()[4:].strip()
-            if not prompt:
-                return OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id, content="Usage: /max <prompt>"
-                )
-            msg = InboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                sender_id=msg.sender_id,
-                content=prompt,
-                metadata=msg.metadata,
-                media=msg.media,
-            )
-            # Fall through to normal processing
-        if msg.content.strip().lower().startswith("/model"):
-            return await self._handle_model(msg)
-        if msg.content.strip().lower().startswith("/session"):
-            return await self._handle_session(msg, session)
+        command_outcome = await self.command_service.dispatch(msg, session)
+        if command_outcome.response is not None:
+            return command_outcome.response
+        msg = command_outcome.message or msg
         if not transient:
             await self.memory_compactor.maybe_compact_by_tokens(session)
-
-        self._set_tool_context(
-            msg.channel, msg.chat_id, msg.metadata.get("message_id"), session, msg.session_key
-        )
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool):
-                message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
         injected_memories = await self._auto_inject_memories(msg.content) if not transient else None
@@ -1795,27 +2035,48 @@ class AgentLoop:
                 )
             )
 
-        # Check if a temporary safety-check bypass is active
-        _bypass = False
-        if session.metadata.pop("approve_once", None):
-            _bypass = True
-        else:
-            _approve_str = session.metadata.get("approve_until")
-            if _approve_str:
-                try:
-                    if datetime.fromisoformat(_approve_str) > datetime.now():
-                        _bypass = True
-                except (ValueError, TypeError):
-                    pass
-
         n_initial = len(initial_messages)
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages,
-            on_progress=on_progress or _bus_progress,
-            bypass_safety_check=_bypass,
-            on_tool_event=None if transient else _bus_tool_event,
-            session_key=None if transient else msg.session_key,
+        turn_id = uuid.uuid4().hex
+        principal_id = msg.principal_id or msg.sender_id
+        self.turns.start(turn_id, msg.session_key, principal_id)
+        tool_context = ToolExecutionContext(
+            turn_id=turn_id,
+            session_key=msg.session_key,
+            conversation=ConversationRef(msg.channel, msg.chat_id, msg.session_key),
+            principal_id=principal_id,
+            state_hook=lambda state: self.turns.transition(turn_id, state),
+            message_id=msg.metadata.get("message_id"),
+            session=session,
+            model=self.model,
         )
+        try:
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial_messages,
+                on_progress=on_progress or _bus_progress,
+                on_tool_event=None if transient else _bus_tool_event,
+                session_key=None if transient else msg.session_key,
+                tool_context=tool_context,
+            )
+        except ToolTurnAbortedError as exc:
+            self._forget_message_turn(tool_context.turn_id)
+            self.turns.fail(turn_id, exc.message)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=exc.message,
+                metadata=msg.metadata or {},
+            )
+        except asyncio.CancelledError:
+            self._forget_message_turn(tool_context.turn_id)
+            self.turns.cancel(turn_id, "turn task cancelled")
+            raise
+        except Exception:
+            self._forget_message_turn(tool_context.turn_id)
+            raise
+        finally:
+            if self.intervention is not None:
+                await self.intervention.finish_turn(tool_context.turn_id)
+        self.turns.complete(turn_id)
 
         _old_msg_count = len(session.messages)
         self._save_turn(session, all_msgs, n_initial - 1)
@@ -1826,18 +2087,14 @@ class AgentLoop:
                 _new_msgs = session.messages[_old_msg_count:]
                 self._schedule_background(self.thread_manager.append_turn(session, _new_msgs))
 
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
-            return None
+        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool):
+            sent_in_turn = mt.sent_in_turn(tool_context.turn_id)
+            mt.forget_turn(tool_context.turn_id)
+            if sent_in_turn:
+                return None
 
         if final_content is None:
             final_content = self.tips.no_response
-
-        # Restore model if /max was used
-        if _max_restore is not None:
-            from nanocat.providers.manager import clear_provider_cache
-
-            self._config.agents.defaults.model = _max_restore
-            clear_provider_cache()
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
@@ -1847,6 +2104,12 @@ class AgentLoop:
             content=final_content,
             metadata=msg.metadata or {},
         )
+
+    def _forget_message_turn(self, turn_id: str) -> None:
+        """Release message delivery state for an aborted or failed turn."""
+        message_tool = self.tools.get("message")
+        if isinstance(message_tool, MessageTool):
+            message_tool.forget_turn(turn_id)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
@@ -1907,15 +2170,53 @@ class AgentLoop:
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         transient: bool = False,
+        principal_id: str = "user",
+        metadata: Mapping[str, Any] | None = None,
+        deadline_at: datetime | None = None,
     ) -> str:
         """Process a message directly (for CLI or cron usage).
 
         Set transient=True for background tasks (cron, heartbeat) to skip
         memory compaction and Nowledge thread saving.
         """
-        await self._connect_mcp()
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
-        response = await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress, transient=transient
+        msg = InboundMessage(
+            channel=channel,
+            sender_id=principal_id,
+            principal_id=principal_id,
+            chat_id=chat_id,
+            content=content,
+            metadata=dict(metadata or {}),
         )
-        return response.content if response else ""
+        intervention_response = await self.command_service.dispatch_intervention(msg)
+        if intervention_response is not None:
+            return intervention_response.content
+
+        inspection = self.command_router.inspect(content)
+        if inspection.classified.kind is CommandClassification.ESCAPED_TEXT:
+            pass
+        elif inspection.result is not None:
+            return self.command_router.feedback(inspection.result)
+        elif inspection.spec is not None and inspection.spec.name == "stop":
+            self.stop()
+            return self.tips.stop_idle
+        elif inspection.spec is not None and inspection.spec.name == "restart":
+            await self._handle_restart(msg)
+            return self.tips.restart
+
+        async def _run() -> str:
+            session_lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+            async with session_lock:
+                async with self._turn_slots:
+                    await self._connect_mcp()
+                    response = await self._process_message(
+                        msg, session_key=session_key, on_progress=on_progress, transient=transient
+                    )
+            return response.content if response else ""
+
+        if deadline_at is None:
+            return await _run()
+        now = datetime.now(deadline_at.tzinfo) if deadline_at.tzinfo else datetime.now()
+        remaining = (deadline_at - now).total_seconds()
+        if remaining <= 0:
+            raise TimeoutError("direct turn deadline expired")
+        return await asyncio.wait_for(_run(), timeout=remaining)

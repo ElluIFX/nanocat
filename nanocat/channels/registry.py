@@ -4,14 +4,29 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Mapping
 
 from loguru import logger
+
+from nanocat.core.ports import ChannelCapabilities, resolve_channel_capabilities
 
 if TYPE_CHECKING:
     from nanocat.channels.base import BaseChannel
 
 _INTERNAL = frozenset({"base", "manager", "registry"})
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelDescriptor:
+    """Runtime-neutral metadata for a discovered channel factory."""
+
+    name: str
+    factory: Any
+    source: str = "builtin"
+    version: str = "1"
+    capabilities: ChannelCapabilities = field(default_factory=ChannelCapabilities)
+    config_schema: Mapping[str, Any] = field(default_factory=dict)
 
 
 def discover_channel_names() -> list[str]:
@@ -69,3 +84,24 @@ def discover_all() -> dict[str, type[BaseChannel]]:
         logger.warning("Plugin(s) shadowed by built-in channels (ignored): {}", shadowed)
 
     return {**external, **builtin}
+
+
+def discover_descriptors() -> dict[str, ChannelDescriptor]:
+    """Return discovered factories with capability and config metadata."""
+    channels = discover_all()
+    builtin_names = set(discover_channel_names())
+    descriptors: dict[str, ChannelDescriptor] = {}
+    for name, factory in channels.items():
+        try:
+            config_schema = factory.default_config()
+        except Exception:
+            config_schema = {}
+        descriptors[name] = ChannelDescriptor(
+            name=name,
+            factory=factory,
+            source="builtin" if name in builtin_names else "plugin",
+            version=str(getattr(factory, "version", "1")),
+            capabilities=resolve_channel_capabilities(factory),
+            config_schema=config_schema if isinstance(config_schema, Mapping) else {},
+        )
+    return descriptors

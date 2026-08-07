@@ -19,6 +19,7 @@ from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.paths import get_media_dir
 from nanocat.config.schema import Base
+from nanocat.core.ports import ChannelCapabilities
 from nanocat.security.network import validate_url_target
 from nanocat.utils.helpers import split_message
 
@@ -49,21 +50,19 @@ class TelegramChannel(BaseChannel):
 
     name = "telegram"
     display_name = "Telegram"
+    capabilities = ChannelCapabilities(progress=True, media=True, reply_threads=True)
 
-    # Commands registered with Telegram's command menu
-    BOT_COMMANDS = [
-        BotCommand("start", "Start the bot"),
-        BotCommand("new", "Start a new conversation"),
-        BotCommand("stop", "Stop the current task"),
-        BotCommand("help", "Show available commands"),
-        BotCommand("restart", "Restart the bot"),
-        BotCommand("model", "View or switch the active model"),
-        BotCommand("ctx", "Show context/token panel"),
-        BotCommand("sid", "Show current channel/chat IDs"),
-        BotCommand("compact", "Compact the current conversation"),
-        BotCommand("session", "Save, load, or list sessions"),
-        BotCommand("approve", "Approve safety check for N minutes"),
-    ]
+    # Generate the native menu from the same registry used by the runtime
+    # command router, so command groups stay discoverable as they evolve.
+    @staticmethod
+    def _build_bot_commands() -> list[BotCommand]:
+        from nanocat.application.command_router import CommandRouter
+
+        commands = [BotCommand("start", "Start the bot")]
+        for spec in CommandRouter.legacy_compatibility().registry.specs():
+            description = spec.summary or f"Run /{spec.name}"
+            commands.append(BotCommand(spec.name, description[:256]))
+        return commands
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -129,12 +128,22 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
-        self._app.add_handler(CommandHandler("help", self._on_help))
+        self._app.add_handler(CommandHandler("help", self._forward_command))
+        self._app.add_handler(CommandHandler("commands", self._forward_command))
         self._app.add_handler(CommandHandler("model", self._forward_command))
         self._app.add_handler(CommandHandler("ctx", self._forward_command))
         self._app.add_handler(CommandHandler("sid", self._forward_command))
         self._app.add_handler(CommandHandler("compact", self._forward_command))
         self._app.add_handler(CommandHandler("session", self._forward_command))
+        self._app.add_handler(CommandHandler("approve", self._forward_command))
+        self._app.add_handler(CommandHandler("deny", self._forward_command))
+        self._app.add_handler(CommandHandler("reject", self._forward_command))
+
+        # Telegram's generic message filter excludes all slash commands.  This
+        # fallback preserves unknown candidates so the application command
+        # router can return an explicit unknown_command response instead of
+        # silently dropping a typo.
+        self._app.add_handler(MessageHandler(filters.COMMAND, self._forward_command))
 
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -164,7 +173,7 @@ class TelegramChannel(BaseChannel):
         logger.info("Telegram bot @{} connected", bot_info.username)
 
         try:
-            await self._app.bot.set_my_commands(self.BOT_COMMANDS)
+            await self._app.bot.set_my_commands(self._build_bot_commands())
             logger.debug("Telegram bot commands registered")
         except Exception as e:
             logger.warning("Failed to register bot commands: {}", e)
@@ -192,6 +201,7 @@ class TelegramChannel(BaseChannel):
             task.cancel()
         self._media_group_tasks.clear()
         self._media_group_buffers.clear()
+        await self._cancel_owned_tasks()
 
         if self._app:
             logger.info("Stopping Telegram bot...")
@@ -659,7 +669,9 @@ class TelegramChannel(BaseChannel):
                 buf["contents"].append(content)
             buf["media"].extend(media_paths)
             if key not in self._media_group_tasks:
-                self._media_group_tasks[key] = asyncio.create_task(self._flush_media_group(key))
+                self._media_group_tasks[key] = self._track_task(
+                    asyncio.create_task(self._flush_media_group(key))
+                )
             return
 
         # Start typing indicator before processing
@@ -697,7 +709,9 @@ class TelegramChannel(BaseChannel):
         """Start sending 'typing...' indicator for a chat."""
         # Cancel any existing typing task for this chat
         self._stop_typing(chat_id)
-        self._typing_tasks[chat_id] = asyncio.create_task(self._typing_loop(chat_id))
+        self._typing_tasks[chat_id] = self._track_task(
+            asyncio.create_task(self._typing_loop(chat_id))
+        )
 
     def _stop_typing(self, chat_id: str) -> None:
         """Stop the typing indicator for a chat."""

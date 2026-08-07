@@ -34,30 +34,30 @@ def write_pdf(writer, output_path: Path) -> None:
 
 
 def run_ops(input_path: Path, output_path: Path, ops: list[dict]) -> list[dict]:
-    PdfReader, PdfWriter = require_pypdf()
+    reader_cls, writer_cls = require_pypdf()
     results: list[dict] = []
-    current_reader = PdfReader(str(input_path))
+    current_reader = reader_cls(str(input_path))
 
     for idx, op in enumerate(ops, 1):
         kind = op["op"]
-        writer = PdfWriter()
+        writer = writer_cls()
         if kind == "merge":
             inputs = op.get("inputs")
             if not isinstance(inputs, list) or not inputs:
                 raise DocumentSkillError("merge requires a non-empty inputs list.", code="invalid_operation")
             for item in inputs:
-                reader = PdfReader(str(require_file(item)))
+                reader = reader_cls(str(require_file(item)))
                 for page in reader.pages:
                     writer.add_page(page)
             current_reader = None
             tmp_output = output_path if idx == len(ops) else output_path.with_suffix(f".step{idx}.pdf")
             write_pdf(writer, tmp_output)
-            current_reader = PdfReader(str(tmp_output))
+            current_reader = reader_cls(str(tmp_output))
             results.append({"op": kind, "inputs": len(inputs), "pages": len(current_reader.pages)})
             continue
 
         if current_reader is None:
-            current_reader = PdfReader(str(input_path))
+            current_reader = reader_cls(str(input_path))
         total_pages = len(current_reader.pages)
 
         if kind == "rotate_pages":
@@ -103,7 +103,7 @@ def run_ops(input_path: Path, output_path: Path, ops: list[dict]) -> list[dict]:
 
         tmp_output = output_path if idx == len(ops) else output_path.with_suffix(f".step{idx}.pdf")
         write_pdf(writer, tmp_output)
-        current_reader = PdfReader(str(tmp_output))
+        current_reader = reader_cls(str(tmp_output))
 
     if not ops:
         raise DocumentSkillError("No operations provided.", code="invalid_ops")

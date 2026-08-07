@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import tempfile
 import time
 import uuid
 from datetime import datetime
@@ -77,6 +79,8 @@ class CronService:
         self._store: CronStore | None = None
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
+        self._run_tasks: set[asyncio.Task[Any]] = set()
+        self._job_locks: dict[str, asyncio.Lock] = {}
         self._running = False
         self._timer_running = False  # guard against overlapping _on_timer batches
 
@@ -112,6 +116,7 @@ class CronService:
                                 message=j["payload"].get("message", ""),
                                 channel=j["payload"].get("channel"),
                                 to=j["payload"].get("to"),
+                                principal_id=j["payload"].get("principalId"),
                                 notify_mode=j["payload"].get("notifyMode") or "smart",
                             ),
                             state=CronJobState(
@@ -160,6 +165,7 @@ class CronService:
                         "message": j.payload.message,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
+                        "principalId": j.payload.principal_id,
                         "notifyMode": j.payload.notify_mode,
                     },
                     "state": {
@@ -176,8 +182,26 @@ class CronService:
             ],
         }
 
-        self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        self._last_mtime = self.store_path.stat().st_mtime
+        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{self.store_path.name}.",
+            suffix=".tmp",
+            dir=self.store_path.parent,
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.store_path)
+            self._last_mtime = self.store_path.stat().st_mtime
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+            raise
 
     async def start(self) -> None:
         """Start the cron service."""
@@ -196,6 +220,17 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+
+    async def close(self) -> None:
+        """Stop scheduling and cancel any detached timer execution."""
+        self.stop()
+        tasks = tuple(self._run_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._run_tasks.clear()
+        self._job_locks.clear()
 
     def _recompute_next_runs(self) -> None:
         """Recompute next run times for enabled jobs.
@@ -245,7 +280,9 @@ class CronService:
             # concurrent add/remove or the next tick) only ever cancels a sleeping
             # tick, never an in-flight job execution.
             if self._running:
-                asyncio.create_task(self._on_timer())
+                task = asyncio.create_task(self._on_timer(), name="nanocat.cron.tick")
+                self._run_tasks.add(task)
+                task.add_done_callback(self._run_tasks.discard)
 
         self._timer_task = asyncio.create_task(tick())
 
@@ -270,8 +307,21 @@ class CronService:
             self._timer_running = False
             self._arm_timer()
 
-    async def _execute_job(self, job: CronJob) -> None:
+    async def _execute_job(self, job: CronJob) -> bool:
         """Execute a single job."""
+        lock = self._job_locks.setdefault(job.id, asyncio.Lock())
+        if lock.locked():
+            logger.warning("Cron: job '{}' is already running; skipping duplicate trigger", job.name)
+            return False
+        try:
+            async with lock:
+                return await self._execute_job_locked(job)
+        finally:
+            if job.schedule.kind == "at" and self._job_locks.get(job.id) is lock:
+                self._job_locks.pop(job.id, None)
+
+    async def _execute_job_locked(self, job: CronJob) -> bool:
+        """Execute a job while its per-job lock is held."""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
@@ -300,6 +350,7 @@ class CronService:
                 job.state.next_run_at_ms = None
         else:
             job.state.next_run_at_ms = self._next_repeat_run(job)
+        return True
 
     @staticmethod
     def _next_repeat_run(job: CronJob) -> int | None:
@@ -333,6 +384,7 @@ class CronService:
         message: str,
         channel: str | None = None,
         to: str | None = None,
+        principal_id: str | None = None,
         delete_after_run: bool = False,
         notify_mode: Literal["never", "always", "smart"] = "smart",
     ) -> CronJob:
@@ -351,6 +403,7 @@ class CronService:
                 message=message,
                 channel=channel,
                 to=to,
+                principal_id=principal_id,
                 notify_mode=notify_mode,
             ),
             state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
@@ -403,7 +456,9 @@ class CronService:
             if job.id == job_id:
                 if not force and not job.enabled:
                     return False
-                await self._execute_job(job)
+                executed = await self._execute_job(job)
+                if not executed:
+                    return False
                 self._save_store()
                 self._arm_timer()
                 return True

@@ -16,18 +16,18 @@ def _ms_to_local_iso(ms: int) -> str:
 
 
 class CronTool(Tool):
-    """Tool to schedule reminders and recurring tasks."""
-
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
-        self._channel = ""
-        self._chat_id = ""
+        self._channel_context: ContextVar[str] = ContextVar("cron_channel", default="")
+        self._chat_context: ContextVar[str] = ContextVar("cron_chat", default="")
+        self._principal_context: ContextVar[str] = ContextVar("cron_principal", default="user")
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
-    def set_context(self, channel: str, chat_id: str) -> None:
+    def set_context(self, channel: str, chat_id: str, principal_id: str = "user") -> None:
         """Set the current session context for delivery."""
-        self._channel = channel
-        self._chat_id = chat_id
+        self._channel_context.set(channel)
+        self._chat_context.set(chat_id)
+        self._principal_context.set(principal_id)
 
     def set_cron_context(self, active: bool):
         """Mark whether the tool is executing inside a cron job callback."""
@@ -132,7 +132,10 @@ class CronTool(Tool):
     ) -> str:
         if not task_description:
             return tool_err("task_description is required for add")
-        if not self._channel or not self._chat_id:
+        channel = self._channel_context.get()
+        chat_id = self._chat_context.get()
+        principal_id = self._principal_context.get()
+        if not channel or not chat_id:
             return tool_err("no session context (channel/chat_id)")
 
         # Exactly one schedule must be given; they are mutually exclusive.
@@ -204,8 +207,9 @@ class CronTool(Tool):
             name=task_description[:30],
             schedule=schedule,
             message=task_description,
-            channel=self._channel,
-            to=self._chat_id,
+            channel=channel,
+            to=chat_id,
+            principal_id=principal_id,
             delete_after_run=delete_after,
             notify_mode=notify,
         )

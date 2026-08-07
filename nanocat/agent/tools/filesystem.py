@@ -20,6 +20,7 @@ def _resolve_path(
     path: str,
     workspace: Path | None = None,
     extra_allowed_dirs: list[Path] | None = None,
+    filesystem_config: Any | None = None,
 ) -> Path:
     """Resolve path against workspace (if relative) and enforce directory restriction.
 
@@ -27,7 +28,6 @@ def _resolve_path(
     *extra_allowed_dirs* grant ADDITIONAL access beyond the workspace.
     """
     from nanocat.config.loader import get_runtime_config
-    from nanocat.security import safety_bypass
     from nanocat.security.path import is_under
 
     p = Path(path).expanduser()
@@ -35,23 +35,20 @@ def _resolve_path(
         p = workspace / p
     resolved = p.resolve()
 
-    fs_cfg = get_runtime_config().tools.filesystem
-    if fs_cfg.safety_check and not safety_bypass.get():
+    runtime_config = get_runtime_config()
+    fs_cfg = filesystem_config or runtime_config.tools.filesystem
+    if runtime_config.tools.global_safty_check and fs_cfg.safety_check:
         # Path-pattern guard: matched against the resolved path, normalized to
         # forward slashes and lowercased (so patterns are cross-platform).
         target = str(resolved).replace("\\", "/").lower()
         if fs_cfg.allow_regex and not any(re.search(rx, target) for rx in fs_cfg.allow_regex):
             raise PermissionError(
-                f"Path '{path}' is not in the filesystem allow-list.\n"
-                "Explain to the user that this path is restricted and ask them "
-                "to use /approve to temporarily bypass this check."
+                f"Path '{path}' is not in the filesystem allow-list."
             )
         for rx in fs_cfg.deny_regex:
             if re.search(rx, target):
                 raise PermissionError(
-                    f"Path '{path}' is blocked by a filesystem deny pattern.\n"
-                    "Explain to the user that this path is restricted and ask them "
-                    "to use /approve to temporarily bypass this check."
+                    f"Path '{path}' is blocked by a filesystem deny pattern."
                 )
         if fs_cfg.restrict_to_workspace:
             boundaries: list[Path] = []
@@ -61,26 +58,29 @@ def _resolve_path(
                 boundaries.extend(d.resolve() for d in extra_allowed_dirs)
             if boundaries and not any(is_under(resolved, d) for d in boundaries):
                 raise PermissionError(
-                    f"Path '{path}' is outside the workspace directory.\n"
-                    "Explain to the user that this path is restricted and ask them "
-                    "to use /approve to temporarily bypass this check."
+                    f"Path '{path}' is outside the workspace directory."
                 )
     return resolved
 
 
 class _FsTool(Tool):
-    """Shared base for filesystem tools — common init and path resolution."""
-
     def __init__(
         self,
         workspace: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
+        filesystem_config: Any | None = None,
     ):
         self._workspace = workspace
         self._extra_allowed_dirs = extra_allowed_dirs
+        self._filesystem_config = filesystem_config
 
     def _resolve(self, path: str) -> Path:
-        return _resolve_path(path, self._workspace, self._extra_allowed_dirs)
+        return _resolve_path(
+            path,
+            self._workspace,
+            self._extra_allowed_dirs,
+            self._filesystem_config,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +89,6 @@ class _FsTool(Tool):
 
 
 class ReadFileTool(_FsTool):
-    """Read file contents with optional line-based pagination."""
-
     _DEFAULT_LIMIT = 2000
 
     @property
@@ -184,13 +182,16 @@ class ReadFileTool(_FsTool):
 
 
 class LoadImageTool(_FsTool):
-    """Load image content from file and include EXIF metadata."""
-
     _MAX_BYTES = 12 * 1024 * 1024  # 12MB
 
-    @staticmethod
-    def _is_vision_lacking_model() -> bool:
+    def __init__(self, *args: Any, vision_model: str | None = None, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._vision_model = vision_model
+
+    def _is_vision_lacking_model(self) -> bool:
         """Return True when the active main model cannot process images natively."""
+        if self._vision_model is not None:
+            return "deepseek" in self._vision_model.lower()
         from nanocat.config.loader import get_runtime_config
 
         model = get_runtime_config().agents.defaults.model.lower()
@@ -327,8 +328,6 @@ class LoadImageTool(_FsTool):
 
 
 class WriteFileTool(_FsTool):
-    """Write content to a file."""
-
     @property
     def name(self) -> str:
         return "write_file"
@@ -404,8 +403,6 @@ def _py_syntax_error(text: str) -> str | None:
 
 
 class EditFileTool(_FsTool):
-    """Edit a file by replacing text with fallback matching."""
-
     @property
     def name(self) -> str:
         return "edit_file"
@@ -573,8 +570,6 @@ class EditFileTool(_FsTool):
 
 
 class ListDirTool(_FsTool):
-    """List directory contents with optional recursion."""
-
     _DEFAULT_MAX = 200
     _IGNORE_DIRS = {
         ".git",
@@ -675,8 +670,6 @@ class ListDirTool(_FsTool):
 
 
 class GrepFileTool(_FsTool):
-    """Search file content with regex."""
-
     @property
     def name(self) -> str:
         return "grep_file"
@@ -776,8 +769,6 @@ class GrepFileTool(_FsTool):
 
 
 class InsertLinesTool(_FsTool):
-    """Insert text before or after a given line number."""
-
     @property
     def name(self) -> str:
         return "insert_lines"
@@ -845,8 +836,6 @@ class InsertLinesTool(_FsTool):
 
 
 class DeleteLinesTool(_FsTool):
-    """Delete a range of lines from a file."""
-
     @property
     def name(self) -> str:
         return "delete_lines"
@@ -909,15 +898,14 @@ class DeleteLinesTool(_FsTool):
 
 
 class DeleteTool(_FsTool):
-    """Delete files/directories (paths or glob patterns) — to the recycle bin by default."""
-
     def __init__(
         self,
         workspace: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
         force_to_trash: bool = True,
+        filesystem_config: Any | None = None,
     ):
-        super().__init__(workspace, extra_allowed_dirs)
+        super().__init__(workspace, extra_allowed_dirs, filesystem_config)
         self._force_to_trash = force_to_trash
 
     @property
@@ -954,8 +942,8 @@ class DeleteTool(_FsTool):
             props["permanent"] = {
                 "type": "boolean",
                 "description": (
-                    "Delete irreversibly, bypassing the recycle bin. Requires user approval: "
-                    "blocked by the safety guard unless the user has run /approve."
+                    "Delete irreversibly, bypassing the recycle bin. This operation is "
+                    "gated by the runtime security policy."
                 ),
             }
         return {"type": "object", "properties": props, "required": ["paths"]}
@@ -1080,16 +1068,21 @@ class DeleteTool(_FsTool):
             permanent = False
         elif permanent:
             from nanocat.config.loader import get_runtime_config
-            from nanocat.security import safety_bypass
+            from nanocat.security import ToolAuthorization
 
+            runtime_config = get_runtime_config()
+            if self._filesystem_config is not None:
+                safety_check = self._filesystem_config.safety_check
+            else:
+                safety_check = runtime_config.tools.filesystem.safety_check
+            safety_check = runtime_config.tools.global_safty_check and safety_check
             if (
-                get_runtime_config().tools.filesystem.safety_check
-                and not safety_bypass.get()
+                safety_check
+                and not isinstance(kwargs.get("_security_authorization"), ToolAuthorization)
             ):
                 return _err(
-                    "Permanent deletion requires approval.",
-                    "Ask the user to run /approve, then retry; or omit permanent "
-                    "to send the targets to the recycle bin instead.",
+                    "Permanent deletion is blocked by the runtime security policy.",
+                    "Omit permanent to send the targets to the recycle bin instead.",
                 )
 
         candidates: list[Path] = []
@@ -1131,8 +1124,6 @@ class DeleteTool(_FsTool):
 
 
 class FileHexTool(_FsTool):
-    """Read or write raw bytes at a given offset, with hex+ASCII display."""
-
     _DEFAULT_LENGTH = 256
 
     @property

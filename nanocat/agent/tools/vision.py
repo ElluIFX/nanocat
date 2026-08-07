@@ -94,6 +94,8 @@ async def parse_image_via_model(
     path: str,
     workspace: str | None = None,
     focus: str | None = None,
+    provider_resolver=None,
+    config=None,
 ) -> str:
     """Load, scale, and parse an image through the configured vision model.
 
@@ -102,8 +104,12 @@ async def parse_image_via_model(
     """
     from pathlib import Path as _Path
 
-    from nanocat.config.loader import get_runtime_config
     from nanocat.providers.manager import get_provider
+
+    if config is None:
+        from nanocat.config.loader import get_runtime_config
+
+        config = get_runtime_config()
 
     img_path = _Path(path).expanduser()
     if not img_path.is_absolute() and workspace:
@@ -124,14 +130,18 @@ async def parse_image_via_model(
     img, _mime = _downscale_image(img, raw)
     data_url = _encode_data_url(img, raw)
 
-    cfg = get_runtime_config().agents.defaults
+    cfg = config.agents.defaults
     vision_model = cfg.vision_model or cfg.assistant_model or cfg.model
     if "deepseek" in vision_model.lower():
         for m in cfg.model_choice:
             if "deepseek" not in m.lower():
                 vision_model = m
                 break
-    provider = get_provider(vision_model)
+    provider = (
+        provider_resolver.resolve(vision_model)
+        if provider_resolver is not None
+        else get_provider(vision_model)
+    )
 
     size_note = f"({img.size[0]}x{img.size[1]})"
     if (original_w * original_h) > _MAX_PIXELS:
@@ -167,14 +177,10 @@ async def parse_image_via_model(
 
 
 class ParseImageTool(Tool):
-    """Explicit tool for parsing images through a vision-capable model.
-
-    The LLM can call this directly when it knows it lacks vision capability.
-    Use it independently or in conjunction with the adaptive load_image tool.
-    """
-
-    def __init__(self, workspace: str | None = None):
+    def __init__(self, workspace: str | None = None, provider_resolver=None, config=None):
         self._workspace = workspace
+        self._provider_resolver = provider_resolver
+        self._config = config
 
     @property
     def name(self) -> str:
@@ -215,14 +221,16 @@ class ParseImageTool(Tool):
         if not path:
             return tool_err("'path' parameter is required.")
         focus: str | None = kwargs.get("focus") or None
-        return await parse_image_via_model(path, self._workspace, focus=focus)
+        return await parse_image_via_model(
+            path,
+            self._workspace,
+            focus=focus,
+            provider_resolver=self._provider_resolver,
+            config=self._config,
+        )
 
 
 class ScreenshotTool(Tool):
-    """Capture the screen to an image file the agent can then view via
-    load_image / parse_image. Uses Pillow's ImageGrab (Windows/macOS; on Linux
-    it needs a running X server / scrot)."""
-
     @property
     def name(self) -> str:
         return "screenshot"

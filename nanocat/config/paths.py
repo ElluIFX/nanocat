@@ -5,7 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from nanocat.config.loader import get_config_path
+from nanocat.runtime.paths import RuntimePaths
 from nanocat.utils.helpers import ensure_dir
+
+
+def get_runtime_paths(
+    config_path: Path | None = None,
+    workspace: Path | None = None,
+) -> RuntimePaths:
+    """Return an explicit path binding at the legacy configuration boundary."""
+    return RuntimePaths.from_config_path(config_path or get_config_path(), workspace)
 
 
 def get_data_dir() -> Path:

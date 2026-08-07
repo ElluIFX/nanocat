@@ -80,6 +80,11 @@ class HttpRequestTool(Tool):
         self._proxy = proxy
         self._safety_check = safety_check
 
+    def _safety_enabled(self) -> bool:
+        from nanocat.config.loader import get_runtime_config
+
+        return self._safety_check and get_runtime_config().tools.global_safty_check
+
     @property
     def name(self) -> str:
         return "http_request"
@@ -140,10 +145,9 @@ class HttpRequestTool(Tool):
         stream: bool = False,
         **kwargs: Any,
     ) -> str:
-        from nanocat.security import safety_bypass
         from nanocat.security.network import validate_resolved_url, validate_url_target
 
-        safety_check = self._safety_check and not safety_bypass.get()
+        safety_check = self._safety_enabled()
         if safety_check:
             ok, err = validate_url_target(url)
             if not ok:
@@ -261,7 +265,6 @@ class HttpRequestTool(Tool):
         timeout: float,
         path: str,
     ) -> None:
-        from nanocat.security import safety_bypass
         from nanocat.security.network import validate_resolved_url
 
         content = body if json_body is None else None
@@ -274,7 +277,7 @@ class HttpRequestTool(Tool):
                 content=content,
                 timeout=timeout,
             ) as resp:
-                if self._safety_check and not safety_bypass.get():
+                if self._safety_enabled():
                     ok, err = validate_resolved_url(str(resp.url))
                     if not ok:
                         with open(path, "w", encoding="utf-8") as f:

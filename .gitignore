@@ -23,7 +23,7 @@ nano.*.save
 .DS_Store
 uv.lock
 
-AGENT.md
+AGENTS.md
 CLAUDE.md
 
 # nanocat runtime state (anchored at the working dir, default = CWD)

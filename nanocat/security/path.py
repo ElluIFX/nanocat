@@ -1,7 +1,8 @@
 """Path containment and resolution utilities.
 
-All filesystem and exec tools use these checks so that the bypass
-context var consistently controls path restrictions.
+These helpers are deterministic guards used by both the policy layer and
+legacy tool implementations. Authorization is decided by the application
+executor; the helpers do not carry mutable approval state.
 """
 
 from __future__ import annotations
@@ -49,10 +50,7 @@ def check_path_containment(
     p = p.resolve()
 
     if not p.is_relative_to(workspace.resolve()):
-        return (
-            f"Path '{path}' is outside the workspace directory. "
-            f"Use /approve to temporarily bypass this check."
-        )
+        return f"Path '{path}' is outside the workspace directory."
     return None
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -148,6 +150,7 @@ class SessionManager:
         self._system_dir = ensure_dir(self.sessions_dir / "_system")
         self._cache: dict[str, Session] = {}
         self._name_generator: NameGenerator | None = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     # -- public configuration ------------------------------------------------
 
@@ -255,20 +258,7 @@ class SessionManager:
 
     def _save_normal(self, session: Session) -> None:
         path = self._session_path(session.channel, session.id)
-        with open(path, "w", encoding="utf-8") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "compacted_memory": session.compacted_memory,
-                "skip_next_nowledge_extraction": session.skip_next_nowledge_extraction,
-                "last_compacted": session.last_compacted,
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        self._write_session_file(path, session)
 
         cache_key = f"{session.channel}:{session.chat_id}"
         self._cache[cache_key] = session
@@ -287,7 +277,9 @@ class SessionManager:
         # Trigger background naming if needed
         turn_count = self._count_turns(session)
         if turn_count >= 3 and not session.name and self._name_generator:
-            asyncio.create_task(self._auto_name_session(session))
+            task = asyncio.create_task(self._auto_name_session(session))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def _save_system(self, session: Session) -> None:
         """Persist a system session (no metadata)."""
@@ -295,20 +287,7 @@ class SessionManager:
         for ch in r'<>:"/\|?*':
             filename = filename.replace(ch, "_")
         path = self._system_dir / f"{filename}.jsonl"
-        with open(path, "w", encoding="utf-8") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "compacted_memory": session.compacted_memory,
-                "skip_next_nowledge_extraction": session.skip_next_nowledge_extraction,
-                "last_compacted": session.last_compacted,
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        self._write_session_file(path, session)
         self._cache[session.id] = session
 
     def set_active(self, channel: str, chat_id: str, session_id: str) -> bool:
@@ -450,8 +429,40 @@ class SessionManager:
 
     def _write_metadata(self, channel: str, data: dict[str, Any]) -> None:
         path = self._metadata_path(channel)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        self._atomic_write(path, payload + "\n")
+
+    @staticmethod
+    def _atomic_write(path: Path, content: str) -> None:
+        """Write beside *path* and replace it only after the full write succeeds."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def _write_session_file(cls, path: Path, session: Session) -> None:
+        metadata_line = {
+            "_type": "metadata",
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "compacted_memory": session.compacted_memory,
+            "skip_next_nowledge_extraction": session.skip_next_nowledge_extraction,
+            "last_compacted": session.last_compacted,
+        }
+        lines = [json.dumps(metadata_line, ensure_ascii=False)]
+        lines.extend(json.dumps(msg, ensure_ascii=False) for msg in session.messages)
+        cls._atomic_write(path, "\n".join(lines) + "\n")
 
     def _load_raw(self, path: Path, id: str, channel: str, chat_id: str) -> Session | None:
         """Load a session from an arbitrary JSONL path."""
@@ -507,3 +518,12 @@ class SessionManager:
             logger.warning(
                 "Auto-naming failed for session {}/{}: {}", session.channel, session.id, e
             )
+
+    async def close(self) -> None:
+        """Cancel and drain runtime-owned background naming tasks."""
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()

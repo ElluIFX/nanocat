@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -21,7 +20,6 @@ from office_common import (
     write_text_or_json,
     xml_bytes,
 )
-
 
 DOCX_REPLACE_PARTS = (
     "word/document.xml",

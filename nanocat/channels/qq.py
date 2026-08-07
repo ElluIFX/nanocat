@@ -17,6 +17,7 @@ from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.paths import get_media_dir
 from nanocat.config.schema import Base
+from nanocat.core.ports import ChannelCapabilities
 
 try:
     import botpy
@@ -176,6 +177,7 @@ class QQChannel(BaseChannel):
 
     name = "qq"
     display_name = "QQ"
+    capabilities = ChannelCapabilities(media=True, reply_threads=True)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -190,6 +192,7 @@ class QQChannel(BaseChannel):
         self._processed_ids: deque = deque(maxlen=1000)
         self._msg_seq: int = 1
         self._chat_type_cache: dict[str, str] = {}
+        self._reconnect_event = asyncio.Event()
         _bridge_botpy_logging()
     async def start(self) -> None:
         """Start the QQ bot."""
@@ -202,6 +205,7 @@ class QQChannel(BaseChannel):
             return
 
         self._running = True
+        self._reconnect_event.clear()
         logger.info("QQ bot started (C2C & Group supported)")
         await self._run_bot()
 
@@ -231,17 +235,23 @@ class QQChannel(BaseChannel):
             if time.monotonic() - started > 60:
                 backoff = 5  # connection was healthy; reset backoff
             logger.info("Reconnecting QQ bot in {}s...", backoff)
-            await asyncio.sleep(backoff)
+            try:
+                await asyncio.wait_for(self._reconnect_event.wait(), timeout=backoff)
+            except asyncio.TimeoutError:
+                pass
+            self._reconnect_event.clear()
             backoff = min(backoff * 2, 60)
 
     async def stop(self) -> None:
         """Stop the QQ bot."""
         self._running = False
+        self._reconnect_event.set()
         if self._client:
             try:
                 await self._client.close()
             except Exception:
                 pass
+        await self._cancel_owned_tasks()
         logger.info("QQ bot stopped")
 
     @staticmethod

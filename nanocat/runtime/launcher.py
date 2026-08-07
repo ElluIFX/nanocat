@@ -12,28 +12,36 @@ from loguru import logger
 
 from nanocat import __version__
 from nanocat.agent.loop import AgentLoop
-from nanocat.bus.events import OutboundMessage
+from nanocat.application.agent_service import AgentService
+from nanocat.application.intervention import (
+    DeliveryTracker,
+    InterventionBroker,
+    make_bus_presenter,
+)
+from nanocat.application.system_turns import SystemTurnGateway, SystemTurnRequest
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.manager import ChannelManager
 from nanocat.config.loader import get_config_path, load_config, set_config_path
-from nanocat.config.paths import get_cron_dir, get_sessions_dir
 from nanocat.config.schema import Config
+from nanocat.core.messages import ConversationRef
+from nanocat.core.runtime import ShutdownReason
 from nanocat.cron.service import CronService
 from nanocat.cron.types import CronJob
 from nanocat.heartbeat.service import HeartbeatService
+from nanocat.runtime.context import ConfigSnapshot, RuntimeContext
+from nanocat.runtime.paths import RuntimePaths
+from nanocat.runtime.supervisor import RuntimeSupervisor
 from nanocat.session.manager import SessionManager
 from nanocat.utils.helpers import sync_workspace_templates
 
 
-@dataclass
-class RuntimeContext:
-    config: Config
-    bus: MessageBus
-    session_manager: SessionManager
-    cron: CronService
-    agent: AgentLoop
-    channels: ChannelManager
-    heartbeat: HeartbeatService
+@dataclass(frozen=True, slots=True)
+class HeartbeatTarget:
+    """Immutable recipient and principal selected for one heartbeat execution."""
+
+    channel: str
+    chat_id: str
+    principal_id: str
 
 
 def load_runtime_config(workdir: str | None = None) -> Config:
@@ -54,7 +62,7 @@ def load_runtime_config(workdir: str | None = None) -> Config:
     return load_config(get_config_path())
 
 
-def configure_logging(verbose: bool = False, local_mode: bool = False) -> None:
+def configure_logging(verbose: bool = False, local_mode: bool = False) -> int:
     """Set up loguru sinks. INFO by default; DEBUG with ``--verbose``.
 
     The level is exported as ``NANOCAT_LOG_LEVEL`` so the TUI pane sink (built
@@ -72,7 +80,7 @@ def configure_logging(verbose: bool = False, local_mode: bool = False) -> None:
 
     logs_dir = get_config_path().parent / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    logger.add(
+    file_sink_id = logger.add(
         logs_dir / "runtime.log",
         rotation="5 MB",
         retention=5,
@@ -82,6 +90,7 @@ def configure_logging(verbose: bool = False, local_mode: bool = False) -> None:
         diagnose=False,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level: <7} | {name}:{line} - {message}",
     )
+    return file_sink_id
 
 
 def warn_deprecated_memory_window(config: Config) -> None:
@@ -106,24 +115,34 @@ def build_runtime(
     channels stay disabled regardless of config.
     """
     config = load_runtime_config(workdir)  # sets the config path before paths derive
-    configure_logging(verbose=verbose, local_mode=local_mode)
+    paths = RuntimePaths.from_config_path(get_config_path(), workspace=config.workspace_path)
+    config_snapshot = ConfigSnapshot(config=config, paths=paths)
+    log_sink_id = configure_logging(verbose=verbose, local_mode=local_mode)
     warn_deprecated_memory_window(config)
     sync_workspace_templates(config.workspace_path, silent=True)
 
     bus = MessageBus()
-    session_manager = SessionManager(get_sessions_dir())
-    cron = CronService(get_cron_dir() / "jobs.json")
+    delivery_tracker = DeliveryTracker()
+    intervention = InterventionBroker(
+        make_bus_presenter(bus, delivery_tracker),
+        deferred_sink=bus.publish_inbound,
+        delivery_tracker=delivery_tracker,
+    )
+    session_manager = SessionManager(paths.sessions_dir)
+    cron = CronService(paths.cron_dir / "jobs.json")
 
-    agent = AgentLoop(
+    agent_engine = AgentLoop(
         bus=bus,
         config=config,
         session_manager=session_manager,
         cron_service=cron,
+        intervention_broker=intervention,
     )
+    agent = AgentService(agent_engine)
+    system_turns = SystemTurnGateway(agent, bus)
 
     async def on_cron_job(job: CronJob) -> str | None:
         from nanocat.agent.tools.cron import CronTool
-        from nanocat.agent.tools.message import MessageTool
         from nanocat.utils.evaluator import evaluate_response
 
         reminder_note = (
@@ -137,82 +156,127 @@ def build_runtime(
         if isinstance(cron_tool, CronTool):
             cron_token = cron_tool.set_cron_context(True)
         try:
-            response = await agent.process_direct(
-                reminder_note,
-                session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "system",
-                chat_id=job.payload.to or "direct",
-                transient=True,
+            request = SystemTurnRequest(
+                source="cron",
+                content=reminder_note,
+                conversation=ConversationRef(
+                    channel=job.payload.channel or "system",
+                    chat_id=job.payload.to or "direct",
+                    session_key=f"cron:{job.id}",
+                ),
+                principal_id=job.payload.principal_id or job.payload.to or "user",
             )
+            response = await system_turns.submit(request)
         finally:
             if isinstance(cron_tool, CronTool) and cron_token is not None:
                 cron_tool.reset_cron_context(cron_token)
-
-        message_tool = agent.tools.get("message")
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-            return response
 
         notify_mode = job.payload.notify_mode
         if notify_mode != "never" and job.payload.to and response:
             if notify_mode == "always":
                 should_notify = True
             elif notify_mode == "smart":
-                should_notify = await evaluate_response(response, job.payload.message)
+                should_notify = await evaluate_response(
+                    response,
+                    job.payload.message,
+                    provider_resolver=agent.provider_resolver,
+                    config=config,
+                )
             else:
                 should_notify = False
 
             if should_notify:
-                await bus.publish_outbound(
-                    OutboundMessage(
-                        channel=job.payload.channel or "system",
-                        chat_id=job.payload.to,
-                        content=response,
-                    )
+                await system_turns.deliver(
+                    request,
+                    response,
                 )
         return response
 
     cron.on_job = on_cron_job
-    channels = ChannelManager(config, bus, force_channel="tui" if local_mode else None)
+    channels = ChannelManager(
+        config,
+        bus,
+        force_channel="tui" if local_mode else None,
+        delivery_sink=delivery_tracker.resolve,
+        delivery_guard=delivery_tracker.is_pending,
+    )
     logger.info("NanoCat v{} ready — workspace: {}", __version__, config.workspace_path)
 
-    def pick_heartbeat_target() -> tuple[str, str]:
+    def pick_heartbeat_target() -> HeartbeatTarget:
+        configured_principal = config.gateway.heartbeat.principal_id
         enabled = set(channels.enabled_channels)
-        for ch in enabled:
+        candidates: list[tuple[str, str, str, str | None]] = []
+        for ch in sorted(enabled):
             sessions = session_manager.list_sessions(ch, min_turns=1, limit=1)
             if sessions:
                 item = sessions[0]
-                return ch, item.get("chat_id", "direct")
-        return "system", "direct"
+                chat_id = item.get("chat_id", "direct")
+                session = session_manager.get_session(ch, item.get("id", ""))
+                principal_id = (
+                    session.metadata.get("_last_principal_id") if session is not None else None
+                )
+                candidates.append((str(item.get("last_active", "")), ch, chat_id, principal_id))
+        if candidates:
+            _, channel, chat_id, session_principal = max(
+                candidates,
+                key=lambda item: (item[0], item[1], item[2]),
+            )
+            return HeartbeatTarget(
+                channel=channel,
+                chat_id=chat_id,
+                principal_id=configured_principal or session_principal or chat_id,
+            )
+        return HeartbeatTarget(channel="system", chat_id="direct", principal_id="system")
+
+    heartbeat_target: HeartbeatTarget | None = None
 
     async def on_heartbeat_execute(tasks: str) -> str:
-        channel, chat_id = pick_heartbeat_target()
+        nonlocal heartbeat_target
+        heartbeat_target = pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
             return None
 
-        return await agent.process_direct(
-            tasks,
-            session_key="heartbeat",
-            channel=channel,
-            chat_id=chat_id,
+        return await system_turns.submit(
+            SystemTurnRequest(
+                source="heartbeat",
+                content=tasks,
+                conversation=ConversationRef(
+                    channel=heartbeat_target.channel,
+                    chat_id=heartbeat_target.chat_id,
+                    session_key="heartbeat",
+                ),
+                principal_id=heartbeat_target.principal_id,
+            ),
             on_progress=_silent,
-            transient=True,
         )
 
     async def on_heartbeat_notify(response: str) -> None:
-        channel, chat_id = pick_heartbeat_target()
-        if channel == "system":
+        target = heartbeat_target or pick_heartbeat_target()
+        if target.channel == "system":
             return
-        await bus.publish_outbound(
-            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+        await system_turns.deliver(
+            SystemTurnRequest(
+                source="heartbeat",
+                content="",
+                conversation=ConversationRef(
+                    channel=target.channel,
+                    chat_id=target.chat_id,
+                    session_key="heartbeat",
+                ),
+                principal_id=target.principal_id,
+            ),
+            response,
         )
 
     heartbeat = HeartbeatService(
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
+        provider_resolver=agent.provider_resolver,
+        config=config,
     )
 
-    return RuntimeContext(
+    runtime = RuntimeContext(
         config=config,
         bus=bus,
         session_manager=session_manager,
@@ -220,7 +284,15 @@ def build_runtime(
         agent=agent,
         channels=channels,
         heartbeat=heartbeat,
+        system_turns=system_turns,
+        paths=paths,
+        config_snapshot=config_snapshot,
+        log_sink_id=log_sink_id,
+        intervention=intervention,
     )
+    runtime.supervisor = RuntimeSupervisor(runtime)
+    agent.set_runtime_supervisor(runtime.supervisor)
+    return runtime
 
 
 async def run_gateway_async(
@@ -236,25 +308,19 @@ async def run_gateway_async(
     else:
         logger.warning("No channels enabled")
 
+    supervisor = runtime.supervisor or RuntimeSupervisor(runtime)
+    runtime.supervisor = supervisor
     try:
-        await runtime.cron.start()
-        await runtime.heartbeat.start()
-        await asyncio.gather(runtime.agent.run(), runtime.channels.start_all())
+        await supervisor.run()
     finally:
-        await runtime.agent.close_mcp()
-        runtime.heartbeat.stop()
-        runtime.cron.stop()
-        runtime.agent.stop()
-        await runtime.channels.stop_all()
+        await supervisor.stop(ShutdownReason(kind="signal", detail="gateway exited"))
 
 
 async def _shutdown_runtime(runtime: RuntimeContext) -> None:
-    """Tear down runtime services (mirrors run_gateway_async's finally block)."""
-    await runtime.agent.close_mcp()
-    runtime.heartbeat.stop()
-    runtime.cron.stop()
-    runtime.agent.stop()
-    await runtime.channels.stop_all()
+    """Tear down runtime services through the single supervisor owner."""
+    supervisor = runtime.supervisor or RuntimeSupervisor(runtime)
+    runtime.supervisor = supervisor
+    await supervisor.stop(ShutdownReason(kind="manual", detail="local TUI closed"))
 
 
 def run_local_tui(
@@ -288,9 +354,9 @@ def run_local_tui(
     started = threading.Event()
 
     async def _serve() -> None:
-        await runtime.cron.start()
-        await runtime.heartbeat.start()
-        await asyncio.gather(runtime.agent.run(), runtime.channels.start_all())
+        supervisor = runtime.supervisor or RuntimeSupervisor(runtime)
+        runtime.supervisor = supervisor
+        await supervisor.run()
 
     def _runtime_thread() -> None:
         asyncio.set_event_loop(loop)

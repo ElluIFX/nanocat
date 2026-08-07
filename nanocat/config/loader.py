@@ -1,6 +1,8 @@
 """Configuration loading utilities."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from nanocat.config.schema import Config
@@ -62,6 +64,10 @@ def load_config(config_path: Path | None = None) -> Config:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            if isinstance(data, dict):
+                # User-facing text is hard-coded; discard the removed legacy section
+                # before the strict schema validates the remaining configuration.
+                data.pop("tips", None)
             config = Config.model_validate(data)
             save_config(config, path)
             return config
@@ -84,6 +90,21 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = config.model_dump(by_alias=True)
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise

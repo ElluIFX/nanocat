@@ -1,0 +1,567 @@
+"""Runtime-scoped scheduler-owned human intervention broker."""
+
+from __future__ import annotations
+
+import asyncio
+import shlex
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
+from uuid import uuid4
+
+from nanocat.bus.events import OutboundMessage
+from nanocat.core.intervention import (
+    DeliveryResult,
+    InterventionAction,
+    InterventionRequest,
+    InterventionResult,
+    InterventionState,
+)
+from nanocat.core.messages import ConversationRef
+
+
+class InterventionError(RuntimeError):
+    """Base error for scheduler-owned intervention failures."""
+
+
+class InterventionDeliveryError(InterventionError):
+    """Raised when the user cannot receive a sensitive-operation prompt."""
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedInterventionAction:
+    """Normalized text/button equivalent for an intervention response."""
+
+    action: InterventionAction | None
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class _PendingIntervention:
+    request: InterventionRequest
+    future: asyncio.Future[InterventionResult]
+    deferred: list[Any] = field(default_factory=list)
+
+
+RequestUser = Callable[[InterventionRequest], Awaitable[DeliveryResult | bool | None]]
+DeferredSink = Callable[[Any], Awaitable[None]]
+
+
+class DeliveryTracker:
+    """Resolve adapter delivery results for request-scoped control messages."""
+
+    def __init__(self, confirmation_timeout_seconds: float = 10.0) -> None:
+        if confirmation_timeout_seconds <= 0:
+            raise ValueError("delivery confirmation timeout must be positive")
+        self.confirmation_timeout_seconds = confirmation_timeout_seconds
+        self._waiters: dict[str, asyncio.Future[DeliveryResult]] = {}
+        self._closed = False
+
+    def register(self, request_id: str) -> None:
+        """Create a delivery waiter before publishing an outbound message."""
+        if self._closed:
+            raise InterventionDeliveryError("delivery tracker is closed")
+        if request_id in self._waiters:
+            raise InterventionError(f"duplicate delivery request: {request_id}")
+        self._waiters[request_id] = asyncio.get_running_loop().create_future()
+
+    async def wait(self, request_id: str, timeout: float) -> DeliveryResult:
+        """Wait for the dispatcher to report the adapter's terminal result."""
+        future = self._waiters.get(request_id)
+        if future is None:
+            return DeliveryResult(delivered=False, detail="delivery request is unknown")
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout)
+        except asyncio.TimeoutError:
+            return DeliveryResult(delivered=False, detail="delivery confirmation timed out")
+        finally:
+            self._waiters.pop(request_id, None)
+
+    def resolve(self, request_id: str, result: DeliveryResult) -> None:
+        """Complete one dispatcher delivery result without awaiting the broker."""
+        future = self._waiters.get(request_id)
+        if future is not None and not future.done():
+            future.set_result(result)
+
+    def is_pending(self, request_id: str) -> bool:
+        """Return whether a request still has an active delivery waiter."""
+        future = self._waiters.get(request_id)
+        return future is not None and not future.done()
+
+    def discard(self, request_id: str) -> None:
+        """Forget a request which failed before entering the outbound queue."""
+        self._waiters.pop(request_id, None)
+
+    def close(self) -> None:
+        """Wake all waiters with a terminal failure during runtime shutdown."""
+        self._closed = True
+        for future in self._waiters.values():
+            if not future.done():
+                future.set_result(DeliveryResult(delivered=False, detail="runtime is closing"))
+
+
+def new_intervention_request(
+    *,
+    kind: Any,
+    turn_id: str,
+    conversation: ConversationRef,
+    principal_id: str,
+    capability: str,
+    summary: str,
+    call_fingerprint: str,
+    expires_at: datetime,
+    resume_mode: Any,
+    tool_call_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> InterventionRequest:
+    """Create a request with scheduler-generated identifiers."""
+    return InterventionRequest(
+        request_id=str(uuid4()),
+        kind=kind,
+        turn_id=turn_id,
+        session_key=conversation.session_key,
+        conversation=conversation,
+        principal_id=principal_id,
+        capability=capability,
+        summary=summary,
+        call_fingerprint=call_fingerprint,
+        allowed_actions=(
+            InterventionAction.APPROVE_ONCE,
+            InterventionAction.APPROVE_TURN,
+            InterventionAction.APPROVE_FOREVER,
+            InterventionAction.REJECT,
+        ),
+        resume_mode=resume_mode,
+        expires_at=expires_at,
+        tool_call_id=tool_call_id,
+        metadata=metadata or {},
+    )
+
+
+def parse_intervention_action(text: str) -> ParsedInterventionAction | None:
+    """Parse only explicit approval, rejection, or session-revoke syntax."""
+    stripped = text.strip()
+    command_hint = stripped.split(maxsplit=1)[0].lower() if stripped else ""
+    if command_hint not in {"/approve", "/deny", "/reject"}:
+        return None
+    try:
+        parts = shlex.split(stripped)
+    except ValueError as exc:
+        return ParsedInterventionAction(None, str(exc))
+
+    command = parts[0].lower()
+    if command == "/approve":
+        if len(parts) != 2 or parts[1].lower() not in {"once", "turn", "forever", "cancel"}:
+            return ParsedInterventionAction(
+                None,
+                "Usage: /approve once|turn|forever|cancel",
+            )
+        action = {
+            "once": InterventionAction.APPROVE_ONCE,
+            "turn": InterventionAction.APPROVE_TURN,
+            "forever": InterventionAction.APPROVE_FOREVER,
+            "cancel": InterventionAction.REVOKE_SESSION,
+        }[parts[1].lower()]
+    elif command in {"/deny", "/reject"}:
+        if len(parts) != 1:
+            return ParsedInterventionAction(None, "Usage: /deny")
+        action = InterventionAction.REJECT
+    return ParsedInterventionAction(action)
+
+
+def intervention_prompt(request: InterventionRequest) -> str:
+    """Build a scheduler-owned, credential-free prompt for any text channel."""
+    expires = request.expires_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (
+        "## Sensitive operation requires your decision\n\n"
+        f"- **Capability:** `{request.capability}`\n\n"
+        f"- **Operation:** {request.summary}\n\n"
+        f"- **Expires:** {expires}\n\n"
+        "## Actions\n\n"
+        "- Approve once: `/approve once`\n\n"
+        "- Approve for this turn: `/approve turn`\n\n"
+        "- Approve for this session: `/approve forever`\n\n"
+        "- Reject: `/deny`\n\n"
+        "- Revoke this session's approval: `/approve cancel`"
+    )
+
+
+def make_bus_presenter(
+    bus: Any,
+    delivery_tracker: DeliveryTracker | None = None,
+) -> RequestUser:
+    """Create a channel-neutral presenter backed by the runtime outbound port."""
+
+    async def present(request: InterventionRequest) -> DeliveryResult:
+        if delivery_tracker is not None:
+            delivery_tracker.register(request.request_id)
+        try:
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=request.conversation.channel,
+                    chat_id=request.conversation.chat_id,
+                    content=intervention_prompt(request),
+                    metadata={
+                        "_control": True,
+                        "_intervention": True,
+                        "request_id": request.request_id,
+                        "capability": request.capability,
+                        "operation": request.summary,
+                        "expires_at": request.expires_at.isoformat(),
+                    },
+                    request_id=request.request_id,
+                    turn_id=request.turn_id,
+                    principal_id=request.principal_id,
+                )
+            )
+        except Exception:
+            if delivery_tracker is not None:
+                delivery_tracker.discard(request.request_id)
+            raise
+        if delivery_tracker is not None:
+            remaining = max(
+                0.1,
+                (request.expires_at - datetime.now(timezone.utc)).total_seconds(),
+            )
+            return await delivery_tracker.wait(
+                request.request_id,
+                min(remaining, delivery_tracker.confirmation_timeout_seconds),
+            )
+        return DeliveryResult(delivered=True)
+
+    return present
+
+
+class InterventionBroker:
+    """Own pending intervention state for exactly one runtime instance."""
+
+    def __init__(
+        self,
+        request_user: RequestUser,
+        *,
+        deferred_sink: DeferredSink | None = None,
+        delivery_tracker: DeliveryTracker | None = None,
+        default_timeout_seconds: float = 300.0,
+    ):
+        if default_timeout_seconds <= 0:
+            raise ValueError("default intervention timeout must be positive")
+        self._request_user = request_user
+        self._deferred_sink = deferred_sink
+        self._delivery_tracker = delivery_tracker
+        self._default_timeout_seconds = default_timeout_seconds
+        self._pending: dict[str, _PendingIntervention] = {}
+        self._turn_grants: set[tuple[ConversationRef, str, str, str]] = set()
+        self._session_grants: set[tuple[ConversationRef, str, str]] = set()
+        self._defer_scopes: dict[ConversationRef, int] = {}
+        self._deferred_hold: dict[ConversationRef, list[Any]] = {}
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Return whether the broker has been closed."""
+        return self._closed
+
+    @property
+    def default_timeout_seconds(self) -> float:
+        """Return the runtime-wide intervention timeout."""
+        return self._default_timeout_seconds
+
+    def pending_requests(self) -> tuple[InterventionRequest, ...]:
+        """Return a detached snapshot for status and diagnostics."""
+        return tuple(item.request for item in self._pending.values())
+
+    def has_pending(self, conversation: ConversationRef) -> bool:
+        """Return whether a conversation is waiting for a user decision."""
+        now = datetime.now(timezone.utc)
+        return any(
+            item.request.conversation == conversation and item.request.expires_at > now
+            for item in self._pending.values()
+        )
+
+    def has_turn_grant(
+        self,
+        conversation: ConversationRef,
+        principal_id: str,
+        turn_id: str,
+        capability: str,
+    ) -> bool:
+        """Return whether this turn already approved the same capability."""
+        return (conversation, principal_id, turn_id, capability) in self._turn_grants
+
+    def has_session_grant(
+        self,
+        conversation: ConversationRef,
+        principal_id: str,
+        capability: str,
+        tool_name: str | None = None,
+    ) -> bool:
+        """Return whether this session approved a capability or tool forever."""
+        if (conversation, principal_id, capability) in self._session_grants:
+            return True
+        if tool_name is None:
+            return False
+        return any(
+            grant[:2] == (conversation, principal_id)
+            and grant[2] in {f"tool:{tool_name}", "tool:*"}
+            for grant in self._session_grants
+        )
+
+    async def suspend(self, request: InterventionRequest) -> InterventionResult:
+        """Publish a prompt and suspend until a validated action, timeout or close."""
+        loop = asyncio.get_running_loop()
+        pending = _PendingIntervention(request=request, future=loop.create_future())
+        async with self._lock:
+            if self._closed:
+                return InterventionResult(
+                    request_id=request.request_id,
+                    action=InterventionAction.CANCEL,
+                    state=InterventionState.CANCELLED,
+                )
+            if request.request_id in self._pending:
+                raise InterventionError(f"duplicate intervention request: {request.request_id}")
+            self._pending[request.request_id] = pending
+
+        try:
+            try:
+                delivery = await self._request_user(request)
+                if isinstance(delivery, DeliveryResult) and not delivery.delivered:
+                    raise InterventionDeliveryError(delivery.detail or "prompt delivery failed")
+                if delivery is False:
+                    raise InterventionDeliveryError("prompt delivery failed")
+            except Exception:
+                return InterventionResult(
+                    request_id=request.request_id,
+                    action=InterventionAction.CANCEL,
+                    state=InterventionState.DELIVERY_FAILED,
+                )
+
+            remaining = max(
+                0.0,
+                (request.expires_at - datetime.now(timezone.utc)).total_seconds(),
+            )
+            if remaining == 0:
+                return InterventionResult(
+                    request_id=request.request_id,
+                    action=InterventionAction.CANCEL,
+                    state=InterventionState.EXPIRED,
+                )
+            try:
+                return await asyncio.wait_for(asyncio.shield(pending.future), remaining)
+            except asyncio.TimeoutError:
+                async with self._lock:
+                    if not pending.future.done():
+                        pending.future.set_result(
+                            InterventionResult(
+                                request_id=request.request_id,
+                                action=InterventionAction.CANCEL,
+                                state=InterventionState.EXPIRED,
+                            )
+                        )
+                    return pending.future.result()
+        finally:
+            async with self._lock:
+                self._pending.pop(request.request_id, None)
+                deferred = list(pending.deferred)
+                pending.deferred.clear()
+                if self._defer_scopes.get(request.conversation, 0):
+                    self._deferred_hold.setdefault(request.conversation, []).extend(deferred)
+                    deferred = []
+            await self._deliver_deferred(deferred)
+
+    async def resolve(
+        self,
+        principal_id: str,
+        conversation: ConversationRef,
+        action: InterventionAction,
+    ) -> InterventionResult | None:
+        """Resolve the current session's pending request without user tokens."""
+        async with self._lock:
+            if self._closed:
+                return None
+            if action is InterventionAction.REVOKE_SESSION:
+                return self._revoke_session_locked(conversation, principal_id)
+
+            pending = next(
+                (
+                    item
+                    for item in self._pending.values()
+                    if item.request.conversation == conversation
+                    and item.request.principal_id == principal_id
+                    and not item.future.done()
+                ),
+                None,
+            )
+            if pending is None:
+                # ``/deny`` and ``/reject`` are intentionally hidden aliases
+                # for ``/approve cancel`` while the session is idle.
+                if action is InterventionAction.REJECT:
+                    return self._revoke_session_locked(conversation, principal_id)
+                if action is not InterventionAction.APPROVE_FOREVER:
+                    return None
+                self._session_grants.add((conversation, principal_id, "tool:*"))
+                return InterventionResult(
+                    request_id="",
+                    action=action,
+                    scope="session",
+                    state=InterventionState.APPROVED_FOREVER,
+                )
+            request = pending.request
+            if action not in request.allowed_actions:
+                return None
+            if request.expires_at <= datetime.now(timezone.utc):
+                pending.future.set_result(
+                    InterventionResult(
+                        request_id=request.request_id,
+                        action=InterventionAction.CANCEL,
+                        state=InterventionState.EXPIRED,
+                    )
+                )
+                return None
+            state = {
+                InterventionAction.APPROVE_ONCE: InterventionState.APPROVED_ONCE,
+                InterventionAction.APPROVE_TURN: InterventionState.APPROVED_TURN,
+                InterventionAction.APPROVE_FOREVER: InterventionState.APPROVED_FOREVER,
+                InterventionAction.REJECT: InterventionState.REJECTED,
+                InterventionAction.CANCEL: InterventionState.CANCELLED,
+            }[action]
+            scope = {
+                InterventionAction.APPROVE_ONCE: "once",
+                InterventionAction.APPROVE_TURN: "turn",
+                InterventionAction.APPROVE_FOREVER: "session",
+            }.get(action)
+            if action is InterventionAction.APPROVE_TURN:
+                self._turn_grants.add(
+                    (request.conversation, request.principal_id, request.turn_id, request.capability)
+                )
+            elif action is InterventionAction.APPROVE_FOREVER:
+                self._session_grants.add(
+                    (request.conversation, request.principal_id, "tool:*")
+                )
+            pending.future.set_result(
+                InterventionResult(
+                    request_id=request.request_id,
+                    action=action,
+                    scope=scope,
+                    state=state,
+                )
+            )
+            return pending.future.result()
+
+    def _revoke_session_locked(
+        self,
+        conversation: ConversationRef,
+        principal_id: str,
+    ) -> InterventionResult:
+        pending_request_id = ""
+        self._session_grants = {
+            grant
+            for grant in self._session_grants
+            if not (grant[0] == conversation and grant[1] == principal_id)
+        }
+        self._turn_grants = {
+            grant
+            for grant in self._turn_grants
+            if not (grant[0] == conversation and grant[1] == principal_id)
+        }
+        for pending in self._pending.values():
+            if (
+                pending.request.conversation == conversation
+                and pending.request.principal_id == principal_id
+                and not pending.future.done()
+            ):
+                pending_request_id = pending_request_id or pending.request.request_id
+                pending.future.set_result(
+                    InterventionResult(
+                        request_id=pending.request.request_id,
+                        action=InterventionAction.CANCEL,
+                        scope="session",
+                        state=InterventionState.CANCELLED,
+                    )
+                )
+        return InterventionResult(
+            request_id=pending_request_id,
+            action=InterventionAction.REVOKE_SESSION,
+            scope="session",
+            state=InterventionState.REVOKED,
+        )
+
+    def defer(self, conversation: ConversationRef, message: Any) -> bool:
+        """Defer ordinary input while intervention or a grouped approval is active."""
+        for pending in self._pending.values():
+            if pending.request.conversation == conversation:
+                pending.deferred.append(message)
+                return True
+        if self._defer_scopes.get(conversation, 0):
+            self._deferred_hold.setdefault(conversation, []).append(message)
+            return True
+        return False
+
+    async def begin_defer_scope(self, conversation: ConversationRef) -> None:
+        """Keep ordinary input deferred across a multi-call approval batch."""
+        async with self._lock:
+            self._defer_scopes[conversation] = self._defer_scopes.get(conversation, 0) + 1
+
+    async def end_defer_scope(self, conversation: ConversationRef) -> None:
+        """Release messages held by a completed approval batch."""
+        async with self._lock:
+            depth = self._defer_scopes.get(conversation, 0)
+            if depth <= 1:
+                self._defer_scopes.pop(conversation, None)
+                deferred = self._deferred_hold.pop(conversation, [])
+            else:
+                self._defer_scopes[conversation] = depth - 1
+                deferred = []
+        await self._deliver_deferred(deferred)
+
+    async def _deliver_deferred(self, messages: list[Any]) -> None:
+        if not self._deferred_sink:
+            return
+        for message in messages:
+            try:
+                await self._deferred_sink(message)
+            except Exception:
+                # A failed replay must not replace the result of the owning turn.
+                continue
+
+    async def cancel_turn(self, turn_id: str) -> None:
+        self._turn_grants = {
+            grant for grant in self._turn_grants if grant[2] != turn_id
+        }
+        await self._resolve_cancel(lambda request: request.turn_id == turn_id)
+
+    async def cancel_session(self, session_key: str) -> None:
+        self._turn_grants = {
+            grant for grant in self._turn_grants if grant[0].session_key != session_key
+        }
+        self._session_grants = {
+            grant for grant in self._session_grants if grant[0].session_key != session_key
+        }
+        await self._resolve_cancel(lambda request: request.session_key == session_key)
+
+    async def finish_turn(self, turn_id: str) -> None:
+        """Expire all grants owned by a completed turn."""
+        await self.cancel_turn(turn_id)
+
+    async def _resolve_cancel(self, predicate: Callable[[InterventionRequest], bool]) -> None:
+        async with self._lock:
+            for pending in self._pending.values():
+                if predicate(pending.request) and not pending.future.done():
+                    pending.future.set_result(
+                        InterventionResult(
+                            request_id=pending.request.request_id,
+                            action=InterventionAction.CANCEL,
+                            state=InterventionState.CANCELLED,
+                        )
+                    )
+
+    async def close(self) -> None:
+        """Cancel all pending requests and prevent new intervention waits."""
+        self._closed = True
+        if self._delivery_tracker is not None:
+            self._delivery_tracker.close()
+        self._turn_grants.clear()
+        self._session_grants.clear()
+        self._defer_scopes.clear()
+        self._deferred_hold.clear()
+        await self._resolve_cancel(lambda _request: True)

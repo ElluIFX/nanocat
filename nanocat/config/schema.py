@@ -25,6 +25,8 @@ class ChannelsConfig(Base):
 
     send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
+    outbound_max_attempts: int = 3
+    outbound_retry_delay_s: float = 0.25
 
 
 class AgentDefaults(Base):
@@ -33,7 +35,6 @@ class AgentDefaults(Base):
     model_config = ConfigDict(extra="ignore")
 
     model: str = "openai/gpt-4o"
-    max_model: str | None = None  # Optional high-capability model for /max command
     assistant_model: str | None = (
         None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
     )
@@ -51,7 +52,7 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 40
     # Deprecated compatibility field: accepted from old configs but ignored at runtime.
     memory_window: int | None = Field(default=None, exclude=True)
-    reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
+    reasoning_effort: str | None = None  # low / medium / high / xhigh / max
 
     @property
     def should_warn_deprecated_memory_window(self) -> bool:
@@ -67,6 +68,13 @@ class AgentsConfig(Base):
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
 
 
+class RuntimeLimitsConfig(Base):
+    """Runtime-wide concurrency limits shared by interactive and tool work."""
+
+    max_concurrent_turns: int = Field(default=8, gt=0)
+    max_concurrent_tool_calls: int = Field(default=16, gt=0)
+
+
 class ProviderConfig(Base):
     """LLM provider configuration."""
 
@@ -79,9 +87,6 @@ class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
-    azure_openai: ProviderConfig = Field(
-        default_factory=ProviderConfig
-    )  # Azure OpenAI (model = deployment name)
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -115,6 +120,7 @@ class HeartbeatConfig(Base):
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
+    principal_id: str | None = None  # Optional owner used for scheduler-originated interventions
 
 
 class GatewayConfig(Base):
@@ -207,6 +213,9 @@ class ToolsConfig(Base):
     """Tools configuration."""
 
     max_return_chars: int = 10000  # Truncate tool results exceeding this; 0 = no limit
+    # Deliberately uses the public spelling ``globalSaftyCheck`` for compatibility.
+    # When false, all runtime security checks and approval gates are bypassed.
+    global_safty_check: bool = True
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     cmd: CmdToolConfig = Field(default_factory=CmdToolConfig)
     filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)
@@ -245,7 +254,7 @@ class NowledgeAutoInjectConfig(Base):
 class NowledgeConfig(Base):
     """Nowledge Mem connection configuration."""
 
-    enabled: bool = True
+    enabled: bool = False
     auto_extract_memories: bool = False  # extract durable memories before compaction
     api_url: str = "http://127.0.0.1:14242"
     api_key: str | None = None
@@ -268,114 +277,16 @@ class MemoryConfig(Base):
     nowledge: NowledgeConfig = Field(default_factory=NowledgeConfig)
 
 
-class TipsConfig(Base):
-    """Configurable system response strings shown to users.
-
-    Strings marked with placeholders use Python .format() substitution.
-    Available placeholders per field are listed in the comments.
-    """
-
-    # /restart
-    restart: str = "Restarting NanoCat, will be back soon..."
-    restart_done: str = "Bot restarted."
-    # /new
-    new_session: str = "New session started."
-    # /stop — {count}
-    stop_tasks: str = "Stopped {count} task(s)."
-    stop_idle: str = "No active task to stop."
-    # unhandled exception
-    error: str = "Sorry, I encountered an error."
-    # background (subagent) task with no reply
-    background_done: str = "Background task completed."
-    # /help (full text, newlines supported)
-    help: str = (
-        "## 🐈 NanoCat commands:\n"
-        "- /new — Start a new conversation\n"
-        "- /stop — Stop the current task\n"
-        "- /restart — Restart the bot\n"
-        "- /model — View or configure models\n"
-        "- /context — Show current context info\n"
-        "- /whoami — Show channel/chat identity\n"
-        "- /help — Show available commands\n"
-        "- /compact — Manually compact old session turns\n"
-        "- /session — View and switch sessions\n"
-        "- /status — Show agent status and recent logs\n"
-        "- /approve <N=5> — Approve safety check for N minutes\n"
-        "- /max <prompt> — Use high-capability model for this turn"
-    )
-    # /model (no args) — {model_name}, {provider_name}
-    model_info: str = (
-        "## 🐈 Model info\n"
-        "- Agent Model: {agent_model}\n"
-        "- Max Model: {max_model}\n"
-        "- Assistant Model: {assistant_model}\n"
-        "- Subagent Model: {subagent_model}\n"
-        "- Provider: {provider_name}\n\n"
-        "- Available models:\n{model_choice}\n\n"
-        "## Usage:\n"
-        "- /model add <provider> <model_name>\n"
-        "- /model agent|subagent|assistant|max <N>\n"
-        "- /model delete <N>"
-    )
-    # /model set (success) — {target}, {model_name}
-    model_set: str = "{target} model set: {model_name}"
-    # /model delete (success) — {model_name}
-    model_deleted: str = "Model deleted: {model_name}"
-    # /model add (success) — {model_name}
-    model_added: str = "Model added: {model_name}"
-    # /model (error) — {error}
-    model_error: str = "Error updating model: {error}"
-    # /model (choice invalid) — {choice_number}
-    model_choice_invalid: str = "Invalid choice number: {choice_number}"
-    # /session - usage shown when subcommand is unknown or missing
-    session_usage: str = (
-        "## Usage:\n\n- /session list [N=10]\n- /session view <id>\n- /session switch <id>"
-    )
-    # /session list — no eligible sessions
-    session_list_empty: str = "No named sessions yet. Keep chatting to auto-generate session names."
-    # /session list — {items} (pre-formatted markdown list)
-    session_list: str = (
-        "## Sessions:\n\n{items}\n\n## Usage:\n\n- /session view <id>\n- /session switch <id>"
-    )
-    # /session view — {name}, {id}, {turns}
-    session_view: str = "## {name} ({id})\n\n{turns}"
-    # /session switch — {session_id}, {name}
-    session_switched: str = "Switched to session `{session_id}` ({name})."
-    # /session view/switch — not found — {session_id}
-    session_not_found: str = "Session `{session_id}` not found."
-    # /whoami — {channel}, {chat_id}, {session_id}, {session_key}
-    whoami_info: str = (
-        "## 🐈 Session Identity\n\n"
-        "- Channel: {channel}\n"
-        "- Chat ID: {chat_id}\n"
-        "- Session: {session_id}\n"
-        "- Key: {session_key}"
-    )
-    # /context panel body
-    context_panel: str = (
-        "## 🐈 Context Usage ({model_name})\n\n"
-        "- prompt = {estimated_prompt_tokens}/{context_window_tokens} ({context_usage_percent}%)\n"
-        "- overflow = {overflow_tokens}/{context_window_tokens} ({overflow_percent}%)\n"
-        "- msgs = {messages_uncompacted}/{messages_total} ({uncompacted_percent}%)\n"
-        "- history = {history_messages}/{messages_total}\n"
-    )
-    # agent loop finished with no content
-    no_response: str = "I've completed processing but have no response to give."
-    # Compaction tips
-    compact_completed: str = "Session compaction completed."
-    compact_failed: str = "No completed turns are eligible for compaction."
-
-
 class Config(BaseSettings):
     """Root configuration for NanoCat."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    runtime: RuntimeLimitsConfig = Field(default_factory=RuntimeLimitsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
-    tips: TipsConfig = Field(default_factory=TipsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     @property

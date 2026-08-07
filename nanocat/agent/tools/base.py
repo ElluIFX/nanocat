@@ -4,6 +4,8 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any
 
+from nanocat.core.runtime import CapabilityDescriptor
+
 
 def tool_ok(**fields: Any) -> str:
     """JSON success envelope shared by every tool: ``{"ok": true, ...fields}``.
@@ -70,6 +72,20 @@ class Tool(ABC):
         """JSON Schema for tool parameters."""
         pass
 
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        """Return stable capability names exposed by this tool."""
+        return (f"tool.{self.name}",)
+
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        """Return SDK-neutral metadata for registry and policy discovery."""
+        return CapabilityDescriptor(
+            name=self.name,
+            capabilities=self.capabilities,
+            metadata={"description": self.description},
+        )
+
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:
         """
@@ -82,6 +98,14 @@ class Tool(ABC):
             String result of the tool execution.
         """
         pass
+
+    def record_execution(
+        self,
+        context: Any,
+        params: dict[str, Any],
+        result: str,
+    ) -> None:
+        """Record turn-local effects without changing the tool result contract."""
 
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply safe schema-driven casts before validation."""

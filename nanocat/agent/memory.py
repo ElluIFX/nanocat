@@ -151,11 +151,21 @@ class MemoryStore:
 class NowledgeMemoryManager:
     """Owns LLM-based extraction of durable memories and writes them to Nowledge."""
 
-    def __init__(self, client: NowledgeClient):
+    def __init__(
+        self,
+        client: NowledgeClient,
+        provider_resolver: Any | None = None,
+        config: Any | None = None,
+    ):
         self.client = client
+        self._provider_resolver = provider_resolver
+        self._config = config
 
     @property
     def model(self) -> str:
+        if self._config is not None:
+            cfg = self._config.agents.defaults
+            return cfg.assistant_model or cfg.model
         from nanocat.config.loader import get_runtime_config
 
         cfg = get_runtime_config().agents.defaults
@@ -163,6 +173,8 @@ class NowledgeMemoryManager:
 
     @property
     def provider(self):
+        if self._provider_resolver is not None:
+            return self._provider_resolver.resolve(self.model)
         from nanocat.providers.manager import get_provider
 
         return get_provider(self.model)
@@ -267,14 +279,20 @@ class MemoryCompactor:
         threshold: float = 0.5,
         no_compact_turns: int = 3,
         nowledge_manager: NowledgeMemoryManager | None = None,
+        provider_resolver: Any | None = None,
+        config: Any | None = None,
     ):
-        from nanocat.config.loader import get_runtime_config
+        if config is None:
+            from nanocat.config.loader import get_runtime_config
 
-        self.store = MemoryStore(get_runtime_config().workspace_path)
+            config = get_runtime_config()
+        self._config = config
+        self.store = MemoryStore(config.workspace_path)
         self.sessions = sessions
         self.threshold = threshold
         self.no_compact_turns = max(0, no_compact_turns)
         self.nowledge_manager = nowledge_manager
+        self._provider_resolver = provider_resolver
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -282,6 +300,9 @@ class MemoryCompactor:
 
     @property
     def model(self) -> str:
+        if self._config is not None:
+            cfg = self._config.agents.defaults
+            return cfg.assistant_model or cfg.model
         from nanocat.config.loader import get_runtime_config
 
         cfg = get_runtime_config().agents.defaults
@@ -289,18 +310,24 @@ class MemoryCompactor:
 
     @property
     def provider(self):
+        if self._provider_resolver is not None:
+            return self._provider_resolver.resolve(self.model)
         from nanocat.providers.manager import get_provider
 
         return get_provider(self.model)
 
     @property
     def workspace(self):
+        if self._config is not None:
+            return self._config.workspace_path
         from nanocat.config.loader import get_runtime_config
 
         return get_runtime_config().workspace_path
 
     @property
     def context_window_tokens(self) -> int:
+        if self._config is not None:
+            return self._config.agents.defaults.context_window_tokens
         from nanocat.config.loader import get_runtime_config
 
         return get_runtime_config().agents.defaults.context_window_tokens

@@ -7,13 +7,14 @@ from collections import OrderedDict
 from typing import Any
 
 from loguru import logger
+from pydantic import Field
 
 from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.paths import get_media_dir
 from nanocat.config.schema import Base
-from pydantic import Field
+from nanocat.core.ports import ChannelCapabilities
 
 WECOM_AVAILABLE = importlib.util.find_spec("wecom_aibot_sdk") is not None
 
@@ -48,6 +49,7 @@ class WecomChannel(BaseChannel):
 
     name = "wecom"
     display_name = "WeCom"
+    capabilities = ChannelCapabilities(media=False, reply_threads=True)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -115,8 +117,14 @@ class WecomChannel(BaseChannel):
     async def stop(self) -> None:
         """Stop the WeCom bot."""
         self._running = False
-        if self._client:
-            await self._client.disconnect()
+        client = self._client
+        self._client = None
+        if client:
+            try:
+                await client.disconnect()
+            except Exception as e:
+                logger.warning("WeCom client disconnect failed: {}", e)
+        await self._cancel_owned_tasks()
         logger.info("WeCom bot stopped")
 
     async def _on_connected(self, frame: Any) -> None:

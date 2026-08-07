@@ -7,22 +7,27 @@ do not pass model strings around.
 
 from __future__ import annotations
 
+from typing import Any
+
 from nanocat.config.loader import get_runtime_config
 from nanocat.providers.base import GenerationSettings, LLMProvider
 
 _providers: dict[str, LLMProvider] = {}
 
 
-def make_provider(override_model: str | None = None) -> LLMProvider:
-    """Create a provider for a model using the global runtime config."""
-    from nanocat.providers.azure_openai_provider import AzureOpenAIProvider
+def make_provider(
+    override_model: str | None = None,
+    *,
+    config: Any | None = None,
+) -> LLMProvider:
+    """Create a provider for a model using an explicit runtime config."""
     from nanocat.providers.custom_provider import CustomProvider
     from nanocat.providers.deepseek_provider import DeepSeekProvider
     from nanocat.providers.litellm_provider import LiteLLMProvider
     from nanocat.providers.openai_codex_provider import OpenAICodexProvider
     from nanocat.providers.registry import find_by_name
 
-    config = get_runtime_config()
+    config = config or get_runtime_config()
     model = override_model or config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     provider_cfg = config.get_provider(model)
@@ -42,16 +47,6 @@ def make_provider(override_model: str | None = None) -> LLMProvider:
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
             default_model=model,
             extra_headers=provider_cfg.extra_headers if provider_cfg else None,
-        )
-    elif provider_name == "azure_openai":
-        if not provider_cfg or not provider_cfg.api_key or not provider_cfg.api_base:
-            raise RuntimeError(
-                "Azure OpenAI requires api_key and api_base in providers.azure_openai."
-            )
-        provider = AzureOpenAIProvider(
-            api_key=provider_cfg.api_key,
-            api_base=provider_cfg.api_base,
-            default_model=model,
         )
     else:
         spec = find_by_name(provider_name)

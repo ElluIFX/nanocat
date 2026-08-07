@@ -49,8 +49,6 @@ def _clean_search_result(r: dict) -> dict:
 
 
 class MemorySearchTool(Tool):
-    """Search Nowledge Mem memories by semantic query."""
-
     def __init__(self, client: NowledgeClient):
         self._client = client
 
@@ -93,8 +91,6 @@ class MemorySearchTool(Tool):
 
 
 class MemoryGetTool(Tool):
-    """Get a memory by ID from Nowledge Mem."""
-
     def __init__(self, client: NowledgeClient):
         self._client = client
 
@@ -127,8 +123,6 @@ class MemoryGetTool(Tool):
 
 
 class MemoryAddTool(Tool):
-    """Save a new memory to Nowledge Mem."""
-
     def __init__(self, client: NowledgeClient):
         self._client = client
 
@@ -198,8 +192,6 @@ class MemoryAddTool(Tool):
 
 
 class MemoryUpdateTool(Tool):
-    """Update an existing Nowledge Mem memory."""
-
     def __init__(self, client: NowledgeClient):
         self._client = client
 
@@ -266,8 +258,6 @@ class MemoryUpdateTool(Tool):
 
 
 class MemoryDeleteTool(Tool):
-    """Delete a memory from Nowledge Mem by ID"""
-
     def __init__(self, client: "NowledgeClient"):
         self._client = client
 
@@ -308,8 +298,6 @@ class MemoryDeleteTool(Tool):
 
 
 class ReadWorkingMemoryTool(Tool):
-    """Read today's Nowledge Mem working memory briefing."""
-
     def __init__(self, client: NowledgeClient):
         self._client = client
 

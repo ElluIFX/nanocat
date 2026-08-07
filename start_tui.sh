@@ -17,6 +17,10 @@ else
   echo "Python 3.11+ not found. Please install it first: https://www.python.org/downloads/" >&2
   exit 1
 fi
+if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  echo "Python 3.11+ is required." >&2
+  exit 1
+fi
 
 # --- uv: install via pip if missing ---
 if command -v uv >/dev/null 2>&1; then

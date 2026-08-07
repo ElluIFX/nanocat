@@ -42,8 +42,6 @@ def build_command_env(
 
 
 class ExecTool(Tool):
-    """Tool to execute shell commands."""
-
     def __init__(
         self,
         timeout: int = 60,
@@ -60,13 +58,11 @@ class ExecTool(Tool):
         self.path_append = path_append or []
         self.extra_env = env or {}
 
-        # Wire extra security patterns into the central command guard.
-        from nanocat.security.command import set_allow_always, set_extra_deny
-
-        if deny_regex:
-            set_extra_deny(deny_regex)
-        if allow_regex:
-            set_allow_always(allow_regex)
+        # Legacy constructor arguments remain accepted for compatibility. The
+        # runtime policy now owns command rules per runtime instead of mutating
+        # process-global guard state from each tool instance.
+        self._deny_regex = tuple(deny_regex or ())
+        self._allow_regex = tuple(allow_regex or ())
 
     @property
     def name(self) -> str:
@@ -143,12 +139,12 @@ class ExecTool(Tool):
         shell: bool = True,
         **kwargs: Any,
     ) -> str:
-        from nanocat.security import safety_bypass
         from nanocat.security.command import guard_command
 
         cwd = working_dir or self.working_dir or os.getcwd()
 
-        if not safety_bypass.get():
+        authorization = kwargs.pop("_security_authorization", None)
+        if authorization is None:
             error = guard_command(
                 command,
                 cwd=cwd,
