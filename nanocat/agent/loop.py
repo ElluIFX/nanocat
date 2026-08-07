@@ -24,10 +24,9 @@ from nanocat.agent.context_artifacts import ContextArtifactStore, ContextLookupT
 from nanocat.agent.context_budget import ContextBudget
 from nanocat.agent.memory import (
     MemoryCompactor,
-    NowledgeClient,
-    NowledgeMemoryManager,
     NowledgeThreadManager,
 )
+from nanocat.agent.nowledge_client import NowledgeClient, NowledgeRequestError
 from nanocat.agent.subagent import (
     SubagentGatherTool,
     SubagentKillTool,
@@ -89,16 +88,6 @@ if TYPE_CHECKING:
     from nanocat.config.schema import Config
     from nanocat.cron.service import CronService
 
-try:  # optional: sharpens memory-search queries; falls back to raw text if absent
-    import jieba.analyse as _jieba_analyse
-except Exception:  # pragma: no cover - jieba is an optional runtime dependency
-    _jieba_analyse = None
-
-# Keep content-bearing POS tags (nouns/verbs/proper nouns + English tokens); drop
-# particles, pronouns, conjunctions and other filler that dilute the search query.
-_KEYWORD_ALLOW_POS = ("n", "nr", "ns", "nt", "nz", "nrt", "vn", "v", "eng", "j", "l")
-
-
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -141,13 +130,13 @@ class AgentLoop:
         self.intervention = intervention_broker
         set_runtime_config(config)
 
+        _defaults = config.agents.defaults
         _mem = config.memory
-        _nowledge_cfg = _mem.nowledge
 
         self.cron_service = cron_service
         self.context = ContextBuilder(
             config.workspace_path,
-            nowledge_enabled=_nowledge_cfg.enabled,
+            nowledge_enabled=_mem.enabled,
         )
         from nanocat.config.paths import get_sessions_dir
 
@@ -179,6 +168,7 @@ class AgentLoop:
         self._steer_buf: dict[str, list[InboundMessage]] = {}
         self._steer_events: dict[str, asyncio.Event] = {}
         self._progressed: dict[str, bool] = {}
+        self._nowledge_working_memory_loaded: set[str] = set()
         self.subagents._steer_inject = self._steer_buf
         self.subagents._is_live = lambda sk: any(
             not t.done() for t in self._active_tasks.get(sk, [])
@@ -191,26 +181,19 @@ class AgentLoop:
 
         # Nowledge Mem integration (optional)
         self.nowledge_client: NowledgeClient | None = (
-            NowledgeClient(api_url=_nowledge_cfg.api_url, api_key=_nowledge_cfg.api_key)
-            if _nowledge_cfg.enabled
+            NowledgeClient(api_url=_mem.api_url, api_key=_mem.api_key, space_id=_mem.space_id)
+            if _mem.enabled
             else None
         )
         self.thread_manager: NowledgeThreadManager | None = (
             NowledgeThreadManager(
                 client=self.nowledge_client,
                 sessions=self.sessions,
-                source=_nowledge_cfg.thread_source,
+                source=_mem.thread_source,
+                space_id=_mem.space_id,
+                artifact_store=self.context_artifacts,
             )
             if self.nowledge_client
-            else None
-        )
-        self.nowledge_memory_manager: NowledgeMemoryManager | None = (
-            NowledgeMemoryManager(
-                client=self.nowledge_client,
-                provider_resolver=self._provider_resolver,
-                config=config,
-            )
-            if self.nowledge_client and _nowledge_cfg.auto_extract_memories
             else None
         )
         self.command_handlers = RuntimeCommandHandlers(
@@ -235,9 +218,8 @@ class AgentLoop:
             sessions=self.sessions,
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
-            threshold=_mem.compaction_threshold,
-            no_compact_turns=_mem.no_compact_history_num,
-            nowledge_manager=self.nowledge_memory_manager,
+            threshold=_defaults.compaction_threshold,
+            no_compact_turns=_defaults.no_compact_history_num,
             provider_resolver=self._provider_resolver,
             config=config,
         )
@@ -321,7 +303,7 @@ class AgentLoop:
 
     @property
     def _nowledge_auto_inject(self):
-        return self._config.memory.nowledge.auto_inject
+        return self._config.memory.auto_inject
 
     @property
     def _mcp_servers(self):
@@ -708,53 +690,120 @@ class AgentLoop:
         return tool_text, user_blocks
 
     @staticmethod
-    def _extract_search_query(text: str, topk: int = 10) -> str:
-        """Reduce a conversational message to zh/en keywords for a sharper memory search.
+    def _memory_recall_intent(query: str) -> bool:
+        """Return whether a message explicitly asks for historical context."""
+        markers = (
+            "之前",
+            "上次",
+            "以前",
+            "曾经",
+            "历史",
+            "记得",
+            "回顾",
+            "why did we",
+            "previous",
+            "last time",
+            "earlier",
+            "before",
+        )
+        lowered = query.lower()
+        return any(marker in lowered for marker in markers)
 
-        A full utterance carries filler that dilutes both the BM25 and the vector side of
-        Nowledge's hybrid search. jieba's TF-IDF extraction (POS-filtered) keeps the salient
-        Chinese/English terms; on any failure or empty result we fall back to the raw text.
-        """
-        if not text or _jieba_analyse is None:
-            return text
-        try:
-            tags = _jieba_analyse.extract_tags(text, topK=topk, allowPOS=_KEYWORD_ALLOW_POS)
-        except Exception:
-            return text
-        return " ".join(tags) if tags else text
+    @classmethod
+    def _memory_search_eligible(cls, query: str) -> bool:
+        """Skip commands, acknowledgements, and empty chatter before searching."""
+        text = query.strip()
+        if not text or text.startswith("/"):
+            return False
+        if len(text) < 4 and not cls._memory_recall_intent(text):
+            return False
+        return True
 
-    async def _auto_inject_memories(self, query: str) -> list[dict] | None:
-        """Search Nowledge and return cleaned results for system prompt injection."""
+    async def _auto_inject_memories(self, query: str, session: Session) -> list[dict] | None:
+        """Retrieve bounded Nowledge context before the provider call."""
         cfg = self._nowledge_auto_inject
-        if not cfg.enabled or not self.nowledge_client:
+        if not cfg.enabled or not self.nowledge_client or not self._memory_search_eligible(query):
             return None
-        search_query = self._extract_search_query(query) if cfg.extract_keywords else query
-        if search_query != query:
-            logger.debug("Memory search query: {!r} -> {!r}", query, search_query)
-        results = await self.nowledge_client.search_memories(search_query, limit=cfg.max_num)
-        cleaned = []
+        recall_intent = self._memory_recall_intent(query)
+        search_query = query.strip()
+        if recall_intent and len(search_query) < 24:
+            previous = [
+                str(message.get("content") or "").strip()
+                for message in reversed(session.messages)
+                if message.get("role") == "user" and message.get("content")
+            ][:2]
+            if previous:
+                search_query = "\n".join([*reversed(previous), search_query])[:2000]
+        mode = cfg.mode
+        if mode == "auto":
+            mode = "deep" if cfg.deep_on_recall and recall_intent else "fast"
+        try:
+            results = await self.nowledge_client.search_memories(
+                search_query,
+                limit=cfg.max_num,
+                mode=mode,
+                include_entities=False,
+                space_id=self._config.memory.space_id,
+            )
+        except NowledgeRequestError as exc:
+            logger.debug("Nowledge auto-inject skipped: {}", exc.code)
+            return None
+
+        recent_ids = [str(item) for item in session.metadata.get("_nowledge_auto_inject_ids", [])]
+        seen = set(recent_ids)
+        cleaned: list[dict] = []
         for r in results:
-            score = r.get("similarity_score", 0)
-            if score < cfg.score_threshold:
+            try:
+                score = float(r.get("similarity_score", 0) or 0)
+            except (TypeError, ValueError):
+                score = 0.0
+            if score < cfg.min_score:
                 continue
             mem = r.get("memory") or {}
             if not mem:
                 continue
+            memory_id = mem.get("id")
+            if not memory_id or memory_id in seen:
+                continue
+            content = str(mem.get("content") or "")
+            if len(content) > cfg.preview_length:
+                content = content[: cfg.preview_length] + "…"
             item = {
-                "id": mem.get("id"),
+                "id": memory_id,
                 "title": mem.get("title"),
-                "score": score,
+                "type": mem.get("unit_type"),
+                "summary": content,
+                "relevance": score,
+                "relevance_reason": r.get("relevance_reason"),
+                "recorded_at": mem.get("created_at"),
+                "event_time": mem.get("event_start") or mem.get("event_end"),
+                "space_id": mem.get("space_id"),
+                "source": mem.get("source"),
+                "source_thread_id": mem.get("source_thread_id"),
+                "source_range": mem.get("source_range"),
             }
-            if cfg.with_content:
-                content = mem.get("content") or ""
-                if len(content) > cfg.max_length:
-                    content = content[: cfg.max_length] + "[TRUNCATED, SEARCH IF USEFUL]"
-                item["content"] = content
             cleaned.append(item)
+            seen.add(memory_id)
+            recent_ids.append(memory_id)
         if cleaned:
-            log = " / ".join(f"{mem['score'] * 100:.0f}% '{mem['title']}'" for mem in cleaned)
-            logger.debug(f"Auto-injected {len(cleaned)} memories to system prompt ({log})")
+            session.metadata["_nowledge_auto_inject_ids"] = recent_ids[-32:]
+            log = " / ".join(f"{mem['relevance'] * 100:.0f}%" for mem in cleaned)
+            logger.debug("Auto-injected {} Nowledge memories ({})", len(cleaned), log)
         return cleaned or None
+
+    async def _load_working_memory(self, session: Session) -> str | None:
+        """Load Working Memory once per runtime session without blocking the turn budget."""
+        if not self.nowledge_client or session.key in self._nowledge_working_memory_loaded:
+            return None
+        self._nowledge_working_memory_loaded.add(session.key)
+        try:
+            return await asyncio.wait_for(
+                self.nowledge_client.get_working_memory(space_id=self._config.memory.space_id),
+                timeout=3.0,
+            ) or None
+        except (NowledgeRequestError, asyncio.TimeoutError) as exc:
+            logger.debug("Nowledge Working Memory skipped for {}: {}", session.key, exc)
+            return None
 
     async def _drain_steer(
         self,
@@ -1896,6 +1945,8 @@ class AgentLoop:
         await self.tool_host.close()
         await self.sessions.close()
         await self._provider_resolver.close()
+        if self.nowledge_client is not None:
+            await self.nowledge_client.close()
         if self._recent_log_sink_id is not None:
             logger.remove(self._recent_log_sink_id)
             self._recent_log_sink_id = None
@@ -2017,7 +2068,7 @@ class AgentLoop:
                 if self.thread_manager:
                     _new_msgs_sys = session.messages[_old_msg_count_sys:]
                     self._schedule_background(
-                        self.thread_manager.append_turn(session, _new_msgs_sys)
+                        self.thread_manager.append_turn_and_distill(session, _new_msgs_sys)
                     )
             if (message_tool := self.tools.get("message")) and isinstance(
                 message_tool, MessageTool
@@ -2049,11 +2100,15 @@ class AgentLoop:
             await self.memory_compactor.maybe_compact_by_tokens(session)
 
         history = session.get_history(max_messages=0)
-        injected_memories = await self._auto_inject_memories(msg.content) if not transient else None
+        working_memory = await self._load_working_memory(session) if not transient else None
+        injected_memories = (
+            await self._auto_inject_memories(msg.content, session) if not transient else None
+        )
         initial_messages = self.context.build_messages(
             history=history,
             compacted_memory=session.compacted_memory,
             injected_memories=injected_memories,
+            working_memory=working_memory,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
@@ -2144,7 +2199,9 @@ class AgentLoop:
             self._schedule_background(self.memory_compactor.maybe_compact_by_tokens(session))
             if self.thread_manager:
                 _new_msgs = session.messages[_old_msg_count:]
-                self._schedule_background(self.thread_manager.append_turn(session, _new_msgs))
+                self._schedule_background(
+                    self.thread_manager.append_turn_and_distill(session, _new_msgs)
+                )
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool):
             sent_in_turn = mt.sent_in_turn(tool_context.turn_id)

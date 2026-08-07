@@ -6,16 +6,15 @@ import asyncio
 import hashlib
 import json
 import re
-import traceback
 import uuid
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-import httpx
 from loguru import logger
 
+from nanocat.agent.nowledge_client import NowledgeClient
 from nanocat.session.checkpoint import CompactionCheckpoint, CompactionState
 from nanocat.utils.helpers import estimate_prompt_tokens_chain
 
@@ -23,32 +22,9 @@ if TYPE_CHECKING:
     from nanocat.session.manager import Session, SessionManager
 
 
-_TOOL_CHOICE_ERROR_MARKERS = (
-    "tool_choice",
-    "toolchoice",
-    "does not support",
-    'should be ["none", "auto"]',
-)
-
-
 def _ensure_text(value: Any) -> str:
-    """Normalize arbitrary values to plain text."""
+    """Normalize arbitrary message values for local compaction input."""
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-
-
-def _normalize_tool_args(args: Any) -> dict[str, Any] | None:
-    """Normalize provider tool-call arguments to the expected dict shape."""
-    if isinstance(args, str):
-        args = json.loads(args)
-    if isinstance(args, list):
-        return args[0] if args and isinstance(args[0], dict) else None
-    return args if isinstance(args, dict) else None
-
-
-def _is_tool_choice_unsupported(content: str | None) -> bool:
-    """Detect provider errors caused by forced tool_choice being unsupported."""
-    text = (content or "").lower()
-    return any(marker in text for marker in _TOOL_CHOICE_ERROR_MARKERS)
 
 
 def _format_messages(messages: list[dict[str, object]]) -> str:
@@ -93,53 +69,6 @@ def _strip_fenced_block(text: str) -> str:
     return cleaned
 
 
-def _build_extract_memories_tool() -> list[dict[str, Any]]:
-    """Return the extraction tool schema used by the Nowledge helper agent."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "record_memories",
-                "description": "Return the durable memories worth storing in Nowledge.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "memories": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "content": {
-                                        "type": "string",
-                                        "description": "Self-contained durable memory content.",
-                                    },
-                                    "title": {
-                                        "type": "string",
-                                        "description": "Short descriptive title.",
-                                    },
-                                    "labels": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                        "description": "Tags such as decision, preference, workflow.",
-                                    },
-                                    "importance": {
-                                        "type": "number",
-                                        "minimum": 0.1,
-                                        "maximum": 1.0,
-                                        "description": "0.8-1.0 critical, 0.5-0.7 useful, 0.1-0.4 context.",
-                                    },
-                                },
-                                "required": ["content"],
-                            },
-                        }
-                    },
-                    "required": ["memories"],
-                },
-            },
-        }
-    ]
-
-
 class MemoryStore:
     """Static long-term memory backed by MEMORY.md in the workspace root."""
 
@@ -169,123 +98,6 @@ class MemoryStore:
         return f"# --- MEMORY.md ---\n\n{long_term}" if long_term else ""
 
 
-class NowledgeMemoryManager:
-    """Owns LLM-based extraction of durable memories and writes them to Nowledge."""
-
-    def __init__(
-        self,
-        client: NowledgeClient,
-        provider_resolver: Any | None = None,
-        config: Any | None = None,
-    ):
-        self.client = client
-        self._provider_resolver = provider_resolver
-        self._config = config
-
-    @property
-    def model(self) -> str:
-        if self._config is not None:
-            cfg = self._config.agents.defaults
-            return cfg.assistant_model or cfg.model
-        from nanocat.config.loader import get_runtime_config
-
-        cfg = get_runtime_config().agents.defaults
-        return cfg.assistant_model or cfg.model
-
-    @property
-    def provider(self):
-        if self._provider_resolver is not None:
-            return self._provider_resolver.resolve(self.model)
-        from nanocat.providers.manager import get_provider
-
-        return get_provider(self.model)
-
-    async def extract_and_store(self, messages: list[dict[str, object]]) -> None:
-        """Extract durable memories from raw messages and store them in Nowledge."""
-        if not messages:
-            return
-
-        tool_def = _build_extract_memories_tool()
-        prompt = (
-            "Review these raw session messages and store only durable cross-session knowledge.\n\n"
-            "Include facts, stable preferences, constraints, decisions with rationale, or reusable workflows.\n"
-            "Skip temporary status, routine chatter, tool noise, and anything unlikely to matter later.\n"
-            "Prefer precision over recall. If nothing is worth storing, return an empty memories array.\n\n"
-            f"## Raw Messages\n{_format_messages(messages)}"
-        )
-        chat_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a Nowledge memory extraction agent. "
-                    "Call the record_memories tool with only durable memories worth saving. "
-                    "Return an empty memories array when there is nothing important to store."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-
-        try:
-            forced = {"type": "function", "function": {"name": "record_memories"}}
-            response = await self.provider.chat_with_retry(
-                messages=chat_messages,
-                tools=tool_def,
-                model=self.model,
-                max_tokens=1200,
-                temperature=0.0,
-                reasoning_effort=None,
-                tool_choice=forced,
-            )
-            if response.finish_reason == "error" and _is_tool_choice_unsupported(response.content):
-                logger.warning(
-                    "Nowledge extraction: forced tool_choice unsupported, retrying with auto"
-                )
-                response = await self.provider.chat_with_retry(
-                    messages=chat_messages,
-                    tools=tool_def,
-                    model=self.model,
-                    max_tokens=1200,
-                    temperature=0.0,
-                    reasoning_effort=None,
-                    tool_choice="auto",
-                )
-
-            if not response.has_tool_calls:
-                logger.debug("Nowledge extraction produced no tool call")
-                return
-
-            args = _normalize_tool_args(response.tool_calls[0].arguments)
-            if args is None:
-                logger.warning("Nowledge extraction: unexpected tool arguments")
-                return
-
-            extracted = args.get("memories") or []
-            if not isinstance(extracted, list):
-                logger.warning("Nowledge extraction: invalid memories payload")
-                return
-
-            valid_items = [
-                item for item in extracted if isinstance(item, dict) and item.get("content")
-            ]
-            for item in valid_items:
-                try:
-                    await self.client.create_memory(
-                        content=_ensure_text(item["content"]),
-                        title=_ensure_text(item["title"]) if item.get("title") else None,
-                        labels=[
-                            _ensure_text(label)
-                            for label in item.get("labels", [])
-                            if isinstance(label, (str, int, float))
-                        ]
-                        or None,
-                        importance=float(item.get("importance", 0.5)),
-                    )
-                except Exception:
-                    logger.warning("Failed to store extracted memory in Nowledge")
-        except Exception:
-            logger.exception("Nowledge extraction failed")
-
-
 class MemoryCompactor:
     """Owns session compaction policy, locking, and offset updates."""
 
@@ -301,7 +113,6 @@ class MemoryCompactor:
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         threshold: float = 0.5,
         no_compact_turns: int = 3,
-        nowledge_manager: NowledgeMemoryManager | None = None,
         provider_resolver: Any | None = None,
         config: Any | None = None,
     ):
@@ -314,7 +125,6 @@ class MemoryCompactor:
         self.sessions = sessions
         self.threshold = threshold
         self.no_compact_turns = max(0, no_compact_turns)
-        self.nowledge_manager = nowledge_manager
         self._provider_resolver = provider_resolver
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
@@ -325,7 +135,7 @@ class MemoryCompactor:
     def model(self) -> str:
         if self._config is not None:
             cfg = self._config.agents.defaults
-            configured = self._config.memory.compaction_model
+            configured = cfg.compaction_model
             return configured or cfg.assistant_model or cfg.model
         from nanocat.config.loader import get_runtime_config
 
@@ -565,33 +375,25 @@ class MemoryCompactor:
         messages: list[dict[str, object]],
         boundary_idx: int,
     ) -> bool:
-        """Extract Nowledge memories if enabled, then update the session compacted memory."""
+        """Update the local session compacted memory at a safe turn boundary."""
         revision_before = session.revision
         source_start = session.last_compacted
         source_hash = hashlib.sha256(
             json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
-        original_skip = session.skip_next_nowledge_extraction
         token_before, _ = self.estimate_session_prompt_tokens(session)
         try:
-            if self.nowledge_manager and not session.skip_next_nowledge_extraction:
-                await self.nowledge_manager.extract_and_store(messages)
-                session.skip_next_nowledge_extraction = True
-                self.sessions.save(session)
-
             updated = await self._compact_text(
                 existing_memory=session.compacted_memory,
                 raw_messages=messages,
                 target_chars=self._target_compacted_chars(session, boundary_idx),
             )
             if updated is None:
-                session.skip_next_nowledge_extraction = original_skip
                 self._fail_or_skip(session, messages)
                 self.sessions.save(session)
                 return False
 
             if session.revision != revision_before or len(session.messages) < boundary_idx:
-                session.skip_next_nowledge_extraction = original_skip
                 logger.warning(
                     "Memory compaction discarded stale result for {}: revision {} -> {}",
                     session.key,
@@ -624,7 +426,6 @@ class MemoryCompactor:
             )
             session.compaction_checkpoint = checkpoint.to_dict()
             session.compacted_memory = checkpoint.render()
-            session.skip_next_nowledge_extraction = False
             session.last_compacted = boundary_idx
             token_after, _ = self.estimate_session_prompt_tokens(session)
             checkpoint.token_after = token_after
@@ -635,7 +436,6 @@ class MemoryCompactor:
             return True
         except Exception:
             logger.exception("Memory compaction failed")
-            session.skip_next_nowledge_extraction = original_skip
             self._fail_or_skip(session, messages)
             self.sessions.save(session)
             return False
@@ -703,255 +503,109 @@ class MemoryCompactor:
 
 
 # ---------------------------------------------------------------------------
-# NowledgeClient
-# ---------------------------------------------------------------------------
-
-
-class NowledgeClient:
-    """Async HTTP client for the Nowledge Mem REST API."""
-
-    def __init__(self, api_url: str = "http://127.0.0.1:14242", api_key: str | None = None):
-        self._api_url = api_url.rstrip("/")
-        self._api_key = api_key
-
-    def _headers(self) -> dict[str, str]:
-        h = {"Content-Type": "application/json"}
-        if self._api_key:
-            h["Authorization"] = f"Bearer {self._api_key}"
-        return h
-
-    async def is_available(self) -> bool:
-        """Return True if the Nowledge Mem server is reachable."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(f"{self._api_url}/health", timeout=2.0)
-                return r.status_code == 200
-        except Exception:
-            return False
-
-    async def search_memories(self, query: str, limit: int = 5) -> list[dict]:
-        """Search memories by semantic query. Returns list of result dicts."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    f"{self._api_url}/memories/search",
-                    headers=self._headers(),
-                    json={"query": query, "limit": limit},
-                    timeout=10.0,
-                )
-                r.raise_for_status()
-                return r.json() or []
-        except Exception:
-            logger.warning("Nowledge memory search failed")
-            return []
-
-    async def get_memory(self, memory_id: str) -> dict:
-        """Get a memory by ID. Returns the memory dict or empty dict on failure."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    f"{self._api_url}/memories/{memory_id}", headers=self._headers(), timeout=10.0
-                )
-                r.raise_for_status()
-                return r.json() or {}
-        except Exception:
-            logger.warning("Nowledge get_memory failed for id={}", memory_id)
-            return {}
-
-    async def create_memory(
-        self,
-        content: str,
-        title: str | None = None,
-        labels: list[str] | None = None,
-        importance: float = 0.5,
-    ) -> dict:
-        """Create a new memory. Returns the created memory dict or empty dict on failure."""
-        payload: dict[str, Any] = {"content": content, "importance": importance}
-        if title:
-            payload["title"] = title
-        if labels:
-            payload["labels"] = labels
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    f"{self._api_url}/memories",
-                    headers=self._headers(),
-                    json=payload,
-                    timeout=10.0,
-                )
-                r.raise_for_status()
-                return r.json() or {}
-        except Exception:
-            logger.warning("Nowledge create_memory failed")
-            return {}
-
-    async def update_memory(self, memory_id: str, **fields: Any) -> dict:
-        """Update an existing memory by ID. Returns updated memory or empty dict on failure."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.patch(
-                    f"{self._api_url}/memories/{memory_id}",
-                    headers=self._headers(),
-                    json=fields,
-                    timeout=10.0,
-                )
-                r.raise_for_status()
-                return r.json() or {}
-        except Exception:
-            logger.warning("Nowledge update_memory failed for id={}", memory_id)
-            logger.error(traceback.format_exc())
-            return {}
-
-    async def delete_memory(self, memory_id: str, cascade_delete: bool = True) -> bool:
-        """
-        Delete a memory by ID.
-
-        Args:
-            memory_id (str): The memory's unique identifier.
-            cascade_delete (bool, optional): Whether to delete related entities.
-
-        Returns:
-            bool: True if deletion succeeded, False otherwise.
-        """
-        try:
-            params = {"cascade_delete": cascade_delete}
-            async with httpx.AsyncClient() as client:
-                r = await client.delete(
-                    f"{self._api_url}/memories/{memory_id}",
-                    headers=self._headers(),
-                    params=params,
-                    timeout=10.0,
-                )
-                r.raise_for_status()
-                return True
-        except Exception:
-            logger.warning(
-                "Nowledge delete_memory failed for id={} with cascade_delete={}",
-                memory_id,
-                cascade_delete,
-            )
-            logger.error(traceback.format_exc())
-            return False
-
-    async def get_working_memory(self) -> str:
-        """Fetch today's working memory briefing. Returns markdown string or empty string."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    f"{self._api_url}/agent/working-memory",
-                    headers=self._headers(),
-                    timeout=10.0,
-                )
-                r.raise_for_status()
-                data = r.json() or {}
-                return data.get("content") or data.get("markdown") or str(data) if data else ""
-        except Exception:
-            logger.warning("Nowledge get_working_memory failed")
-            logger.error(traceback.format_exc())
-            return ""
-
-    async def create_thread(
-        self,
-        thread_id: str,
-        title: str,
-        messages: list[dict],
-        source: str = "nanocat",
-    ) -> str | None:
-        """Create a new conversation thread. Returns thread_id or None on failure."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    f"{self._api_url}/threads",
-                    headers=self._headers(),
-                    json={
-                        "thread_id": thread_id,
-                        "title": title,
-                        "messages": messages,
-                        "source": source,
-                    },
-                    timeout=15.0,
-                )
-                r.raise_for_status()
-                data = r.json() or {}
-                return data.get("thread", {}).get("thread_id")
-        except Exception:
-            logger.warning("Nowledge create_thread failed")
-            logger.error(traceback.format_exc())
-            return None
-
-    async def append_messages(
-        self,
-        thread_id: str,
-        messages: list[dict],
-        idempotency_key: str | None = None,
-    ) -> bool:
-        """Append messages to an existing thread. Returns True on success."""
-        payload: dict[str, Any] = {"messages": messages, "deduplicate": True}
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    f"{self._api_url}/threads/{thread_id}/append",
-                    headers=self._headers(),
-                    json=payload,
-                    timeout=15.0,
-                )
-                r.raise_for_status()
-                return True
-        except Exception:
-            logger.warning("Nowledge append_messages failed for thread={}", thread_id)
-            logger.error(traceback.format_exc())
-            return False
-
-
-# ---------------------------------------------------------------------------
 # NowledgeThreadManager
 # ---------------------------------------------------------------------------
 
 
 class NowledgeThreadManager:
-    """Manages per-session Nowledge thread lifecycle (create on first turn, append thereafter)."""
+    """Capture redacted session turns and synchronize them to one Nowledge Thread."""
 
-    _MAX_MSG_CHARS = 800
+    _MAX_MSG_CHARS = 12_000
+    _SENSITIVE_KEYWORDS = (
+        "api_key",
+        "apikey",
+        "authorization",
+        "cookie",
+        "password",
+        "private_key",
+        "secret",
+        "token",
+    )
+    _SECRET_RE = re.compile(
+        r"(?i)(?:bearer\s+|sk-|nmem_|ghp_|xox[baprs]-)[A-Za-z0-9_\-./+=]{12,}"
+    )
 
     def __init__(
         self,
         client: NowledgeClient,
         sessions: SessionManager,
         source: str = "nanocat",
+        space_id: str | None = None,
+        artifact_store: Any | None = None,
     ):
         self._client = client
         self._sessions = sessions
         self._source = source
+        self._space_id = space_id
+        self._artifact_store = artifact_store
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     def _get_lock(self, session_key: str) -> asyncio.Lock:
         return self._locks.setdefault(session_key, asyncio.Lock())
 
-    def _format_messages(self, messages: list[dict]) -> list[dict]:
-        """Convert session messages to Nowledge thread message format.
+    @classmethod
+    def _redact(cls, value: Any) -> Any:
+        """Redact credential-like keys and token-shaped values recursively."""
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                normalized = str(key).lower().replace("-", "_")
+                if any(marker in normalized for marker in cls._SENSITIVE_KEYWORDS):
+                    result[key] = "[REDACTED]"
+                else:
+                    result[key] = cls._redact(item)
+            return result
+        if isinstance(value, list):
+            return [cls._redact(item) for item in value]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                return cls._redact(parsed)
+            return cls._SECRET_RE.sub("[REDACTED]", value)
+        return value
 
-        Only user messages and final assistant text replies are kept.
-        Tool calls and tool results are dropped entirely.
-        Content is truncated to _MAX_MSG_CHARS.
-        """
+    @classmethod
+    def _text(cls, value: Any) -> str:
+        redacted = cls._redact(value)
+        if isinstance(redacted, str):
+            return redacted
+        return json.dumps(redacted, ensure_ascii=False, default=str)
+
+    def _format_messages(self, session_key: str, messages: list[dict]) -> list[dict]:
+        """Convert all conversation roles to bounded, redacted Thread messages."""
         result: list[dict] = []
         for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content") or ""
-
-            if role not in ("user", "assistant"):
+            role = str(msg.get("role") or "").lower()
+            if role not in ("user", "assistant", "tool"):
                 continue
-
-            # Skip assistant messages that are only tool-call dispatches (no text)
-            if role == "assistant" and msg.get("tool_calls"):
+            content: Any = msg.get("content") or ""
+            if msg.get("tool_calls"):
+                content = {
+                    "content": content,
+                    "tool_calls": msg.get("tool_calls"),
+                }
+            if msg.get("tool_call_id"):
+                content = {"tool_call_id": msg.get("tool_call_id"), "content": content}
+            text = self._text(content)
+            if not text:
                 continue
-
-            if not content:
-                continue
-
-            result.append({"role": role, "content": content[: self._MAX_MSG_CHARS]})
+            if len(text) > self._MAX_MSG_CHARS and role == "tool" and self._artifact_store:
+                text = self._artifact_store.capture(
+                    session_key,
+                    str(msg.get("name") or "tool"),
+                    str(msg.get("tool_call_id")) if msg.get("tool_call_id") else None,
+                    text,
+                )
+            elif len(text) > self._MAX_MSG_CHARS:
+                text = (
+                    text[: self._MAX_MSG_CHARS // 2]
+                    + "\n...[message clipped by NanoCat]...\n"
+                    + text[-self._MAX_MSG_CHARS // 2 :]
+                )
+            result.append({"role": role, "content": text})
 
         return result
 
@@ -961,34 +615,103 @@ class NowledgeThreadManager:
         return f"Conversation from {session.channel}_{session.chat_id}"
 
     async def append_turn(self, session: Session, new_messages: list[dict]) -> None:
-        """Append new-turn messages to the session's Nowledge thread.
-
-        Creates the thread on the first call for this session. All operations are
-        serialized per session_key to prevent concurrent thread creation.
-        """
-        formatted = self._format_messages(new_messages)
-        if not formatted:
+        """Synchronize all unacknowledged session messages to Nowledge."""
+        if not new_messages or not session.messages:
             return
 
         lock = self._get_lock(session.key)
         async with lock:
-            thread_id: str | None = session.metadata.get("nowledge_thread_id")
+            sync = session.metadata.setdefault("_nowledge_thread_sync", {})
+            if sync.get("capture_version") != 2:
+                sync.clear()
+            thread_id: str | None = sync.get("thread_id")
+            acknowledged = max(0, min(int(sync.get("acked_source_index", 0)), len(session.messages)))
 
             if thread_id is None:
+                formatted = self._format_messages(session.key, session.messages)
+                if not formatted:
+                    return
                 thread_id = str(uuid.uuid4())
                 title = self._extract_title(session)
-                got_id = await self._client.create_thread(
-                    thread_id=thread_id,
-                    title=title,
-                    messages=formatted,
-                    source=self._source,
-                )
+                try:
+                    got_id = await self._client.create_thread(
+                        thread_id=thread_id,
+                        title=title,
+                        messages=formatted,
+                        source=self._source,
+                        space_id=self._space_id,
+                        workspace=str(self._sessions.sessions_dir.parent),
+                    )
+                except Exception as exc:
+                    logger.warning("Nowledge Thread creation deferred for {}: {}", session.key, exc)
+                    self._sessions.save(session)
+                    return
                 if got_id != thread_id:
                     logger.error("Unmatched thread ID: got={}, expected={}", got_id, thread_id)
+                    self._sessions.save(session)
                     return
+                sync["thread_id"] = thread_id
+                sync["capture_version"] = 2
+                sync["acked_source_index"] = len(session.messages)
                 session.metadata["nowledge_thread_id"] = thread_id
-                self._sessions.save(session)
                 logger.info("Created Nowledge thread {} for session {}", thread_id, session.key)
-            else:
-                idem_key = f"{session.key}:{len(session.messages)}"
-                await self._client.append_messages(thread_id, formatted, idempotency_key=idem_key)
+            elif acknowledged < len(session.messages):
+                unsynced = self._format_messages(session.key, session.messages[acknowledged:])
+                if unsynced:
+                    digest = hashlib.sha256(
+                        json.dumps(unsynced, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                    ).hexdigest()[:16]
+                    idem_key = f"{session.key}:{acknowledged}:{len(session.messages)}:{digest}"
+                    try:
+                        await self._client.append_messages(
+                            thread_id,
+                            unsynced,
+                            idempotency_key=idem_key,
+                            space_id=self._space_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("Nowledge Thread sync deferred for {}: {}", session.key, exc)
+                        self._sessions.save(session)
+                        return
+                sync["acked_source_index"] = len(session.messages)
+            self._sessions.save(session)
+
+    async def append_turn_and_distill(self, session: Session, new_messages: list[dict]) -> None:
+        """Synchronize a turn and opportunistically ask Nowledge to distill mature threads."""
+        await self.append_turn(session, new_messages)
+        await self.distill_if_due(session)
+
+    async def distill_if_due(self, session: Session, *, min_new_messages: int = 8) -> None:
+        """Run bounded triage/distill after enough new Thread messages accumulate."""
+        lock = self._get_lock(session.key)
+        async with lock:
+            sync = session.metadata.get("_nowledge_thread_sync") or {}
+            thread_id = sync.get("thread_id")
+            acknowledged = int(sync.get("acked_source_index", 0) or 0)
+            last_distilled = int(sync.get("last_distilled_source_index", 0) or 0)
+            if not thread_id or acknowledged - last_distilled < min_new_messages:
+                return
+            formatted = self._format_messages(session.key, session.messages)
+            content = "\n".join(f"{item['role']}: {item['content']}" for item in formatted)
+            try:
+                triage = await self._client.triage(content[:50_000])
+                worth_saving = triage.get(
+                    "should_distill",
+                    triage.get(
+                        "worth_saving",
+                        triage.get("worth_distilling", triage.get("worthwhile", True)),
+                    ),
+                )
+                if worth_saving is not False:
+                    await self._client.distill(
+                        thread_id,
+                        extraction_level="guided",
+                        force_distill=False,
+                    )
+            except Exception as exc:
+                logger.warning("Nowledge distill deferred for {}: {}", session.key, exc)
+                self._sessions.save(session)
+                return
+            sync["last_distilled_source_index"] = acknowledged
+            session.metadata["_nowledge_thread_sync"] = sync
+            self._sessions.save(session)

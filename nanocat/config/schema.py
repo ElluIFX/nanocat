@@ -50,6 +50,11 @@ class AgentDefaults(Base):
     context_window_tokens: int = 65_536
     temperature: float | None = None
     max_tool_iterations: int = 40
+    compaction_threshold: float = (
+        0.5  # trigger session compaction when prompt exceeds this context fraction
+    )
+    no_compact_history_num: int = 3  # keep this many recent turns raw
+    compaction_model: str | None = None  # independent low-cost model for session compaction
     # Deprecated compatibility field: accepted from old configs but ignored at runtime.
     memory_window: int | None = Field(default=None, exclude=True)
     reasoning_effort: str | None = None  # low / medium / high / xhigh / max
@@ -241,41 +246,25 @@ class TranscriptionConfig(Base):
 
 
 class NowledgeAutoInjectConfig(Base):
-    """Auto-inject Nowledge search results into the system prompt on every user turn."""
+    """Automatic Nowledge retrieval and context injection policy."""
 
     enabled: bool = False
-    with_content: bool = False  # include memory content in the injected system prompt
-    score_threshold: float = 0.7  # minimum similarity_score to include a result
-    max_length: int = 128  # truncate memory content beyond this char count
-    max_num: int = 5  # maximum number of memories to inject
-    extract_keywords: bool = True  # extract zh/en keywords (jieba) instead of sending raw text
-
-
-class NowledgeConfig(Base):
-    """Nowledge Mem connection configuration."""
-
-    enabled: bool = False
-    auto_extract_memories: bool = False  # extract durable memories before compaction
-    api_url: str = "http://127.0.0.1:14242"
-    api_key: str | None = None
-    thread_source: str = "nanocat"
-    auto_inject: NowledgeAutoInjectConfig = Field(default_factory=NowledgeAutoInjectConfig)
+    mode: Literal["auto", "fast", "deep"] = "auto"
+    max_num: int = 3
+    preview_length: int = 512
+    deep_on_recall: bool = True
+    min_score: float = 0.25  # low guardrail; Nowledge ranking supplies the primary signal
 
 
 class MemoryConfig(Base):
-    """Memory system configuration.
+    """Nowledge Mem connection and retrieval configuration."""
 
-    Compaction settings always apply to session history.
-    MEMORY.md is a static, manually maintained long-term memory block.
-    Nowledge-specific extraction behavior is configured under memory.nowledge.
-    """
-
-    compaction_threshold: float = (
-        0.5  # trigger compression when prompt exceeds this fraction of context_window_tokens
-    )
-    no_compact_history_num: int = 3  # keep this many recent user/assistant turns raw
-    compaction_model: str | None = None  # independent low-cost model for session compaction
-    nowledge: NowledgeConfig = Field(default_factory=NowledgeConfig)
+    enabled: bool = False
+    api_url: str = "http://127.0.0.1:14242"
+    api_key: str | None = None
+    thread_source: str = "nanocat"
+    space_id: str | None = None
+    auto_inject: NowledgeAutoInjectConfig = Field(default_factory=NowledgeAutoInjectConfig)
 
 
 class Config(BaseSettings):

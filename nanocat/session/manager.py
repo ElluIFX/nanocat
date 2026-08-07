@@ -33,7 +33,6 @@ class Session:
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = field(default_factory=dict)
     compacted_memory: str = ""
-    skip_next_nowledge_extraction: bool = False
     last_compacted: int = 0
     compaction_checkpoint: dict[str, Any] = field(default_factory=dict)
     revision: int = 0
@@ -159,7 +158,6 @@ class Session:
     def clear(self) -> None:
         self.messages = []
         self.compacted_memory = ""
-        self.skip_next_nowledge_extraction = False
         self.last_compacted = 0
         self.compaction_checkpoint = {}
         self.revision = 0
@@ -232,7 +230,6 @@ class SessionManager:
             created_at = None
             last_compacted = 0
             compacted_memory = ""
-            skip_next_nowledge_extraction = False
             compaction_checkpoint: dict[str, Any] = {}
             revision = 0
             with open(path, encoding="utf-8") as f:
@@ -249,9 +246,6 @@ class SessionManager:
                             else None
                         )
                         compacted_memory = data.get("compacted_memory", "")
-                        skip_next_nowledge_extraction = data.get(
-                            "skip_next_nowledge_extraction", False
-                        )
                         last_compacted = data.get("last_compacted", 0)
                         compaction_checkpoint = data.get("compaction_checkpoint", {}) or {}
                         revision = int(data.get("revision", 0) or 0)
@@ -271,7 +265,6 @@ class SessionManager:
                 created_at=created_at or datetime.now(timezone.utc),
                 metadata=metadata,
                 compacted_memory=compacted_memory,
-                skip_next_nowledge_extraction=skip_next_nowledge_extraction,
                 last_compacted=last_compacted,
                 compaction_checkpoint=compaction_checkpoint,
                 revision=max(int(revision or 0), len(messages)),
@@ -514,7 +507,6 @@ class SessionManager:
             "updated_at": session.updated_at.isoformat(),
             "metadata": session.metadata,
             "compacted_memory": session.compacted_memory,
-            "skip_next_nowledge_extraction": session.skip_next_nowledge_extraction,
             "last_compacted": session.last_compacted,
             "compaction_checkpoint": session.compaction_checkpoint,
             "revision": session.revision,
@@ -532,7 +524,6 @@ class SessionManager:
         created_at = None
         last_compacted = 0
         compacted_memory = ""
-        skip_next_nowledge_extraction = False
         compaction_checkpoint: dict[str, Any] = {}
         revision = 0
         with open(path, encoding="utf-8") as f:
@@ -549,7 +540,6 @@ class SessionManager:
                         else None
                     )
                     compacted_memory = data.get("compacted_memory", "")
-                    skip_next_nowledge_extraction = data.get("skip_next_nowledge_extraction", False)
                     last_compacted = data.get("last_compacted", 0)
                     compaction_checkpoint = data.get("compaction_checkpoint", {}) or {}
                     revision = int(data.get("revision", 0) or 0)
@@ -564,7 +554,6 @@ class SessionManager:
             created_at=created_at or datetime.now(timezone.utc),
             metadata=metadata,
             compacted_memory=compacted_memory,
-            skip_next_nowledge_extraction=skip_next_nowledge_extraction,
             last_compacted=last_compacted,
             compaction_checkpoint=compaction_checkpoint,
             revision=max(int(revision or 0), len(messages)),

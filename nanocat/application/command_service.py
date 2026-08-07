@@ -107,6 +107,7 @@ class CommandService:
             result = await self.runtime_handlers.execute(
                 inspection,
                 principal_id=msg.principal_id or msg.sender_id,
+                session=session,
             )
             return CommandOutcome(
                 handled=True,

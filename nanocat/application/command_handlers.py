@@ -37,6 +37,7 @@ class RuntimeCommandHandlers:
         inspection: CommandInspection,
         *,
         principal_id: str = "user",
+        session: Any | None = None,
     ) -> CommandResult:
         """Execute one validated command inspection."""
         if inspection.parsed is None or inspection.spec is None:
@@ -44,7 +45,7 @@ class RuntimeCommandHandlers:
         if inspection.spec.name == "cron":
             return await self._cron_command(inspection.parsed, principal_id)
         if inspection.spec.name == "memory":
-            return await self._memory_command(inspection.parsed)
+            return await self._memory_command(inspection.parsed, session=session)
         return _error(CommandErrorCode.COMMAND_FAILED, "No application handler is registered.", "/help")
 
     async def _cron_command(self, command: ParsedCommand, principal_id: str) -> CommandResult:
@@ -139,20 +140,45 @@ class RuntimeCommandHandlers:
             return _error(CommandErrorCode.INVALID_ARGUMENT, str(exc), usage)
         return _ok(f"Cron job `{job.id}` added.")
 
-    async def _memory_command(self, command: ParsedCommand) -> CommandResult:
-        usage = "/memory search|show|add|update|delete"
+    async def _memory_command(
+        self, command: ParsedCommand, *, session: Any | None = None
+    ) -> CommandResult:
+        usage = "/memory status|search|show|add|update|delete|preview|distill|processing"
         if self._memory is None:
             return _error(CommandErrorCode.INVALID_STATE, "Nowledge memory is unavailable.", usage)
         action = command.subcommand
         args = command.positional_args
         options = command.options
         try:
+            if action == "status":
+                available = await self._memory.is_available()
+                agent_status = await self._memory.agent_status() if available else {}
+                return _ok(
+                    json.dumps(
+                        {
+                            "available": available,
+                            "service": "nowledge",
+                            "agent_running": agent_status.get("running"),
+                            "queue_size": agent_status.get("queue_size"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    effect="no-op",
+                )
+            if action == "processing":
+                result = await self._memory.processing_status()
+                return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
             if action == "search":
                 query = str(options.get("query") or " ".join(args)).strip()
                 if not query:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide a search query.", "/memory search <query>")
                 limit = int(options.get("limit", 5))
-                result = await self._memory.search_memories(query=query, limit=limit)
+                result = await self._memory.search_memories(
+                    query=query,
+                    limit=limit,
+                    mode=str(options.get("mode") or "fast"),
+                    space_id=str(options["space-id"]) if options.get("space-id") else None,
+                )
                 return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
             if action == "show":
                 if len(args) != 1:
@@ -184,6 +210,31 @@ class RuntimeCommandHandlers:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide exactly one memory id.", "/memory delete <memory_id>")
                 changed = await self._memory.delete_memory(args[0])
                 return _ok(f"Memory `{args[0]}` deleted." if changed else f"Memory `{args[0]}` was not deleted.")
+            if action in {"preview", "distill"}:
+                thread_id = (session.metadata if session is not None else {}).get(
+                    "nowledge_thread_id"
+                )
+                if not thread_id:
+                    return _error(
+                        CommandErrorCode.INVALID_STATE,
+                        "This session has no synchronized Nowledge Thread yet.",
+                        usage,
+                    )
+                fields = {"space_id": options.get("space-id")} if options.get("space-id") else {}
+                if action == "preview":
+                    result = await self._memory.preview_distill(thread_id, **fields)
+                else:
+                    result = await self._memory.distill(thread_id, force_distill=True, **fields)
+                return _ok(json.dumps(result, ensure_ascii=False, default=str))
         except (TypeError, ValueError) as exc:
             return _error(CommandErrorCode.INVALID_ARGUMENT, str(exc), usage)
+        except Exception as exc:
+            error_code = getattr(exc, "code", None)
+            if error_code:
+                return _error(
+                    CommandErrorCode.COMMAND_FAILED,
+                    f"Nowledge request failed: {error_code}.",
+                    usage,
+                )
+            raise
         return _error(CommandErrorCode.UNKNOWN_SUBCOMMAND, "Unknown memory action.", usage)

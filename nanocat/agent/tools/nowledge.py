@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from nanocat.agent.nowledge_client import NowledgeRequestError
 from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 
 if TYPE_CHECKING:
-    from nanocat.agent.memory import NowledgeClient
+    from nanocat.agent.nowledge_client import NowledgeClient
 
 
 def _clean_search_result(r: dict) -> dict:
@@ -25,6 +26,16 @@ def _clean_search_result(r: dict) -> dict:
         "confidence",
         "unit_type",
         "temporal_context",
+        "space_id",
+        "source",
+        "source_thread_id",
+        "source_message_indices",
+        "source_message_range",
+        "event_start",
+        "event_end",
+        "is_latest",
+        "version",
+        "is_crystal",
     ):
         if mem.get(key) is not None:
             if key == "updated_at" and mem.get("created_at") == mem.get("updated_at"):
@@ -34,6 +45,8 @@ def _clean_search_result(r: dict) -> dict:
         out["similarity_score"] = r["similarity_score"]
     if r.get("relevance_reason"):
         out["relevance_reason"] = r["relevance_reason"]
+    if r.get("related_memory_links"):
+        out["related_memory_links"] = r["related_memory_links"]
     if entities:
         cleaned_entities = []
         for e in entities:
@@ -81,12 +94,43 @@ class MemorySearchTool(Tool):
                     "maximum": 20,
                     "default": 5,
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["fast", "deep"],
+                    "description": "Search mode; use deep for historical or time-sensitive recall.",
+                    "default": "fast",
+                },
+                "space_id": {
+                    "type": "string",
+                    "description": "Optional Nowledge Space to search.",
+                },
+                "unit_type": {
+                    "type": "string",
+                    "description": "Optional memory type filter.",
+                },
             },
             "required": ["query"],
         }
 
-    async def execute(self, query: str, limit: int = 5, **_: Any) -> str:
-        results = await self._client.search_memories(query=query, limit=limit)
+    async def execute(
+        self,
+        query: str,
+        limit: int = 5,
+        mode: str = "fast",
+        space_id: str | None = None,
+        unit_type: str | None = None,
+        **_: Any,
+    ) -> str:
+        try:
+            results = await self._client.search_memories(
+                query=query,
+                limit=limit,
+                mode=mode,
+                space_id=space_id,
+                unit_type=unit_type,
+            )
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge memory search failed", code=exc.code)
         return tool_ok(results=[_clean_search_result(r) for r in results])
 
 
@@ -111,12 +155,19 @@ class MemoryGetTool(Tool):
                     "type": "string",
                     "description": "The ID of the memory to get.",
                 },
+                "space_id": {
+                    "type": "string",
+                    "description": "Optional Space guard for the lookup.",
+                },
             },
             "required": ["memory_id"],
         }
 
-    async def execute(self, memory_id: str, **_: Any) -> str:
-        result = await self._client.get_memory(memory_id)
+    async def execute(self, memory_id: str, space_id: str | None = None, **_: Any) -> str:
+        try:
+            result = await self._client.get_memory(memory_id, space_id=space_id)
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge memory lookup failed", code=exc.code)
         if not result:
             return tool_err("Failed to get memory.")
         return tool_ok(memory=result)
@@ -179,12 +230,15 @@ class MemoryAddTool(Tool):
         importance: float = 0.5,
         **_: Any,
     ) -> str:
-        result = await self._client.create_memory(
-            content=content,
-            title=title or None,
-            labels=labels or None,
-            importance=importance,
-        )
+        try:
+            result = await self._client.create_memory(
+                content=content,
+                title=title or None,
+                labels=labels or None,
+                importance=importance,
+            )
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge memory creation failed", code=exc.code)
         if not result:
             return tool_err("Failed to save memory (Nowledge Mem may be unavailable).")
         mem_id = result.get("id") or result.get("memory_id") or "unknown"
@@ -251,7 +305,10 @@ class MemoryUpdateTool(Tool):
             fields["importance"] = importance
         if not fields:
             return tool_err("No fields provided to update.")
-        result = await self._client.update_memory(memory_id, **fields)
+        try:
+            result = await self._client.update_memory(memory_id, **fields)
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge memory update failed", code=exc.code)
         if not result:
             return tool_err(f"Failed to update memory {memory_id} (Nowledge Mem may be unavailable).")
         return tool_ok(id=memory_id, updated=True)
@@ -291,7 +348,10 @@ class MemoryDeleteTool(Tool):
         }
 
     async def execute(self, memory_id: str, cascade_delete: bool = True, **_: Any) -> str:
-        success = await self._client.delete_memory(memory_id, cascade_delete=cascade_delete)
+        try:
+            success = await self._client.delete_memory(memory_id, cascade_delete=cascade_delete)
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge memory deletion failed", code=exc.code)
         if success:
             return tool_ok(id=memory_id, deleted=True)
         return tool_err(f"Failed to delete memory {memory_id}.")
@@ -318,15 +378,13 @@ class ReadWorkingMemoryTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "timeout": {
-                    "type": "integer",
-                    "description": "Just set to 5",
-                    "default": 5,
-                },
             },
-            "required": ["timeout"],
+            "required": [],
         }
 
-    async def execute(self, timeout: int = 5, **_: Any) -> str:
-        content = await self._client.get_working_memory()
+    async def execute(self, **_: Any) -> str:
+        try:
+            content = await self._client.get_working_memory()
+        except NowledgeRequestError as exc:
+            return tool_err("Nowledge Working Memory read failed", code=exc.code)
         return tool_ok(content=content or "")
