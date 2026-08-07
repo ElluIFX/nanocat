@@ -35,6 +35,8 @@ class Session:
     compacted_memory: str = ""
     skip_next_nowledge_extraction: bool = False
     last_compacted: int = 0
+    compaction_checkpoint: dict[str, Any] = field(default_factory=dict)
+    revision: int = 0
 
     @property
     def key(self) -> str:
@@ -48,6 +50,7 @@ class Session:
             **kwargs,
         }
         self.messages.append(msg)
+        self.revision += 1
         self.updated_at = datetime.now(timezone.utc)
 
     @staticmethod
@@ -92,7 +95,13 @@ class Session:
                 "role": message["role"],
                 "content": message.get("content", ""),
             }
-            for key in ("tool_calls", "tool_call_id", "name", "reasoning_content"):
+            for key in (
+                "tool_calls",
+                "tool_call_id",
+                "name",
+                "reasoning_content",
+                "thinking_blocks",
+            ):
                 if key in message:
                     entry[key] = message[key]
             out.append(entry)
@@ -115,20 +124,33 @@ class Session:
         end = len(self.messages) if end_idx is None else min(len(self.messages), end_idx)
         turns: list[tuple[int, int]] = []
         current_start: int | None = None
+        pending_calls: set[str] = set()
         for idx in range(start, end):
             message = self.messages[idx]
             role = message.get("role")
             if role == "user":
+                if current_start is not None and pending_calls:
+                    current_start = idx
+                    pending_calls.clear()
                 if current_start is None:
                     current_start = idx
                 continue
-            if role == "tool" and current_start is not None and message.get("name") == "message":
-                turns.append((current_start, idx + 1))
-                current_start = None
+            if role == "tool" and current_start is not None:
+                call_id = str(message.get("tool_call_id") or "")
+                if call_id:
+                    pending_calls.discard(call_id)
                 continue
             if role != "assistant" or current_start is None:
                 continue
-            if message.get("tool_calls"):
+            calls = message.get("tool_calls") or []
+            if calls:
+                pending_calls.update(
+                    str(call.get("id"))
+                    for call in calls
+                    if isinstance(call, dict) and call.get("id")
+                )
+                continue
+            if pending_calls:
                 continue
             turns.append((current_start, idx + 1))
             current_start = None
@@ -139,6 +161,8 @@ class Session:
         self.compacted_memory = ""
         self.skip_next_nowledge_extraction = False
         self.last_compacted = 0
+        self.compaction_checkpoint = {}
+        self.revision = 0
         self.updated_at = datetime.now(timezone.utc)
 
 
@@ -209,6 +233,8 @@ class SessionManager:
             last_compacted = 0
             compacted_memory = ""
             skip_next_nowledge_extraction = False
+            compaction_checkpoint: dict[str, Any] = {}
+            revision = 0
             with open(path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -227,12 +253,15 @@ class SessionManager:
                             "skip_next_nowledge_extraction", False
                         )
                         last_compacted = data.get("last_compacted", 0)
+                        compaction_checkpoint = data.get("compaction_checkpoint", {}) or {}
+                        revision = int(data.get("revision", 0) or 0)
                     else:
                         messages.append(data)
 
             meta = self._read_metadata(channel)
             info = meta.get("sessions", {}).get(session_id, {})
             name = info.get("name")
+            last_compacted = min(max(int(last_compacted or 0), 0), len(messages))
             return Session(
                 id=session_id,
                 channel=channel,
@@ -244,6 +273,8 @@ class SessionManager:
                 compacted_memory=compacted_memory,
                 skip_next_nowledge_extraction=skip_next_nowledge_extraction,
                 last_compacted=last_compacted,
+                compaction_checkpoint=compaction_checkpoint,
+                revision=max(int(revision or 0), len(messages)),
             )
         except Exception as e:
             logger.warning("Failed to load session {}/{}: {}", channel, session_id, e)
@@ -258,6 +289,15 @@ class SessionManager:
 
     def _save_normal(self, session: Session) -> None:
         path = self._session_path(session.channel, session.id)
+        disk_revision = self._read_session_revision(path)
+        if disk_revision is not None and disk_revision > session.revision:
+            logger.warning(
+                "Skipping stale session save for {}: memory revision {} < disk revision {}",
+                session.key,
+                session.revision,
+                disk_revision,
+            )
+            return
         self._write_session_file(path, session)
 
         cache_key = f"{session.channel}:{session.chat_id}"
@@ -427,6 +467,23 @@ class SessionManager:
         except Exception:
             return {}
 
+    @staticmethod
+    def _read_session_revision(path: Path) -> int | None:
+        """Read the persisted revision without loading the full event log."""
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding="utf-8") as handle:
+                first_line = handle.readline().strip()
+            if not first_line:
+                return None
+            metadata = json.loads(first_line)
+            if metadata.get("_type") != "metadata":
+                return None
+            return int(metadata.get("revision", 0) or 0)
+        except (OSError, TypeError, ValueError):
+            return None
+
     def _write_metadata(self, channel: str, data: dict[str, Any]) -> None:
         path = self._metadata_path(channel)
         payload = json.dumps(data, ensure_ascii=False, indent=2)
@@ -459,6 +516,8 @@ class SessionManager:
             "compacted_memory": session.compacted_memory,
             "skip_next_nowledge_extraction": session.skip_next_nowledge_extraction,
             "last_compacted": session.last_compacted,
+            "compaction_checkpoint": session.compaction_checkpoint,
+            "revision": session.revision,
         }
         lines = [json.dumps(metadata_line, ensure_ascii=False)]
         lines.extend(json.dumps(msg, ensure_ascii=False) for msg in session.messages)
@@ -474,6 +533,8 @@ class SessionManager:
         last_compacted = 0
         compacted_memory = ""
         skip_next_nowledge_extraction = False
+        compaction_checkpoint: dict[str, Any] = {}
+        revision = 0
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -490,8 +551,11 @@ class SessionManager:
                     compacted_memory = data.get("compacted_memory", "")
                     skip_next_nowledge_extraction = data.get("skip_next_nowledge_extraction", False)
                     last_compacted = data.get("last_compacted", 0)
+                    compaction_checkpoint = data.get("compaction_checkpoint", {}) or {}
+                    revision = int(data.get("revision", 0) or 0)
                 else:
                     messages.append(data)
+        last_compacted = min(max(int(last_compacted or 0), 0), len(messages))
         return Session(
             id=id,
             channel=channel,
@@ -502,6 +566,8 @@ class SessionManager:
             compacted_memory=compacted_memory,
             skip_next_nowledge_extraction=skip_next_nowledge_extraction,
             last_compacted=last_compacted,
+            compaction_checkpoint=compaction_checkpoint,
+            revision=max(int(revision or 0), len(messages)),
         )
 
     async def _auto_name_session(self, session: Session) -> None:

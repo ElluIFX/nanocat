@@ -107,6 +107,7 @@ class SecurityPolicy:
     _SAFE_TOOLS = frozenset(
         {
             "ask",
+            "context_lookup",
             "file_hex",
             "grep_file",
             "list_dir",

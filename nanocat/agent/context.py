@@ -203,8 +203,10 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         text = (compacted_memory or "").strip()
         if not text:
             return None
+        if text.startswith("<SESSION-CHECKPOINT>"):
+            return {"role": "user", "content": text}
         return {
-            "role": "system",
+            "role": "user",
             "content": (
                 f"{ContextBuilder._COMPACTED_MEM_OPEN}\n{text}\n"
                 f"{ContextBuilder._COMPACTED_MEM_CLOSE}"

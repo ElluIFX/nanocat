@@ -134,6 +134,7 @@ class HeartbeatService:
             ],
             tools=_HEARTBEAT_TOOL,
             model=self.model,
+            reasoning_effort=None,
         )
 
         if not response.has_tool_calls:

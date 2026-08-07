@@ -81,14 +81,11 @@ class CommandRouter:
             "stop",
             "restart",
             "model",
-            "context",
             "whoami",
             "compact",
             "session",
         )
-        no_argument_commands = frozenset(
-            {"new", "stop", "restart", "context", "whoami", "compact"}
-        )
+        no_argument_commands = frozenset({"new", "stop", "restart", "whoami"})
         metadata = {
             "logs": ("Show recent runtime logs", "/logs [N]"),
             "help": ("Show command help", "/help [command|group]"),
@@ -100,9 +97,11 @@ class CommandRouter:
                 "View or switch models and reasoning effort",
                 "/model [add|delete|agent|subagent|assistant|effort]",
             ),
-            "context": ("Show context and token usage", "/context"),
             "whoami": ("Show the current principal and session", "/whoami"),
-            "compact": ("Compact the current conversation", "/compact"),
+            "compact": (
+                "Compact the conversation or show context status",
+                "/compact [status]",
+            ),
             "session": ("Inspect or switch sessions", "/session [list|use|delete]"),
         }
         specs = []
@@ -112,11 +111,10 @@ class CommandRouter:
                 CommandSpec(
                     name=name,
                     group="legacy",
-                    aliases=(
-                        ("ctx",) if name == "context" else ("sid",) if name == "session" else ()
-                    ),
+                    aliases=("sid",) if name == "session" else (),
                     summary=summary,
                     usage=usage,
+                    subcommands=("status",) if name == "compact" else (),
                     execution_policy=(
                         CommandExecutionPolicy.CANCEL_TURN
                         if name == "stop"
@@ -219,7 +217,9 @@ class CommandRouter:
                     usage=spec.usage or "/help",
                 ),
             )
-        if not spec.accepts_arguments and (parsed.subcommand or parsed.options):
+        if not spec.accepts_arguments and (
+            parsed.subcommand or parsed.positional_args or parsed.options
+        ):
             return CommandInspection(
                 classified=classified,
                 parsed=parsed,
@@ -245,7 +245,21 @@ class CommandRouter:
                     usage=spec.usage or "/help",
                 ),
             )
-        if spec.subcommands and parsed.subcommand not in spec.subcommands:
+        if spec.name == "compact" and (parsed.positional_args or parsed.options):
+            return CommandInspection(
+                classified=classified,
+                parsed=parsed,
+                spec=spec,
+                result=CommandResult(
+                    ok=False,
+                    code=CommandErrorCode.INVALID_ARGUMENT,
+                    title="Invalid compact arguments",
+                    message="`/compact` accepts no arguments other than the optional `status` subcommand.",
+                    usage=spec.usage or "/compact [status]",
+                    suggestions=("/compact", "/compact status"),
+                ),
+            )
+        if spec.subcommands and parsed.subcommand is not None and parsed.subcommand not in spec.subcommands:
             suggestions = tuple(f"/{spec.name} {name}" for name in spec.subcommands[:3])
             return CommandInspection(
                 classified=classified,

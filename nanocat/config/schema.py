@@ -274,6 +274,7 @@ class MemoryConfig(Base):
         0.5  # trigger compression when prompt exceeds this fraction of context_window_tokens
     )
     no_compact_history_num: int = 3  # keep this many recent user/assistant turns raw
+    compaction_model: str | None = None  # independent low-cost model for session compaction
     nowledge: NowledgeConfig = Field(default_factory=NowledgeConfig)
 
 

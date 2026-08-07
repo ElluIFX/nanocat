@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 from loguru import logger
 
 from nanocat.agent.context import ContextBuilder
+from nanocat.agent.context_artifacts import ContextArtifactStore, ContextLookupTool
+from nanocat.agent.context_budget import ContextBudget
 from nanocat.agent.memory import (
     MemoryCompactor,
     NowledgeClient,
@@ -151,9 +153,12 @@ class AgentLoop:
 
         self.sessions = session_manager or SessionManager(get_sessions_dir())
         self.sessions.set_name_generator(self._generate_session_name)
+        self.context_artifacts = ContextArtifactStore(self.sessions.sessions_dir)
+        self.context_budget = ContextBudget(config)
         self.tool_host = ToolHost(bus=bus, config=config, provider_resolver=self._provider_resolver)
         self.tools = self.tool_host.registry
         self.subagents = self.tool_host.subagents
+        self.subagents.set_context_artifacts(self.context_artifacts)
         self.ssh = self.tool_host.ssh
         self.procs = self.tool_host.processes
         self.http_sessions = self.tool_host.http_sessions
@@ -220,7 +225,6 @@ class AgentLoop:
                 logs=self._command_logs,
                 intervention_response=self._command_intervention_response,
                 compact=self._command_compact,
-                context=self._handle_context,
                 whoami=self._handle_whoami,
                 model=self._handle_model,
                 session=self._handle_session,
@@ -331,6 +335,7 @@ class AgentLoop:
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         extra_read = [Path(tempfile.gettempdir())]
+        self.tools.register(ContextLookupTool(self.context_artifacts))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         if self._config.tools.enabled_builtin_tools.ask:
             self.tools.register(
@@ -800,12 +805,53 @@ class AgentLoop:
 
             tool_defs = self.tools.get_definitions()
 
+            budget = self.context_budget.inspect(messages, tool_defs)
+            if budget.over_budget:
+                reduced = self.context_budget.trim(messages, budget.target_tokens)
+                if reduced != messages:
+                    logger.warning(
+                        "Context preflight trimmed {}: {} -> {} estimated tokens",
+                        session_key or tool_context.session_key,
+                        budget.estimated_tokens,
+                        self.context_budget.inspect(reduced, tool_defs).estimated_tokens,
+                    )
+                    messages = reduced
+                    budget = self.context_budget.inspect(messages, tool_defs)
+            if budget.over_budget:
+                logger.error(
+                    "Context remains over provider budget for {}: {} > {} estimated tokens",
+                    session_key or tool_context.session_key,
+                    budget.estimated_tokens,
+                    budget.usable_tokens,
+                )
+                final_content = (
+                    "The conversation context is still too large after safe trimming. "
+                    "Please start a new session or ask me to compact the session."
+                )
+                break
+
             provider = self._provider_resolver.resolve(turn_model)
             response = await provider.chat_with_retry(
                 messages=messages,
                 tools=tool_defs,
                 model=turn_model,
             )
+            if response.finish_reason == "error" and self._is_context_overflow(response.content):
+                reduced = self.context_budget.trim(
+                    messages,
+                    max(1024, budget.target_tokens // 2),
+                )
+                if reduced != messages:
+                    logger.warning(
+                        "Provider rejected context for {}; retrying with reduced history",
+                        session_key or tool_context.session_key,
+                    )
+                    messages = reduced
+                    response = await provider.chat_with_retry(
+                        messages=messages,
+                        tools=tool_defs,
+                        model=turn_model,
+                    )
 
             if response.has_tool_calls:
                 if session_key:
@@ -881,20 +927,24 @@ class AgentLoop:
 
                 # Replay results in original order so messages are deterministic.
                 for idx, tc, result in sorted(_results, key=lambda r: r[0]):
-                    result_str = str(result)
-                    if len(result_str) > 512:
-                        result_str = (
-                            result_str[:256]
-                            + f"...[TRUNCATED {len(result_str) - 512} CHARS]..."
-                            + result_str[-256:]
-                        )
-                    logger.info("[{}] Tool {} result: {}", _log_ids[idx], tc.name, result_str)
                     if bridged := self._bridge_image_tool_result(tc.name, result):
                         tool_text, user_blocks = bridged
+                        logger.info(
+                            "[{}] Tool {} result: image bridge ({} blocks)",
+                            _log_ids[idx],
+                            tc.name,
+                            len(user_blocks),
+                        )
                         logger.info(
                             "Applying image bridge for tool_call_id={} ({})",
                             tc.id,
                             tc.name,
+                        )
+                        self.context_artifacts.capture(
+                            tool_context.session_key,
+                            tc.name,
+                            tc.id,
+                            result,
                         )
                         messages = self.context.add_tool_result(messages, tc.id, tc.name, tool_text)
                         messages.append({"role": "user", "content": user_blocks})
@@ -904,21 +954,18 @@ class AgentLoop:
                         )
                         continue
 
-                    # Centralized result truncation (skip tools with own pagination).
-                    _no_truncate = frozenset({"read_file", "grep_file"})
-                    _max_chars = self._config.tools.max_return_chars
-                    if tc.name not in _no_truncate and _max_chars > 0:
-                        _str = result if isinstance(result, str) else str(result)
-                        if len(_str) > _max_chars:
-                            result, _tmp = self._truncate_tool_result(_str, _max_chars)
-                            logger.info(
-                                "[{}] Tool {} result truncated: {} chars → {}",
-                                _log_ids[idx],
-                                tc.name,
-                                len(_str),
-                                _tmp,
-                            )
-
+                    result = self.context_artifacts.capture(
+                        tool_context.session_key,
+                        tc.name,
+                        tc.id,
+                        result,
+                    )
+                    logger.info(
+                        "[{}] Tool {} result: {}",
+                        _log_ids[idx],
+                        tc.name,
+                        self._preview_text(result)[:320],
+                    )
                     messages = self.context.add_tool_result(messages, tc.id, tc.name, result)
             else:
                 clean = self._strip_think(response.content)
@@ -976,9 +1023,7 @@ class AgentLoop:
 
             intervention_response = await self.command_service.dispatch_intervention(msg)
             if intervention_response is not None:
-                await self.bus.publish_outbound(
-                    intervention_response
-                )
+                await self.bus.publish_outbound(intervention_response)
                 continue
 
             inspection = self.command_router.inspect(msg.content)
@@ -1085,9 +1130,7 @@ class AgentLoop:
             return await self.bus.consume_inbound()
         consume_task = asyncio.create_task(self.bus.consume_inbound())
         stop_task = asyncio.create_task(self._run_stop.wait())
-        done, _ = await asyncio.wait(
-            (consume_task, stop_task), return_when=asyncio.FIRST_COMPLETED
-        )
+        done, _ = await asyncio.wait((consume_task, stop_task), return_when=asyncio.FIRST_COMPLETED)
         if consume_task in done:
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
@@ -1191,9 +1234,7 @@ class AgentLoop:
         parts = raw_args.split() if raw_args else []
 
         def _format_choices(models: list[str]) -> str:
-            return "\n\n".join(
-                f"{i + 1}. `{model}`" for i, model in enumerate(models)
-            ) or "(empty)"
+            return "\n\n".join(f"{i + 1}. `{model}`" for i, model in enumerate(models)) or "(empty)"
 
         if not parts:
             defaults = self._config.agents.defaults
@@ -1206,8 +1247,12 @@ class AgentLoop:
                     assistant_model=self.assistant_model,
                     subagent_model=self.subagent_model,
                     provider_name=provider_name,
-                    max_tokens=defaults.max_tokens if defaults.max_tokens is not None else "unlimited",
-                    temperature=defaults.temperature if defaults.temperature is not None else "default",
+                    max_tokens=defaults.max_tokens
+                    if defaults.max_tokens is not None
+                    else "unlimited",
+                    temperature=defaults.temperature
+                    if defaults.temperature is not None
+                    else "default",
                     reasoning_effort=defaults.reasoning_effort or "auto",
                     model_choice=_format_choices(defaults.model_choice),
                 ),
@@ -1395,7 +1440,12 @@ class AgentLoop:
             # Budget must leave room for the title AFTER any chain-of-thought: reasoning
             # models (e.g. deepseek-v4*) spend the whole allowance on reasoning and return
             # empty content if the cap is tiny, so keep it comfortably above the CoT length.
-            resp = await provider.chat(messages, model=self.assistant_model, max_tokens=1024)
+            resp = await provider.chat(
+                messages,
+                model=self.assistant_model,
+                max_tokens=1024,
+                reasoning_effort=None,
+            )
             # Clean: remove quotes, punctuation, extra whitespace
             name = (resp.content or "").strip().strip("\"'\"'").strip()
             if not name:
@@ -1513,69 +1563,20 @@ class AgentLoop:
         return isinstance(obj, dict) and obj.get("ok") is False
 
     @staticmethod
-    def _truncate_tool_result(result_str: str, max_chars: int) -> tuple[str, str | None]:
-        """Shrink an oversized tool result.
-
-        When the result is a JSON object, only its bulky *string* fields are
-        replaced by a per-field truncation marker (structure and small fields
-        stay intact, so ``ok``/``error``/``status`` remain readable while a giant
-        ``content``/``stdout``/``body`` is spilled to its own temp file). For
-        non-JSON / non-object results — or if field truncation can't get under
-        budget — the whole string is truncated head+tail to one temp file.
-
-        Returns ``(possibly_shrunk_result, primary_temp_path | None)``.
-        """
-        head = max(1, max_chars // 10)
-
-        def _dump(text: str) -> str:
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, encoding="utf-8"
-            )
-            tmp.write(text)
-            tmp.close()
-            return tmp.name
-
-        # Field-level: truncate only string fields large enough that replacing
-        # them with a head+tail marker actually shrinks the payload.
-        try:
-            obj = json.loads(result_str)
-        except (ValueError, TypeError):
-            obj = None
-        if isinstance(obj, dict):
-            field_cap = head * 4  # > 2*head preview + marker overhead, so truncation shrinks
-            spilled: str | None = None
-            for key, val in obj.items():
-                if isinstance(val, str) and len(val) > field_cap:
-                    path = _dump(val)
-                    spilled = spilled or path
-                    obj[key] = {
-                        "truncated": True,
-                        "total_chars": len(val),
-                        "total_lines": val.count("\n") + 1,
-                        "first_chars": val[:head],
-                        "last_chars": val[-head:],
-                        "full_output": path,
-                    }
-            if spilled is not None:
-                shrunk = json.dumps(obj, ensure_ascii=False)
-                if len(shrunk) <= max_chars:
-                    return shrunk, spilled
-                # else: fall through to whole-output truncation (rare)
-
-        path = _dump(result_str)
-        whole = json.dumps(
-            {
-                "truncated": True,
-                "message": f"Output exceeds {max_chars} chars limit",
-                "first_10pct_chars": result_str[:head],
-                "last_10pct_chars": result_str[-head:],
-                "total_lines": result_str.count("\n") + 1,
-                "total_chars": len(result_str),
-                "full_output": path,
-            },
-            ensure_ascii=False,
+    def _is_context_overflow(content: str | None) -> bool:
+        """Recognize provider errors that can be recovered by trimming history."""
+        text = (content or "").casefold()
+        markers = (
+            "context length",
+            "context window",
+            "maximum context",
+            "max context",
+            "prompt is too long",
+            "too many tokens",
+            "token limit",
+            "request too large",
         )
-        return whole, path
+        return any(marker in text for marker in markers)
 
     @staticmethod
     def _format_session_turns(session: Session, turns: int = 3, width: int = 46) -> str:
@@ -1606,32 +1607,40 @@ class AgentLoop:
                 turn_texts.append(f"### Turn {first_num + offset}:\n\n" + "\n\n".join(lines))
         return "\n\n".join(turn_texts) if turn_texts else "> (no preview)"
 
-    async def _handle_context(self, msg: InboundMessage, session: Session) -> OutboundMessage:
-        """Handle /context command — show compact numeric context panel."""
-        estimated_tokens, _ = self.memory_compactor.estimate_session_prompt_tokens(session)
-        context_window = max(0, self.context_window_tokens)
-        usage_percent = (estimated_tokens / context_window) * 100 if context_window > 0 else 0.0
-        overflow_tokens = max(0, estimated_tokens - context_window) if context_window > 0 else 0
-        overflow_percent = (overflow_tokens / context_window) * 100 if context_window > 0 else 0.0
-
-        history_messages = len(session.get_history(max_messages=0))
-        messages_total = len(session.messages)
-        messages_uncompacted = max(0, messages_total - session.last_compacted)
-        uncompacted_percent = (
-            (messages_uncompacted / messages_total) * 100 if messages_total > 0 else 0.0
-        )
-
-        content = self.tips.context_panel.format(
+    async def _handle_compact_status(
+        self,
+        msg: InboundMessage,
+        session: Session,
+    ) -> OutboundMessage:
+        """Return context and compaction state without changing the session."""
+        status = self.memory_compactor.status(session)
+        checkpoint = status["checkpoint"]
+        checkpoint_status = "none"
+        if checkpoint is not None:
+            checkpoint_status = (
+                f"{checkpoint.created_at} "
+                f"(messages {checkpoint.source_start}–{checkpoint.source_end})"
+            )
+        content = self.tips.compact_status.format(
             model_name=self.model,
-            estimated_prompt_tokens=estimated_tokens,
-            context_window_tokens=context_window,
-            context_usage_percent=f"{usage_percent:.2f}",
-            overflow_tokens=overflow_tokens,
-            overflow_percent=f"{overflow_percent:.2f}",
-            messages_total=messages_total,
-            messages_uncompacted=messages_uncompacted,
-            uncompacted_percent=f"{uncompacted_percent:.2f}",
-            history_messages=history_messages,
+            estimated_prompt_tokens=status["estimated_prompt_tokens"],
+            context_window_tokens=status["context_window_tokens"],
+            context_usage_percent=status["context_usage_percent"],
+            overflow_tokens=status["overflow_tokens"],
+            overflow_percent=status["overflow_percent"],
+            messages_total=status["messages_total"],
+            messages_uncompacted=status["messages_uncompacted"],
+            uncompacted_percent=status["uncompacted_percent"],
+            history_messages=status["history_messages"],
+            completed_turns=status["completed_turns"],
+            compaction_available="yes" if status["compaction_available"] else "no",
+            compaction_model=status["compaction_model"],
+            compaction_threshold=status["compaction_threshold"],
+            keep_recent_turns=status["keep_recent_turns"],
+            last_compacted=status["last_compacted"],
+            checkpoint_status=checkpoint_status,
+            failure_count=status["failure_count"],
+            estimator=status["estimator"],
         )
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
@@ -1658,10 +1667,49 @@ class AgentLoop:
         self._session_gen.pop(msg.session_key, None)
         return self.tips.new_session
 
-    async def _command_compact(self, session: Session) -> str:
-        """Run explicit session compaction for the application command service."""
+    async def _command_compact(
+        self,
+        msg: InboundMessage,
+        session: Session,
+        subcommand: str | None = None,
+    ) -> OutboundMessage:
+        """Run explicit compaction or return its read-only status panel."""
+        if subcommand == "status":
+            return await self._handle_compact_status(msg, session)
+
+        before = self.memory_compactor.status(session)
         changed = await self.memory_compactor.maybe_compact_by_tokens(session, force=True)
-        return self.tips.compact_completed if changed else self.tips.compact_failed
+        after = self.memory_compactor.status(session)
+        checkpoint = after["checkpoint"]
+        if changed and checkpoint is not None:
+            content = self.tips.compact_completed.format(
+                token_before=checkpoint.token_before,
+                token_after=checkpoint.token_after,
+                context_window_tokens=after["context_window_tokens"],
+                context_usage_percent=after["context_usage_percent"],
+                source_start=checkpoint.source_start,
+                source_end=checkpoint.source_end,
+                messages_uncompacted=after["messages_uncompacted"],
+                messages_total=after["messages_total"],
+                revision=checkpoint.session_revision,
+                compaction_model=checkpoint.compaction_model or after["compaction_model"],
+            )
+        else:
+            if after["failure_count"] > before["failure_count"]:
+                reason = "Compaction provider failed; original history was kept."
+            elif not after["compaction_available"]:
+                reason = "No completed turns are eligible for compaction."
+            else:
+                reason = "Compaction did not advance the checkpoint; original history was kept."
+            content = self.tips.compact_failed.format(
+                reason=reason,
+                estimated_prompt_tokens=after["estimated_prompt_tokens"],
+                context_window_tokens=after["context_window_tokens"],
+                context_usage_percent=after["context_usage_percent"],
+                completed_turns=after["completed_turns"],
+                failure_count=after["failure_count"],
+            )
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
     def _command_logs(self, msg: InboundMessage) -> OutboundMessage:
         """Return the requested tail of the in-memory runtime log buffer."""
@@ -1956,7 +2004,12 @@ class AgentLoop:
                     await self.intervention.finish_turn(tool_context.turn_id)
             self.turns.complete(turn_id)
             _old_msg_count_sys = len(session.messages)
-            self._save_turn(session, all_msgs, n_initial_sys - 1)
+            self._save_turn(
+                session,
+                all_msgs,
+                n_initial_sys - 1,
+                anchor=messages[-1] if messages else None,
+            )
             self.sessions.save(session)
             if not transient:
                 self._schedule_background(self.memory_compactor.maybe_compact_by_tokens(session))
@@ -2079,7 +2132,12 @@ class AgentLoop:
         self.turns.complete(turn_id)
 
         _old_msg_count = len(session.messages)
-        self._save_turn(session, all_msgs, n_initial - 1)
+        self._save_turn(
+            session,
+            all_msgs,
+            n_initial - 1,
+            anchor=initial_messages[-1] if initial_messages else None,
+        )
         self.sessions.save(session)
         if not transient:
             self._schedule_background(self.memory_compactor.maybe_compact_by_tokens(session))
@@ -2111,10 +2169,23 @@ class AgentLoop:
         if isinstance(message_tool, MessageTool):
             message_tool.forget_turn(turn_id)
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
+    def _save_turn(
+        self,
+        session: Session,
+        messages: list[dict],
+        skip: int,
+        anchor: dict | None = None,
+    ) -> None:
         """Save new-turn messages into session, truncating large tool results."""
         from nanocat.agent.pulse import strip_pulse
 
+        if anchor is not None:
+            for index, message in enumerate(messages):
+                if message is anchor or message == anchor:
+                    skip = index
+                    break
+
+        added = 0
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -2160,6 +2231,8 @@ class AgentLoop:
                     entry["content"] = filtered
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
+            added += 1
+        session.revision += added
         session.updated_at = datetime.now()
 
     async def process_direct(

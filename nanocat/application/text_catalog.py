@@ -20,10 +20,9 @@ class UserTextCatalog:
         "- `/stop` — Stop the current task\n\n"
         "- `/restart` — Restart the bot\n\n"
         "- `/model` — View/configure models and reasoning effort\n\n"
-        "- `/context` — Show current context info\n\n"
         "- `/whoami` — Show channel/chat identity\n\n"
         "- `/help` — Show available commands\n\n"
-        "- `/compact` — Manually compact old session turns\n\n"
+        "- `/compact [status]` — Compact history or show context and compaction status\n\n"
         "- `/session` — View and switch sessions\n\n"
         "- `/logs [N]` — Show the tail of runtime logs\n\n"
         "- `/approve once|turn` — Approve the current sensitive operation\n\n"
@@ -81,16 +80,40 @@ class UserTextCatalog:
         "- Session: {session_id}\n\n"
         "- Key: {session_key}"
     )
-    context_panel: str = (
-        "## 🐈 Context Usage ({model_name})\n\n"
+    compact_status: str = (
+        "## 🐈 Context & Compaction Status\n\n"
+        "- model = `{model_name}`\n\n"
         "- prompt = {estimated_prompt_tokens}/{context_window_tokens} ({context_usage_percent}%)\n\n"
         "- overflow = {overflow_tokens}/{context_window_tokens} ({overflow_percent}%)\n\n"
         "- msgs = {messages_uncompacted}/{messages_total} ({uncompacted_percent}%)\n\n"
-        "- history = {history_messages}/{messages_total}\n"
+        "- history = {history_messages}/{messages_total}\n\n"
+        "- completed turns = {completed_turns}\n\n"
+        "- compaction available = {compaction_available}\n\n"
+        "- compaction model = `{compaction_model}`\n\n"
+        "- compaction threshold = {compaction_threshold}\n\n"
+        "- keep recent turns = {keep_recent_turns}\n\n"
+        "- last compacted = {last_compacted}/{messages_total}\n\n"
+        "- checkpoint = {checkpoint_status}\n\n"
+        "- failures = {failure_count}\n\n"
+        "- estimator = `{estimator}`\n"
     )
     no_response: str = "I've completed processing but have no response to give."
-    compact_completed: str = "Session compaction completed."
-    compact_failed: str = "No completed turns are eligible for compaction."
+    compact_completed: str = (
+        "## 🐈 Session compaction completed\n\n"
+        "- prompt = {token_before} → {token_after}/{context_window_tokens} ({context_usage_percent}%)\n\n"
+        "- compacted messages = {source_start}–{source_end}\n\n"
+        "- remaining raw messages = {messages_uncompacted}/{messages_total}\n\n"
+        "- checkpoint revision = {revision}\n\n"
+        "- compaction model = `{compaction_model}`"
+    )
+    compact_failed: str = (
+        "## 🐈 Session compaction not completed\n\n"
+        "- reason = {reason}\n\n"
+        "- prompt = {estimated_prompt_tokens}/{context_window_tokens} ({context_usage_percent}%)\n\n"
+        "- eligible completed turns = {completed_turns}\n\n"
+        "- compaction failures = {failure_count}\n\n"
+        "Use `/compact status` to inspect the current state."
+    )
 
 
 USER_TEXT = UserTextCatalog()

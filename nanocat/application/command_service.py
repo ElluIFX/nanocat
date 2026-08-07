@@ -27,8 +27,10 @@ class CommandCallbacks:
 
     new_session: Callable[[InboundMessage, Any], Awaitable[str | None] | str | None]
     logs: Callable[[InboundMessage], Awaitable[OutboundMessage] | OutboundMessage]
-    compact: Callable[[Any], Awaitable[str]]
-    context: Callable[[InboundMessage, Any], Awaitable[OutboundMessage]]
+    compact: Callable[
+        [InboundMessage, Any, str | None],
+        Awaitable[OutboundMessage] | OutboundMessage,
+    ]
     whoami: Callable[[InboundMessage, Any], Awaitable[OutboundMessage]]
     model: Callable[[InboundMessage], Awaitable[OutboundMessage]]
     session: Callable[[InboundMessage, Any], Awaitable[OutboundMessage]]
@@ -142,14 +144,11 @@ class CommandService:
             )
 
         if command_name == "compact":
-            content = await self.callbacks.compact(session)
-            return CommandOutcome(
-                handled=True,
-                response=OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content),
-            )
-
-        if command_name == "context":
-            return CommandOutcome(handled=True, response=await self.callbacks.context(msg, session))
+            subcommand = inspection.parsed.subcommand if inspection.parsed else None
+            result = self.callbacks.compact(msg, session, subcommand)
+            if hasattr(result, "__await__"):
+                result = await result
+            return CommandOutcome(handled=True, response=result)
 
         if command_name == "whoami":
             return CommandOutcome(handled=True, response=await self.callbacks.whoami(msg, session))

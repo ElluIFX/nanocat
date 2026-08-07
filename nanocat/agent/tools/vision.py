@@ -168,6 +168,7 @@ async def parse_image_via_model(
             model=vision_model,
             max_tokens=4096,
             temperature=0.3,
+            reasoning_effort=None,
         )
         if response.content:
             return tool_ok(content=response.content.strip())

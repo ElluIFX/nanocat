@@ -122,7 +122,7 @@ class ToolRegistry:
         else:
             tool.set_context(channel, chat_id)  # type: ignore[attr-defined]
 
-        if tool.name == "ask" and hasattr(tool, "set_session_key"):
+        if hasattr(tool, "set_session_key"):
             tool.set_session_key(context.session_key)  # type: ignore[attr-defined]
 
     def filtered(self, exclude: frozenset[str] | set[str]) -> ToolRegistry:
