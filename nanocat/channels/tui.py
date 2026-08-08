@@ -666,7 +666,11 @@ if _TEXTUAL_OK:
                         )
                         yield Select([], id="model-select", prompt="Model", allow_blank=True)
                         yield Select(
-                            _EFFORT_OPTIONS, id="effort-select", value="auto", allow_blank=False
+                            _EFFORT_OPTIONS,
+                            id="effort-select",
+                            prompt="Effort",
+                            value=Select.NULL,
+                            allow_blank=True,
                         )
                         yield Static(id="toolbar-spacer")
                         yield Static(id="approval-mode-status")
@@ -821,7 +825,7 @@ if _TEXTUAL_OK:
                     self._sync_model_to_category(str(event.value))
                 return
             if event.select.id == "effort-select":
-                if event.value is Select.BLANK:
+                if event.value is Select.BLANK or event.value is Select.NULL:
                     return
                 if self._suppress_next_effort:
                     self._suppress_next_effort = False
