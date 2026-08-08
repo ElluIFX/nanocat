@@ -112,8 +112,13 @@ class SecurityPolicy:
             "grep_file",
             "list_dir",
             "load_image",
+            "memory_add",
+            "memory_delete",
             "memory_get",
             "memory_search",
+            "memory_thread_get",
+            "memory_thread_search",
+            "memory_update",
             "parse_image",
             "proc_list",
             "proc_read",
@@ -216,14 +221,6 @@ class SecurityPolicy:
                 f"ssh.{tool_name.removeprefix('ssh_')}",
                 f"Allow remote SSH operation {tool_name}",
                 "remote access or session mutation requires explicit user approval",
-                tool_name,
-                params,
-            )
-        elif tool_name in {"memory_add", "memory_update", "memory_delete"}:
-            decision = self._require(
-                f"memory.{tool_name.removeprefix('memory_')}",
-                f"Change persistent memory with {tool_name}",
-                "persistent memory changes require explicit user approval",
                 tool_name,
                 params,
             )
