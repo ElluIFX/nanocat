@@ -11,8 +11,14 @@ from nanocat.core.commands import CommandErrorCode, CommandResult, ParsedCommand
 from nanocat.cron.types import CronSchedule
 
 
-def _ok(message: str, *, effect: str = "state-changed", data: dict[str, Any] | None = None) -> CommandResult:
-    return CommandResult(ok=True, title="Command completed", message=message, data=data or {}, execution_effect=effect)
+def _ok(
+    message: str,
+    *,
+    effect: str = "state-changed",
+    data: dict[str, Any] | None = None,
+    title: str = "Command completed",
+) -> CommandResult:
+    return CommandResult(ok=True, title=title, message=message, data=data or {}, execution_effect=effect)
 
 
 def _error(code: str, message: str, usage: str) -> CommandResult:
@@ -22,6 +28,123 @@ def _error(code: str, message: str, usage: str) -> CommandResult:
         title="Command failed",
         message=message,
         usage=usage,
+    )
+
+
+def _without_none(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _memory_view(value: Any) -> Any:
+    """Keep user-facing memory details useful without dumping API internals."""
+    if not isinstance(value, dict):
+        return value
+    memory = value.get("memory") if isinstance(value.get("memory"), dict) else value
+    if not isinstance(memory, dict):
+        return value
+    view = _without_none(
+        {
+            "id": memory.get("id") or memory.get("memory_id"),
+            "title": memory.get("title"),
+            "content": memory.get("content"),
+            "type": memory.get("unit_type"),
+            "importance": memory.get("importance"),
+            "confidence": memory.get("confidence"),
+            "labels": memory.get("labels") or memory.get("label_names"),
+            "source": memory.get("source"),
+            "space": memory.get("space_id"),
+            "created": memory.get("created_at"),
+            "updated": memory.get("updated_at"),
+            "event_start": memory.get("event_start"),
+            "event_end": memory.get("event_end"),
+            "source_range": memory.get("source_range"),
+            "latest": memory.get("is_latest"),
+            "version": memory.get("version"),
+            "extraction": memory.get("extraction_method"),
+        }
+    )
+    if isinstance(value.get("labels"), list) and "labels" not in view:
+        view["labels"] = value["labels"]
+    return view
+
+
+def _memory_search_view(value: Any) -> Any:
+    """Project one search hit into fields useful for a human reader."""
+    if not isinstance(value, dict):
+        return value
+    memory = value.get("memory") if isinstance(value.get("memory"), dict) else value
+    if not isinstance(memory, dict):
+        return value
+    related = value.get("related_entities")
+    related_names = [
+        item.get("name") or item.get("id")
+        for item in related[:10]
+        if isinstance(item, dict) and (item.get("name") or item.get("id"))
+    ] if isinstance(related, list) else None
+    view = _memory_view(memory)
+    if not isinstance(view, dict):
+        view = {"memory": view}
+    view.update(
+        _without_none(
+            {
+                "score": value.get("similarity_score"),
+                "reason": value.get("relevance_reason"),
+                "related": related_names,
+            }
+        )
+    )
+    return view
+
+
+def _memory_processing_view(value: Any) -> Any:
+    """Keep processing status bounded to information useful to an operator."""
+    if not isinstance(value, dict):
+        return value
+
+    tasks = value.get("tasks")
+    pending = value.get("pending_thread_analysis")
+    history = value.get("task_history")
+    recent_tasks = []
+    if isinstance(history, list):
+        for item in history[-10:]:
+            if not isinstance(item, dict):
+                continue
+            recent_tasks.append(
+                _without_none(
+                    {
+                        "task_id": item.get("task_id"),
+                        "task_type": item.get("task_type"),
+                        "status": item.get("status"),
+                        "summary": item.get("summary"),
+                        "started_at": item.get("started_at"),
+                        "completed_at": item.get("completed_at"),
+                        "duration_ms": item.get("duration_ms"),
+                    }
+                )
+            )
+
+    return _without_none(
+        {
+            "agent_running": value.get("agent_running"),
+            "budget_paused": value.get("budget_paused"),
+            "current_task": value.get("current_task"),
+            "queue": _without_none(
+                {
+                    "size": tasks.get("queue_size") if isinstance(tasks, dict) else None,
+                    "running": tasks.get("running") if isinstance(tasks, dict) else None,
+                    "queued": tasks.get("queued") if isinstance(tasks, dict) else None,
+                }
+            ),
+            "pending_thread_analysis": _without_none(
+                {
+                    key: pending.get(key)
+                    for key in ("fresh_count", "pending_count", "scheduled_count", "suppressed_count")
+                }
+                if isinstance(pending, dict)
+                else {}
+            ),
+            "recent_tasks": recent_tasks,
+        }
     )
 
 
@@ -156,17 +279,16 @@ class RuntimeCommandHandlers:
                 available = await self._memory.is_available() if self._memory is not None else False
                 agent_status = await self._memory.agent_status() if available else {}
                 return _ok(
-                    json.dumps(
-                        {
-                            "available": available,
-                            "service": "nowledge",
-                            "agent_running": agent_status.get("running"),
-                            "queue_size": agent_status.get("queue_size"),
-                            "configuration": self._memory_settings,
-                        },
-                        ensure_ascii=False,
-                    ),
+                    "Nowledge memory status.",
                     effect="no-op",
+                    title="Memory status",
+                    data={
+                        "available": available,
+                        "service": "nowledge",
+                        "agent_running": agent_status.get("running"),
+                        "queue_size": agent_status.get("queue_size"),
+                        "configuration": self._memory_settings,
+                    },
                 )
             except Exception as exc:
                 error_code = getattr(exc, "code", None)
@@ -184,7 +306,12 @@ class RuntimeCommandHandlers:
         try:
             if action == "processing":
                 result = await self._memory.processing_status()
-                return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
+                return _ok(
+                    "Nowledge processing status.",
+                    data=_memory_processing_view(result),
+                    effect="no-op",
+                    title="Knowledge processing",
+                )
             if action == "spaces":
                 result = await self._memory.list_spaces()
                 spaces = result.get("spaces") if isinstance(result, dict) else None
@@ -201,7 +328,7 @@ class RuntimeCommandHandlers:
                             if isinstance(space, dict)
                         ],
                     }
-                return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
+                return _ok("Nowledge Spaces.", data=result, effect="no-op", title="Memory spaces")
             if action == "search":
                 query = str(options.get("query") or " ".join(args)).strip()
                 if not query:
@@ -213,7 +340,17 @@ class RuntimeCommandHandlers:
                     mode=str(options.get("mode") or "fast"),
                     space_id=str(options["space-id"]) if options.get("space-id") else None,
                 )
-                return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
+                return _ok(
+                    f"Found {len(result)} memor{'y' if len(result) == 1 else 'ies'}.",
+                    data={
+                        "query": query,
+                        "mode": str(options.get("mode") or "fast"),
+                        "count": len(result),
+                        "results": [_memory_search_view(item) for item in result] if result else None,
+                    },
+                    effect="no-op",
+                    title="Memory search",
+                )
             if action == "show":
                 if len(args) != 1:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide exactly one memory id.", "/memory show <memory_id>")
@@ -221,7 +358,12 @@ class RuntimeCommandHandlers:
                     args[0],
                     space_id=str(options["space-id"]) if options.get("space-id") else None,
                 )
-                return _ok(json.dumps(result or {}, ensure_ascii=False, default=str), effect="no-op")
+                return _ok(
+                    "Memory details.",
+                    data={"memory": _memory_view(result or {})},
+                    effect="no-op",
+                    title="Memory details",
+                )
             if action == "add":
                 content = str(options.get("content") or " ".join(args)).strip()
                 if not content:
@@ -241,8 +383,13 @@ class RuntimeCommandHandlers:
                     space_id=str(options["space-id"]) if options.get("space-id") else None,
                 )
                 memory = (result.get("memory") or result) if result else {}
-                memory_id = memory.get("id") or memory.get("memory_id") or "unknown"
-                return _ok(f"Memory added: {memory_id}.")
+                memory_id = memory.get("id") or memory.get("memory_id") if isinstance(memory, dict) else None
+                memory_view = _memory_view(result or {})
+                return _ok(
+                    "Memory added.",
+                    data={"memory": memory_view} if memory_view else {"id": memory_id},
+                    title="Memory added",
+                )
             if action == "update":
                 if len(args) != 1:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide exactly one memory id.", "/memory update <memory_id> --content=<text>")
@@ -268,7 +415,17 @@ class RuntimeCommandHandlers:
                     space_id=str(options["space-id"]) if options.get("space-id") else None,
                     **fields,
                 )
-                return _ok(f"Memory `{args[0]}` updated." if result else f"Memory `{args[0]}` was not updated.")
+                memory_view = _memory_view(result or {})
+                return _ok(
+                    "Memory updated." if result else "Memory was not updated.",
+                    data=(
+                        {"memory": memory_view}
+                        if memory_view
+                        else {"id": args[0], "updated": bool(result)}
+                    ),
+                    effect="state-changed" if result else "no-op",
+                    title="Memory updated" if result else "Memory not updated",
+                )
             if action == "delete":
                 if len(args) != 1:
                     return _error(CommandErrorCode.MISSING_ARGUMENT, "Provide exactly one memory id.", "/memory delete <memory_id>")
@@ -276,7 +433,12 @@ class RuntimeCommandHandlers:
                     args[0],
                     space_id=str(options["space-id"]) if options.get("space-id") else None,
                 )
-                return _ok(f"Memory `{args[0]}` deleted." if changed else f"Memory `{args[0]}` was not deleted.")
+                return _ok(
+                    "Memory deleted." if changed else "Memory was not deleted.",
+                    data={"id": args[0], "deleted": changed},
+                    effect="state-changed" if changed else "no-op",
+                    title="Memory deleted" if changed else "Memory not deleted",
+                )
             if action in {"preview", "distill"}:
                 thread_id = (session.metadata if session is not None else {}).get(
                     "nowledge_thread_id"
@@ -292,7 +454,11 @@ class RuntimeCommandHandlers:
                     result = await self._memory.preview_distill(thread_id, **fields)
                 else:
                     result = await self._memory.distill(thread_id, force_distill=True, **fields)
-                return _ok(json.dumps(result, ensure_ascii=False, default=str))
+                return _ok(
+                    "Memory distillation preview." if action == "preview" else "Memory distillation completed.",
+                    data=result,
+                    title="Distillation preview" if action == "preview" else "Memory distillation",
+                )
         except (TypeError, ValueError) as exc:
             return _error(CommandErrorCode.INVALID_ARGUMENT, str(exc), usage)
         except Exception as exc:

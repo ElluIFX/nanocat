@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from nanocat.application.structured_output import render_structured
 from nanocat.core.commands import CommandResult
 
 
@@ -15,6 +16,10 @@ class CommandFeedback:
             lines.append(result.title)
         if result.message:
             lines.append(result.message)
+        if result.data:
+            rendered_data = render_structured(result.data)
+            if rendered_data:
+                lines.append(rendered_data)
         if not result.ok and result.code:
             lines.append(f"Code: `{result.code}`")
         if result.usage:
