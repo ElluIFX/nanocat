@@ -240,6 +240,7 @@ class SubagentManager:
                 origin["channel"], origin["chat_id"], f"{origin['channel']}:{origin['chat_id']}"
             ),
             principal_id=origin.get("principal_id", "user"),
+            user_input=task,
         )
 
         system_prompt = self._build_subagent_prompt()

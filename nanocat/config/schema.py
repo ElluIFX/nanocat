@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -46,7 +46,7 @@ class AgentDefaults(Base):
         None  # model for ParseImageTool / adaptive image loading; None → assistant_model → model
     )
     compaction_model: str | None = None  # independent low-cost model for session compaction
-    # Deprecated compatibility field: accepted from old configs but ignored at runtime.
+    # Saved model catalog used by /model and the local TUI.
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     max_tokens: int | None = 8192
     context_window_tokens: int = 65_536
@@ -120,6 +120,17 @@ class ProvidersConfig(Base):
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
+    @model_validator(mode="after")
+    def validate_registry_parity(self) -> "ProvidersConfig":
+        """Keep provider configuration fields identical to the runtime registry."""
+        from nanocat.providers.registry import PROVIDERS
+
+        schema_names = set(type(self).model_fields)
+        registry_names = {spec.name for spec in PROVIDERS}
+        if schema_names != registry_names:
+            raise ValueError("ProvidersConfig and provider registry are out of sync")
+        return self
+
 
 class HeartbeatConfig(Base):
     """Heartbeat service configuration."""
@@ -176,6 +187,7 @@ class ToolsPolicyConfig(Base):
     safty_safe_tool: list[str] = Field(default_factory=list)
     safty_allow_regex: list[str] = Field(default_factory=list)
     safty_deny_regex: list[str] = Field(default_factory=list)
+    auto_approve_mode: bool = False
     restrict_path_to_workspace: bool = False
     restrict_url_outside_local: bool = False
 

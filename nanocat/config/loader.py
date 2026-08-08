@@ -105,10 +105,6 @@ def load_config(config_path: Path | None = None) -> Config:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, dict):
-                # User-facing text is hard-coded; discard the removed legacy section
-                # before the strict schema validates the remaining configuration.
-                data.pop("tips", None)
             config = Config.model_validate(data)
             unknown_paths = _unknown_config_paths(data, config)
             if unknown_paths:

@@ -60,6 +60,7 @@ from nanocat.agent.tools.ssh import SSHCloseTool, SSHListTool, SSHOpenTool, SSHR
 from nanocat.agent.tools.todo import TodoTool
 from nanocat.agent.tools.wait import WaitTool
 from nanocat.agent.tools.web import WebFetchTool, WebSearchTool
+from nanocat.application.auto_approval import AutoApprovalReviewer
 from nanocat.application.command_handlers import RuntimeCommandHandlers
 from nanocat.application.command_parser import CommandClassification
 from nanocat.application.command_router import CommandRouter
@@ -268,6 +269,15 @@ class AgentLoop:
             config=config,
         )
         self._register_default_tools()
+        auto_reviewer = (
+            AutoApprovalReviewer(
+                self._provider_resolver,
+                _defaults.assistant_model or _defaults.model,
+                config.workspace_path,
+            )
+            if config.tools.policy.auto_approve_mode
+            else None
+        )
         self.tool_executor = ToolExecutor(
             self.tools,
             SecurityPolicy(
@@ -275,6 +285,7 @@ class AgentLoop:
                 self.workspace,
             ),
             intervention_broker,
+            auto_reviewer,
             max_concurrent_calls=runtime_limits.max_concurrent_tool_calls,
         )
         self.subagents.set_tool_executor(self.tool_executor)
@@ -1836,6 +1847,7 @@ class AgentLoop:
         if action is None:
             raise ValueError("not an intervention response")
         conversation = ConversationRef(msg.channel, msg.chat_id, msg.session_key)
+        principal_id = msg.principal_id or msg.sender_id
         accepted = False
         if action.error or self.intervention is None:
             result = CommandResult(
@@ -1843,12 +1855,25 @@ class AgentLoop:
                 code=CommandErrorCode.INTERVENTION_NOT_FOUND,
                 title="Intervention response rejected",
                 message=action.error or "No pending intervention request.",
-                usage="/approve once|turn|forever|cancel, /deny, or /reject",
+                usage="/approve [once|turn|forever|cancel], /deny, or /reject",
+            )
+            resolved = None
+        elif (
+            action.action is not InterventionAction.REVOKE_SESSION
+            and (pending := self.intervention.current_pending(conversation, principal_id)) is not None
+            and action.action not in pending.allowed_actions
+        ):
+            result = CommandResult(
+                ok=False,
+                code=CommandErrorCode.INTERVENTION_NOT_FOUND,
+                title="Intervention response rejected",
+                message="This review accepts only `/approve` or `/deny`.",
+                usage="/approve or /deny",
             )
             resolved = None
         else:
             resolved = await self.intervention.resolve(
-                msg.principal_id or msg.sender_id,
+                principal_id,
                 conversation,
                 action.action,
             )
@@ -2074,6 +2099,7 @@ class AgentLoop:
                 message_id=msg.metadata.get("message_id"),
                 session=session,
                 model=self.model,
+                user_input=msg.content,
             )
             try:
                 final_content, _, all_msgs = await self._run_agent_loop(
@@ -2197,6 +2223,7 @@ class AgentLoop:
             message_id=msg.metadata.get("message_id"),
             session=session,
             model=self.model,
+            user_input=msg.content,
         )
         try:
             final_content, _, all_msgs = await self._run_agent_loop(

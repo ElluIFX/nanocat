@@ -1,6 +1,7 @@
 """Application-layer control and turn orchestration services."""
 
 from nanocat.application.agent_service import AgentService
+from nanocat.application.auto_approval import AutoApprovalResult, AutoApprovalReviewer
 from nanocat.application.channel_dispatcher import DeliveryPolicy, OutboundDispatcher
 from nanocat.application.command_handlers import RuntimeCommandHandlers
 from nanocat.application.command_parser import CommandParser
@@ -20,6 +21,8 @@ from nanocat.application.turns import TurnCoordinator, TurnRecord, TurnRequest, 
 
 __all__ = [
     "AgentService",
+    "AutoApprovalReviewer",
+    "AutoApprovalResult",
     "MCPHost",
     "ToolHost",
     "OutboundDispatcher",

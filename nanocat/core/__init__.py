@@ -3,6 +3,7 @@
 from nanocat.core.intervention import (
     DeliveryResult,
     InterventionAction,
+    InterventionFlow,
     InterventionKind,
     InterventionRequest,
     InterventionResult,
@@ -53,6 +54,7 @@ __all__ = [
     "HealthState",
     "InboundEvent",
     "InterventionAction",
+    "InterventionFlow",
     "InterventionKind",
     "InterventionRequest",
     "InterventionResult",

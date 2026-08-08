@@ -20,6 +20,13 @@ class InterventionKind(StrEnum):
     SELECTION = "selection"
 
 
+class InterventionFlow(StrEnum):
+    """Presentation and action policy for one intervention request."""
+
+    MANUAL = "manual"
+    AUTO_REVIEW = "auto_review"
+
+
 class InterventionAction(StrEnum):
     """Actions accepted by the intervention broker."""
 
@@ -79,6 +86,11 @@ class InterventionRequest:
     allowed_actions: tuple[InterventionAction, ...]
     resume_mode: ResumeMode
     expires_at: datetime
+    tool_name: str = ""
+    tool_params: str = "{}"
+    flow: InterventionFlow = InterventionFlow.MANUAL
+    review_decision: str | None = None
+    review_reason: str | None = None
     tool_call_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -96,3 +108,4 @@ class InterventionResult:
     scope: str | None = None
     resume_value: Any = None
     state: InterventionState = InterventionState.CONSUMED
+    review_reason: str | None = None

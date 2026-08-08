@@ -11,9 +11,12 @@ from uuid import uuid4
 
 from loguru import logger
 
+from nanocat.application.auto_approval import AutoApprovalResult, AutoApprovalReviewer
 from nanocat.application.intervention import InterventionBroker, new_intervention_request
 from nanocat.application.turns import TurnState
 from nanocat.core.intervention import (
+    InterventionAction,
+    InterventionFlow,
     InterventionKind,
     InterventionState,
     ResumeMode,
@@ -38,6 +41,7 @@ class ToolExecutionContext:
     message_id: str | None = None
     session: Any | None = None
     model: str | None = None
+    user_input: str = ""
 
 
 class ToolTurnAbortedError(RuntimeError):
@@ -56,6 +60,7 @@ class ToolExecutor:
         registry: ToolRegistry,
         policy: SecurityPolicy,
         intervention: InterventionBroker | None = None,
+        auto_reviewer: AutoApprovalReviewer | None = None,
         max_concurrent_calls: int = 16,
     ):
         if max_concurrent_calls <= 0:
@@ -63,6 +68,7 @@ class ToolExecutor:
         self._registry = registry
         self._policy = policy
         self._intervention = intervention
+        self._auto_reviewer = auto_reviewer
         self._max_concurrent_calls = max_concurrent_calls
         self._call_slots = asyncio.Semaphore(max_concurrent_calls)
 
@@ -72,6 +78,7 @@ class ToolExecutor:
             registry,
             self._policy,
             self._intervention,
+            self._auto_reviewer,
             max_concurrent_calls=self._max_concurrent_calls,
         )
 
@@ -171,7 +178,7 @@ class ToolExecutor:
                 for index, (name, _params, decision) in enumerate(decisions)
             ]
 
-        approval_scopes: list[str | None] = []
+        approval_scopes: list[str | None] = [None] * len(decisions)
         needs_defer_scope = any(
             decision.kind is SecurityDecisionKind.REQUIRE_INTERVENTION
             for _name, _params, decision in decisions
@@ -179,9 +186,9 @@ class ToolExecutor:
         if needs_defer_scope and self._intervention is not None:
             await self._intervention.begin_defer_scope(context.conversation)
         try:
+            pending: list[tuple[int, str, dict[str, Any], SecurityDecision]] = []
             for index, (name, params, decision) in enumerate(decisions):
                 if decision.kind is SecurityDecisionKind.ALLOW:
-                    approval_scopes.append(None)
                     continue
                 if self._intervention is None:
                     return [
@@ -206,7 +213,7 @@ class ToolExecutor:
                     decision.capability,
                     name,
                 ):
-                    approval_scopes.append("session")
+                    approval_scopes[index] = "session"
                     continue
                 if self._intervention.has_turn_grant(
                     context.conversation,
@@ -214,10 +221,38 @@ class ToolExecutor:
                     context.turn_id,
                     decision.capability,
                 ):
-                    approval_scopes.append("turn")
+                    approval_scopes[index] = "turn"
                     continue
-                result = await self._request_approval(decision, context)
-                if result.state not in {
+
+                pending.append((index, name, params, decision))
+
+            automatic: dict[int, AutoApprovalResult] = {}
+            if self._auto_reviewer is not None and pending:
+                review_tasks = [
+                    asyncio.create_task(
+                        self._auto_reviewer.review(
+                            name,
+                            decision,
+                            user_input=context.user_input,
+                        ),
+                        name=f"nanocat.approval.{name}",
+                    )
+                    for _index, name, _params, decision in pending
+                ]
+                review_results = await asyncio.gather(*review_tasks)
+                automatic = {
+                    item[0]: result for item, result in zip(pending, review_results, strict=True)
+                }
+
+            for index, name, params, decision in pending:
+                review = automatic.get(index)
+                if review is not None and review.decision == "approve":
+                    result = None
+                    scope = "once"
+                else:
+                    result = await self._request_approval(decision, context, review=review)
+                    scope = result.scope or "once"
+                if result is not None and result.state not in {
                     InterventionState.APPROVED_ONCE,
                     InterventionState.APPROVED_TURN,
                     InterventionState.APPROVED_FOREVER,
@@ -232,6 +267,7 @@ class ToolExecutor:
                                 else "security_batch_aborted"
                             ),
                             state=result.state.value,
+                            review_reason=result.review_reason,
                         )
                         for item_index, (item_name, _item_params, item_decision) in enumerate(
                             decisions
@@ -270,7 +306,7 @@ class ToolExecutor:
                             decisions
                         )
                     ]
-                approval_scopes.append(result.scope or "once")
+                approval_scopes[index] = scope
         finally:
             if needs_defer_scope and self._intervention is not None:
                 await self._intervention.end_defer_scope(context.conversation)
@@ -320,6 +356,7 @@ class ToolExecutor:
         *,
         code: str,
         state: str | None = None,
+        review_reason: str | None = None,
     ) -> str:
         """Return a non-retryable structured result for the model."""
         reason = decision.reason or decision.summary
@@ -361,11 +398,21 @@ class ToolExecutor:
             payload["error"]["guidance"] = guidance
         if code == "security_intervention_rejected" and decision.reason:
             payload["error"]["policy_reason"] = decision.reason
+        if code == "security_intervention_rejected" and review_reason:
+            payload["error"]["auto_review_reason"] = review_reason
         if state:
             payload["error"]["state"] = state
         return json.dumps(payload, ensure_ascii=False)
 
-    async def _request_approval(self, decision: Any, context: ToolExecutionContext) -> Any:
+    async def _request_approval(
+        self,
+        decision: SecurityDecision,
+        context: ToolExecutionContext,
+        *,
+        review: AutoApprovalResult | None = None,
+    ) -> Any:
+        tool_name = str(decision.metadata.get("tool_name") or "unknown")
+        tool_params = str(decision.metadata.get("tool_params") or "{}")
         request = new_intervention_request(
             kind=InterventionKind.APPROVAL,
             turn_id=context.turn_id,
@@ -378,9 +425,19 @@ class ToolExecutor:
             + timedelta(seconds=self._intervention.default_timeout_seconds),
             resume_mode=ResumeMode.RETRY_CALL,
             tool_call_id=uuid4().hex,
+            tool_name=tool_name,
+            tool_params=tool_params,
+            flow=InterventionFlow.AUTO_REVIEW if review is not None else InterventionFlow.MANUAL,
+            review_decision=review.decision if review is not None else None,
+            review_reason=review.reason if review is not None else None,
+            allowed_actions=(
+                (InterventionAction.APPROVE_ONCE, InterventionAction.REJECT)
+                if review is not None
+                else None
+            ),
             metadata={
-                "tool_name": decision.metadata.get("tool_name"),
-                "tool_params": decision.metadata.get("tool_params"),
+                "tool_name": tool_name,
+                "tool_params": tool_params,
             },
         )
         if context.state_hook is not None:

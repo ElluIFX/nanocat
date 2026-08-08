@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from nanocat.application.text_catalog import USER_TEXT
 from nanocat.bus.events import OutboundMessage
 from nanocat.core.intervention import (
     DeliveryResult,
     InterventionAction,
+    InterventionFlow,
     InterventionRequest,
     InterventionResult,
     InterventionState,
@@ -111,6 +113,12 @@ def new_intervention_request(
     call_fingerprint: str,
     expires_at: datetime,
     resume_mode: Any,
+    tool_name: str = "",
+    tool_params: str = "{}",
+    flow: InterventionFlow = InterventionFlow.MANUAL,
+    review_decision: str | None = None,
+    review_reason: str | None = None,
+    allowed_actions: tuple[InterventionAction, ...] | None = None,
     tool_call_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> InterventionRequest:
@@ -125,7 +133,8 @@ def new_intervention_request(
         capability=capability,
         summary=summary,
         call_fingerprint=call_fingerprint,
-        allowed_actions=(
+        allowed_actions=allowed_actions
+        or (
             InterventionAction.APPROVE_ONCE,
             InterventionAction.APPROVE_TURN,
             InterventionAction.APPROVE_FOREVER,
@@ -133,6 +142,11 @@ def new_intervention_request(
         ),
         resume_mode=resume_mode,
         expires_at=expires_at,
+        tool_name=tool_name,
+        tool_params=tool_params,
+        flow=flow,
+        review_decision=review_decision,
+        review_reason=review_reason,
         tool_call_id=tool_call_id,
         metadata=metadata or {},
     )
@@ -151,17 +165,20 @@ def parse_intervention_action(text: str) -> ParsedInterventionAction | None:
 
     command = parts[0].lower()
     if command == "/approve":
-        if len(parts) != 2 or parts[1].lower() not in {"once", "turn", "forever", "cancel"}:
+        if len(parts) == 1:
+            action = InterventionAction.APPROVE_ONCE
+        elif len(parts) == 2 and parts[1].lower() in {"once", "turn", "forever", "cancel"}:
+            action = {
+                "once": InterventionAction.APPROVE_ONCE,
+                "turn": InterventionAction.APPROVE_TURN,
+                "forever": InterventionAction.APPROVE_FOREVER,
+                "cancel": InterventionAction.REVOKE_SESSION,
+            }[parts[1].lower()]
+        else:
             return ParsedInterventionAction(
                 None,
-                "Usage: /approve once|turn|forever|cancel",
+                "Usage: /approve [once|turn|forever|cancel]",
             )
-        action = {
-            "once": InterventionAction.APPROVE_ONCE,
-            "turn": InterventionAction.APPROVE_TURN,
-            "forever": InterventionAction.APPROVE_FOREVER,
-            "cancel": InterventionAction.REVOKE_SESSION,
-        }[parts[1].lower()]
     elif command in {"/deny", "/reject"}:
         if len(parts) != 1:
             return ParsedInterventionAction(None, "Usage: /deny")
@@ -170,25 +187,27 @@ def parse_intervention_action(text: str) -> ParsedInterventionAction | None:
 
 
 def intervention_prompt(request: InterventionRequest) -> str:
-    """Build a scheduler-owned, credential-free prompt for any text channel."""
-    expires = request.expires_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    tool_name = str(request.metadata.get("tool_name") or "unknown")
-    tool_params = str(request.metadata.get("tool_params") or "{}")
-    tool_name = tool_name.replace("`", "'")
-    tool_params = tool_params.replace("`", "'")
-    return (
-        "## Sensitive operation requires your decision\n\n"
-        f"- **Capability:** `{request.capability}`\n\n"
-        f"- **Tool:** `{tool_name}`\n\n"
-        f"- **Parameters:** `{tool_params}`\n\n"
-        f"- **Operation:** {request.summary}\n\n"
-        f"- **Expires:** {expires}\n\n"
-        "## Actions\n\n"
-        "- Approve once: `/approve once`\n\n"
-        "- Approve for this turn: `/approve turn`\n\n"
-        "- Approve for this session: `/approve forever`\n\n"
-        "- Reject: `/deny`\n\n"
-        "- Revoke this session's approval: `/approve cancel`"
+    """Build a compact, scheduler-owned prompt for any text channel."""
+    tool_name = str(request.tool_name or request.metadata.get("tool_name") or "unknown")
+    tool_params = str(request.tool_params or request.metadata.get("tool_params") or "{}")
+    tool = f"{tool_name}({tool_params})".replace("`", "'").replace("\n", " ")
+    reason = (request.review_reason or request.summary or "Sensitive operation")[:1_000]
+    if request.flow is InterventionFlow.AUTO_REVIEW:
+        return USER_TEXT.intervention_auto_review.format(tool=tool, reason=reason)
+
+    commands: list[str] = []
+    if InterventionAction.APPROVE_ONCE in request.allowed_actions:
+        commands.append("`/approve`")
+    if InterventionAction.APPROVE_TURN in request.allowed_actions:
+        commands.append("`/approve turn`")
+    if InterventionAction.APPROVE_FOREVER in request.allowed_actions:
+        commands.append("`/approve forever`")
+    if InterventionAction.REJECT in request.allowed_actions:
+        commands.append("`/deny`")
+    return USER_TEXT.intervention_manual.format(
+        tool=tool,
+        reason=reason,
+        actions="、".join(commands),
     )
 
 
@@ -213,8 +232,12 @@ def make_bus_presenter(
                         "request_id": request.request_id,
                         "capability": request.capability,
                         "operation": request.summary,
-                        "tool_name": request.metadata.get("tool_name"),
-                        "tool_params": request.metadata.get("tool_params"),
+                        "tool_name": request.tool_name,
+                        "tool_params": request.tool_params,
+                        "approval_flow": request.flow.value,
+                        "review_decision": request.review_decision,
+                        "review_reason": request.review_reason,
+                        "allowed_actions": [action.value for action in request.allowed_actions],
                         "expires_at": request.expires_at.isoformat(),
                     },
                     request_id=request.request_id,
@@ -278,6 +301,25 @@ class InterventionBroker:
     def pending_requests(self) -> tuple[InterventionRequest, ...]:
         """Return a detached snapshot for status and diagnostics."""
         return tuple(item.request for item in self._pending.values())
+
+    def current_pending(
+        self,
+        conversation: ConversationRef,
+        principal_id: str,
+    ) -> InterventionRequest | None:
+        """Return the first active request for command feedback."""
+        now = datetime.now(timezone.utc)
+        return next(
+            (
+                item.request
+                for item in self._pending.values()
+                if item.request.conversation == conversation
+                and item.request.principal_id == principal_id
+                and not item.future.done()
+                and item.request.expires_at > now
+            ),
+            None,
+        )
 
     def has_pending(self, conversation: ConversationRef) -> bool:
         """Return whether a conversation is waiting for a user decision."""
@@ -452,6 +494,7 @@ class InterventionBroker:
                     action=action,
                     scope=scope,
                     state=state,
+                    review_reason=request.review_reason,
                 )
             )
             return pending.future.result()

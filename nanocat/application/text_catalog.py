@@ -25,11 +25,21 @@ class UserTextCatalog:
         "- `/compact [status]` — Compact history or show context and compaction status\n\n"
         "- `/session` — View and switch sessions\n\n"
         "- `/logs [N]` — Show the tail of runtime logs\n\n"
-        "- `/approve once|turn` — Approve the current sensitive operation\n\n"
+        "- `/approve [once|turn]` — Approve the current sensitive operation\n\n"
 
         "- `/approve forever|cancel` — Enable or revoke session-wide YOLO approval\n\n"
         "- `/deny` — Reject the current sensitive operation\n\n"
         "- `/model effort auto|low|medium|high|xhigh|max` — Set reasoning effort"
+    )
+    intervention_manual: str = (
+        "⚠️ **需要审批**：`{tool}`\n\n"
+        "原因：{reason}\n\n"
+        "回复 {actions}。"
+    )
+    intervention_auto_review: str = (
+        "⚠️ **自动审批未通过**：`{tool}`\n\n"
+        "意见：{reason}\n\n"
+        "回复 `/approve` 执行一次，或 `/deny` 拒绝。"
     )
     model_info: str = (
         "## 🐈 Model info\n\n"

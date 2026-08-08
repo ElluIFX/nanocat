@@ -130,7 +130,7 @@ class CommandRouter:
                     name="approve",
                     group="security",
                     summary="Approve the current sensitive operation",
-                    usage="/approve once|turn",
+                    usage="/approve [once|turn|forever|cancel]",
                     execution_policy=CommandExecutionPolicy.INTERVENTION_RESPONSE,
                 ),
                 CommandSpec(
@@ -334,7 +334,7 @@ class CommandRouter:
             for spec in specs:
                 if spec.name == "approve":
                     lines.append(
-                        "- `/approve once|turn`: Approve the current sensitive operation"
+                        "- `/approve [once|turn]`: Approve the current sensitive operation"
                     )
                     lines.append(
                         "- `/approve forever|cancel`: Enable or revoke session-wide YOLO approval"

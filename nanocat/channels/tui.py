@@ -108,8 +108,7 @@ _SUBAGENT_BORDER = "yellow"
 _APPROVAL_BORDER = "bright_yellow"
 
 _INTERVENTION_FIELD_RE = re.compile(
-    r"^(Capability|Tool|Parameters|Operation|Expires):\s*(.*)$",
-    re.MULTILINE,
+    r"^(Capability|Tool|Parameters|Operation|Expires):\s*(.*)$", re.MULTILINE
 )
 _SENSITIVE_DISPLAY_RE = re.compile(
     r"(?i)(authorization|cookie|password|passwd|secret|token|api[-_ ]?key)\s*[:=]\s*[^\s,;]+"
@@ -245,16 +244,18 @@ def _intervention_payload(msg: OutboundMessage) -> dict[str, Any] | None:
         "capability": _redact_intervention_text(
             metadata.get("capability") or fields.get("Capability")
         ),
-        "tool_name": _redact_intervention_text(
-            metadata.get("tool_name") or fields.get("Tool")
-        ),
-        "tool_params": _redact_intervention_text(
-            metadata.get("tool_params") or fields.get("Parameters"),
-            limit=4000,
-        ),
         "operation": _redact_intervention_text(
             metadata.get("operation") or fields.get("Operation")
         ),
+        "tool_name": _redact_intervention_text(metadata.get("tool_name") or fields.get("Tool")),
+        "tool_params": _redact_intervention_text(
+            metadata.get("tool_params") or fields.get("Parameters"),
+            limit=2_000,
+        ),
+        "approval_flow": str(metadata.get("approval_flow") or "manual"),
+        "review_decision": str(metadata.get("review_decision") or ""),
+        "review_reason": _redact_intervention_text(metadata.get("review_reason")),
+        "allowed_actions": tuple(metadata.get("allowed_actions") or ()),
         "expires": _redact_intervention_text(fields.get("Expires") or raw_expiry),
         "expires_at": expires_at,
         "state": "pending",
@@ -545,6 +546,8 @@ if _TEXTUAL_OK:
             self.tool_name = str(payload.get("tool_name") or "unknown")
             self.tool_params = str(payload.get("tool_params") or "{}")
             self.operation = str(payload.get("operation") or "Sensitive operation")
+            self.approval_flow = str(payload.get("approval_flow") or "manual")
+            self.review_reason = str(payload.get("review_reason") or "")
             self.expires = str(payload.get("expires") or "unknown")
             self.expires_at: datetime | None = payload.get("expires_at")
             self._state = "pending"
@@ -553,17 +556,23 @@ if _TEXTUAL_OK:
             yield Static(self._details(), classes="approval-details")
             yield Static("Waiting for your decision", classes="approval-status")
             with Horizontal(classes="approval-actions"):
-                yield Button("Approve once", id="approve-once", variant="success")
-                yield Button("Approve for turn", id="approve-turn", variant="warning")
+                yield Button(
+                    "Approve" if self.approval_flow == "auto_review" else "Approve once",
+                    id="approve-once",
+                    variant="success",
+                )
+                if self.approval_flow != "auto_review":
+                    yield Button("Approve for turn", id="approve-turn", variant="warning")
                 yield Button("Deny", id="deny", variant="error")
 
         def _details(self) -> Text:
             text = Text()
             text.append("Sensitive operation requires approval", style="bold bright_yellow")
-            text.append(f"\nCapability: {self.capability}")
             text.append(f"\nTool: {self.tool_name}")
             text.append(f"\nParameters: {self.tool_params}")
             text.append(f"\nOperation: {self.operation}")
+            if self.review_reason:
+                text.append(f"\nAuto review: {self.review_reason}", style="yellow")
             text.append(f"\nExpires: {self.expires}")
             return text
 
@@ -575,6 +584,8 @@ if _TEXTUAL_OK:
             self.tool_name = str(payload.get("tool_name") or self.tool_name)
             self.tool_params = str(payload.get("tool_params") or self.tool_params)
             self.operation = str(payload.get("operation") or self.operation)
+            self.approval_flow = str(payload.get("approval_flow") or self.approval_flow)
+            self.review_reason = str(payload.get("review_reason") or self.review_reason)
             self.expires = str(payload.get("expires") or self.expires)
             if self.is_attached:
                 self.query_one(".approval-details", Static).update(self._details())
@@ -807,7 +818,13 @@ if _TEXTUAL_OK:
             if card is None or card._state != "pending":
                 return
             card.set_state("submitting", "Sending your decision to the scheduler…")
-            command = "/deny" if event.action == "deny" else f"/approve {event.action}"
+            command = (
+                "/deny"
+                if event.action == "deny"
+                else "/approve"
+                if event.action == "once"
+                else f"/approve {event.action}"
+            )
             # The UI only submits the canonical command through the normal TUI
             # ingress; it never touches the runtime broker or its event loop.
             self._channel.submit_threadsafe(command)

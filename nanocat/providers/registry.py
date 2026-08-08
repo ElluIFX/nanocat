@@ -1,10 +1,8 @@
 """
 Provider Registry — single source of truth for LLM provider metadata.
 
-Adding a new provider:
-  1. Add a ProviderSpec to PROVIDERS below.
-  2. Add a field to ProvidersConfig in config/schema.py.
-  Done. Env vars, prefixing, config matching, status display all derive from here.
+Adding a new provider requires one ProviderSpec in PROVIDERS and one matching
+ProvidersConfig field in config/schema.py. The two sets must remain identical.
 
 Order matters — it controls match priority and fallback. Gateways first.
 Every entry writes out all fields so you can copy-paste as a template.
