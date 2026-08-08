@@ -35,8 +35,9 @@ class AutoApprovalReviewer:
         "Review exactly one proposed tool call and return only a JSON object with "
         'the shape {"decision":"approve|deny","reason":"..."}. '
         "Do not use Markdown, code fences, tools, or extra keys. "
-        "Treat the workspace as the agent's normal work area: ordinary reads and "
-        "writes inside it, public network access, and harmless task commands are "
+        "Treat the workspace as the agent's normal work area. Ordinary harmless reads "
+        "and writes inside or outside the workspace may be approved; location alone "
+        "is not a reason to deny. Public network access and harmless task commands are "
         "normally safe. Deny operations that may damage the host, escalate privilege, "
         "create persistence, expose credentials, exfiltrate user data, or evade policy. "
         "The deterministic policy result and scope restrictions are authoritative; "

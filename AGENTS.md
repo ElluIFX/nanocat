@@ -105,7 +105,7 @@ channel callback
 - TUI 的 ApprovalCard 展示工具名和脱敏后的完整参数；普通审批提供 once/turn/deny，自动审批复核只提供 `/approve` 和 `/deny`，并回到普通 ingress。YOLO/AUTO 工具栏切换负责 `/approve forever` 与 `/approve cancel`，不与 `autoApproveMode` 混用，TUI 不直接调用 Broker。内部 request_id 仅用于卡片去重和状态回写，不显示为用户输入项；卡片处理过期和脱敏，但授权判断仍由 Broker 完成。
 - 非交互渠道提供 `/approve once|turn|forever|cancel`、`/deny` 和隐藏等效的 `/reject` 行为，adapter 只归一化 action，不判断用户是否同意。
 
-策略配置位于 `tools.policy`：`saftyCheck` 是总开关，关闭时 `SecurityPolicy` 立即返回 `ALLOW`；`saftySafeTool` 使用全工具名匹配并支持 `*`，优先级最高。随后按 deny 优先、allow 次之匹配 `tool_name(compact-json-parameters)`；再执行命令分析、工作区路径限制和本地 URL 限制。工作区内文件读写和公网普通访问默认 `ALLOW`；`restrictPathToWorkspace` 与 `restrictUrlOutsideLocal` 默认关闭，开启后分别将工作区外路径和内网目标直接 `HARD_DENY`，拒绝理由说明 agent 工作范围受限。关闭时不因边界本身拦截，只有明显高危操作进入人工审批；无法可靠确认的路径或 URL 按无罪假定放行，SSH 远程路径不受本地工作区限制。`autoApproveMode` 只对 `REQUIRE_INTERVENTION` 启用 assistantModel 审查，不改变上述优先级；自动批准只作用于当前调用，自动拒绝或审查失败转人工复核。
+策略配置位于 `tools.policy`：`saftyCheck` 是总开关，关闭时 `SecurityPolicy` 立即返回 `ALLOW`；`saftySafeTool` 使用全工具名匹配并支持 `*`，优先级最高。随后按 deny 优先、allow 次之匹配 `tool_name(compact-json-parameters)`；再执行命令分析、工作区路径限制和本地 URL 限制。工作区内文件读写和公网普通访问默认 `ALLOW`；`restrictPathToWorkspace` 与 `restrictUrlOutsideLocal` 默认关闭，开启后分别将工作区外路径和内网目标直接 `HARD_DENY`，拒绝理由说明 agent 工作范围受限。关闭时不因边界本身拦截，只有明显高危操作进入人工审批；无法可靠确认的路径或 URL 按无罪假定放行，SSH 远程路径不受本地工作区限制。`autoApproveMode` 只对 `REQUIRE_INTERVENTION` 启用 assistantModel 审查，工作区外的无害读写不因路径位置单独拒绝，不改变上述优先级；自动批准只作用于当前调用，自动拒绝或审查失败转人工复核。
 
 用户拒绝或策略硬拒绝返回给 LLM 的结构化错误必须附带 `guidance`：禁止绕过审批/安全策略；必要操作应停止，向用户解释原因并询问是否修改命令。
 
@@ -214,7 +214,7 @@ tool_err("operation failed", hint="retry with ...", detail=detail)
 - `RuntimeSupervisor`、`AgentService`、`ToolExecutor`、`ToolHost`、`MCPHost`、`OutboundDispatcher` 和 `SystemTurnGateway` 已形成主要 owner 边界；legacy plugin 自行创建的资源仍属于兼容风险。
 - global config path/config 仍是单 runtime 兼容状态，不能宣称多 runtime 并行隔离；provider/background/process/HTTP 的完整统一配额仍由各 adapter 负责。
 - 动态 channel plugin 能力声明、非 TUI 在线渠道的完整原生菜单/交互组件和所有 SDK 内部 task 仍是保守兼容边界。
-- `tools.policy.autoApproveMode` 已接入 `AutoApprovalReviewer`：所有非硬拒绝的待审批调用并发进行 assistantModel 审查；自动批准只作用于当前 fingerprint，自动拒绝或审查失败进入单请求人工复核。自动审查显式不携带 `reasoning_effort` 或 token 上限，`HARD_DENY`、restrict 规则和 session/turn grant 保持更高优先级。
+- `tools.policy.autoApproveMode` 已接入 `AutoApprovalReviewer`：所有非硬拒绝的待审批调用并发进行 assistantModel 审查；工作区外的无害读写可以被自动批准，路径位置本身不是拒绝理由。自动批准只作用于当前 fingerprint，自动拒绝或审查失败进入单请求人工复核。自动审查显式不携带 `reasoning_effort` 或 token 上限，`HARD_DENY`、restrict 规则和 session/turn grant 保持更高优先级。
 - `/approve` 无参数等效 `/approve once`；自动复核的审批消息和 TUI 卡片只提供 `/approve` 与 `/deny`，普通审批与 AUTO/YOLO session 授权保持独立。
 - `ContextArtifactStore`、`ContextLookupTool` 和 `ContextBudget` 已接入 AgentLoop/subagent：大 tool observation 完整归档到 session 隔离目录，LLM 只收到脱敏预览并可按 artifact/行号/模式检索；provider 前执行快速 token 预算、保留完整 tool-call 对、超限时只做一次降历史重试。
 - `CompactionCheckpoint` 已接入 Session JSON：压缩结果保存结构化 goal/state、source range/revision/hash、模型名和 token 前后值；压缩只在完整 turn 边界推进，revision/CAS 失败或 provider 失败均不推进 cursor，失败不丢原始 history。

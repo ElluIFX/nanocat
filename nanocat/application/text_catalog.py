@@ -32,14 +32,14 @@ class UserTextCatalog:
         "- `/model effort auto|low|medium|high|xhigh|max` — Set reasoning effort"
     )
     intervention_manual: str = (
-        "⚠️ **需要审批**：`{tool}`\n\n"
-        "原因：{reason}\n\n"
-        "回复 {actions}。"
+        "⚠️ **Approval required**: `{tool}`\n\n"
+        "Reason: {reason}\n\n"
+        "Reply with {actions}."
     )
     intervention_auto_review: str = (
-        "⚠️ **自动审批未通过**：`{tool}`\n\n"
-        "意见：{reason}\n\n"
-        "回复 `/approve` 执行一次，或 `/deny` 拒绝。"
+        "⚠️ **Automatic review requires your decision**: `{tool}`\n\n"
+        "Review: {reason}\n\n"
+        "Reply with `/approve` to run it once, or `/deny` to reject it."
     )
     model_info: str = (
         "## 🐈 Model info\n\n"
