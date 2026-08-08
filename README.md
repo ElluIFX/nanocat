@@ -1,120 +1,158 @@
 <div align="center">
   <img src="nanobot_logo.png" alt="NanoCat" width="420">
-  <h1>NanoCat 🐈</h1>
-  <p><b>超轻量个人 AI 助手</b></p>
+  <h1>NanoCat</h1>
+  <p><b>个人 AI 助手运行时</b></p>
   <p>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   </p>
 </div>
 
-> **关于本项目** —— NanoCat 是一个高度魔改的个人分支，源自
-> [nanobot](https://github.com/HKUDS/nanobot)（HKUDS，灵感来自 OpenClaw），目前已与上游主线
-> 大幅分离、独立维护。原始架构与各渠道/模型接入归功于 nanobot 作者。
+NanoCat 是一个面向个人部署的 AI 助手运行时，提供会话管理、工具执行、用户命令、模型路由、记忆和多渠道接入。项目基于 [nanobot](https://github.com/HKUDS/nanobot)，当前独立维护。
 
----
+## 功能
 
-## 一、特色功能（相比原仓库）
+- **运行时调度**：有界消息总线、按会话排序、跨会话并发、统一生命周期管理和出站分发。
+- **命令控制面**：命令在 Provider 之前解析；未知命令、缺参和错参直接反馈，不会误发给 LLM。
+- **安全审批**：安全许可由运行时持有，不进入 LLM 请求。高风险操作可暂停当前会话并直接请求用户批准；支持单次、当前轮和会话级授权。
+- **上下文管理**：上下文预算、工具结果归档、会话压缩、压缩状态查询和手动触发；压缩模型独立配置。
+- **Nowledge 记忆**：自动检索注入、Working Memory、Thread 捕获、后台蒸馏和用户侧记忆命令。
+- **模型与 Provider**：Provider registry、OpenAI-compatible 接口、DeepSeek、OpenAI、OpenAI Codex/OAuth、Anthropic、OpenRouter 及本地模型适配。
+- **渠道与 TUI**：统一渠道生命周期和能力声明；TUI 提供会话、工具调用、审批卡片、模型和 effort 控件。
+- **扩展**：MCP、子代理、定时任务和 heartbeat 通过统一的应用入口接入。
 
-- 🧠 **三层记忆系统**：常驻长期记忆 + 可检索的语义记忆库（自动注入相关记忆、按 ID 取全文，基于 [Nowledge](https://mem.nowledge.co/)）+ 会话自动压缩。长对话也不丢上下文、不爆窗口。
-- 🐈 **Pulse 内心独白**：回应前的情绪与联想反射，让回复更有"人味"（可开关）。
-- 💬 **多会话管理**：每个聊天可拥有多个会话，自动起名，随时 `/session` 查看与切换，互不串味。
-- ⌨️ **增强命令集**：`/model` 多角色切换模型、`/context` 查看上下文用量、`/compact` 手动整理记忆等。
-- ⚡ **更快更稳**：工具并行调用；消息可打断（连发新消息会取消上一条还在跑的任务）；缓存优化让长对话更省更快。
-- 🛡️ **默认安全沙箱**：所有文件/命令工具默认锁定在工作区内，防越权与路径穿越。
-- 🔌 **模型兼容增强**：DeepSeek 直连（支持思考模式）；纯文本模型遇到图片会自动转成可解析的本地路径，不再报错。
-- 🔎 **记忆检索增强**：中英文关键词智能提取，记忆搜索匹配更准。
-- 📱 **渠道可靠性**：QQ 等渠道的发送重试、断线重连、异常消息兜底等大量稳定性增强。
-- 🪶 **更轻量**：精简了上游的部分冗余（如 WhatsApp 桥接），更小更快。
+## 架构
 
-## 二、内置工具
-
-大幅增强了开箱即用的内置工具（按类别）：
-
-| 类别     | 工具                                                                              | 说明                                                                |
-| -------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| **文件** | `read_file` · `write_file` · `edit_file`                                          | 读取 / 写入 / 精确编辑文件                                          |
-|          | `insert_lines` · `delete_lines` · `delete`                                        | 按行插入 / 删除、删除文件或目录                                     |
-|          | `list_dir` · `grep_file` · `file_hex`                                             | 列目录、按内容搜索、十六进制查看                                    |
-| **视觉** | `parse_image` · `load_image` · `screenshot`                                        | 解析图片、加载图片、截屏（需开启）                                  |
-| **命令** | `exec`                                                                             | 执行 Shell 命令（沙箱受限）                                         |
-| **终端** | `ssh_open` · `ssh_send` · `ssh_read` · `ssh_close` · `ssh_list`                    | 持久 SSH 远程会话（需开启）                                         |
-|          | `proc_start` · `proc_send` · `proc_read` · `proc_stop` · `proc_list`              | 本地后台进程管理                                                    |
-| **联网** | `web_search` · `web_fetch` · `http_request`                                        | 网页搜索、抓取正文、自定义 HTTP 请求                                |
-| **记忆** | `memory_search` · `memory_get`                                                    | 检索记忆、按 ID 取全文                                              |
-|          | `memory_add` · `memory_update` · `memory_delete`                                  | 增 / 改 / 删记忆                                                    |
-|          | `read_working_memory`                                                             | 读取工作记忆                                                        |
-| **任务** | `todo` · `cron`                                                                    | 待办清单、定时任务                                                  |
-| **协作** | `subagent_spawn` · `subagent_gather` · `subagent_list` · `subagent_steer` · `subagent_kill` | 后台子代理：派发 / 汇总 / 列表 / 引导 / 终止                        |
-|          | `wait` · `message`                                                                | 等待、主动发消息                                                    |
-| **扩展** | *MCP*                                                                             | 任意 [MCP](https://modelcontextprotocol.io/) 服务器的工具会自动接入 |
-
-> 记忆类工具依赖记忆库 [Nowledge](https://mem.nowledge.co/)（需自行部署并在配置中连接）；`ssh_*` 与 `screenshot` 默认关闭，需在配置中开启；MCP 工具按配置动态加载。
-
-## 三、简要使用教程
-
-**1. 安装**
-
-```bash
-git clone <你的仓库地址> nanocat
-cd nanocat
-pip install -e .
+```text
+Channel / TUI
+    -> InboundEvent -> MessageBus
+    -> CommandRouter / AgentService
+    -> Session ordering -> Provider / ToolExecutor
+    -> OutboundDispatcher -> Channel
 ```
 
-**2. 配置** —— 编辑 `~/.nanocat/config.json`，填入模型与 API Key：
+主要源码层：
+
+| 目录 | 职责 |
+| --- | --- |
+| `nanocat/core` | 稳定类型、事件、错误和 port |
+| `nanocat/runtime` | composition root、生命周期、健康和重启 |
+| `nanocat/application` | 命令、会话请求、工具执行、审批和出站编排 |
+| `nanocat/agent` | LLM 上下文、记忆、子代理和内置工具 |
+| `nanocat/security` | 命令、路径、网络和工具安全策略 |
+| `nanocat/session` | 会话模型、索引和持久化 |
+| `nanocat/providers` | Provider registry、resolver 和适配器 |
+| `nanocat/channels` | 渠道适配、ACL、能力和生命周期 |
+
+## 内置工具
+
+| 类别 | 工具 |
+| --- | --- |
+| 文件 | `read_file` `write_file` `edit_file` `insert_lines` `delete_lines` `delete` `list_dir` `grep_file` `file_hex` |
+| 命令与进程 | `exec` `proc_start` `proc_send` `proc_read` `proc_stop` `proc_list` |
+| SSH | `ssh_open` `ssh_send` `ssh_read` `ssh_close` `ssh_list` |
+| 网络与媒体 | `web_search` `web_fetch` `http_request` `parse_image` `load_image` `screenshot` |
+| 记忆 | `memory_search` `memory_get` `memory_add` `memory_update` `memory_delete` `read_working_memory` |
+| 任务与协作 | `todo` `cron` `wait` `message` `subagent_spawn` `subagent_gather` `subagent_list` `subagent_steer` `subagent_kill` |
+| 扩展 | MCP 工具按配置动态注册 |
+
+工具返回值对 LLM 保持结构化 JSON；用户命令结果在出站边界转换为跨渠道 Markdown。文件、命令、网络、进程、SSH 和 MCP 等副作用操作经过统一安全策略。部分工具默认关闭，具体以配置为准。
+
+## 安装
+
+```bash
+git clone https://github.com/ElluIFX/nanocat.git
+cd nanocat
+uv sync --extra tui
+```
+
+不使用 `uv` 时可执行：
+
+```bash
+pip install -e ".[tui]"
+```
+
+## 配置与启动
+
+`workdir` 是运行时锚点。`config.json`、`workspace/`、`sessions/`、`cron/`、`logs/` 和媒体文件均位于该目录下。
+
+例如使用 `data/`：
 
 ```json
 {
   "providers": {
-    "deepseek": { "apiKey": "sk-xxx" }
+    "deepseek": { "apiKey": "YOUR_API_KEY" }
   },
   "agents": {
     "defaults": {
-      "model": "deepseek/deepseek-v4-pro"
+      "model": "deepseek/YOUR_MODEL",
+      "reasoningEffort": "auto",
+      "compactionEnabled": true,
+      "compactionModel": "deepseek/YOUR_COMPACTION_MODEL"
     }
+  },
+  "tools": {
+    "globalSaftyCheck": true
   }
 }
 ```
 
-> 也支持 OpenRouter、OpenAI、Gemini、Anthropic、Qwen、Kimi、智谱、火山等众多 provider，以及 Ollama / vLLM 本地模型。
-
-**3. 接入聊天渠道（必需）**
-
-NanoCat 没有终端交互界面，需通过聊天软件与它对话。在 `~/.nanocat/config.json` 的 `channels` 下开启一个渠道，填好凭证与 `allowFrom`（允许的用户白名单）：
-
-> 支持 **Telegram · Discord · Slack · 飞书 · 钉钉 · QQ · 企业微信 · Matrix · 邮件 · Mochat**。
+Nowledge 为可选记忆后端：
 
 ```json
 {
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "token": "你的BotToken",
-      "allowFrom": ["你的用户ID"]
-    }
+  "memory": {
+    "enabled": true,
+    "apiUrl": "http://127.0.0.1:14242",
+    "apiKey": "YOUR_NOWLEDGE_KEY",
+    "spaceId": "YOUR_SPACE_ID",
+    "autoInject": { "enabled": true }
   }
 }
 ```
 
-**4. 启动**
+凭证只放在本地配置中，不要提交到 Git、日志或工具返回值。
+
+启动本地 TUI：
 
 ```bash
-nanocat
+uv run nanocat tui --workdir ./data
 ```
 
-启动后即作为后台服务运行，用接入的聊天软件找它对话即可。工作区在 `~/.nanocat/workspace/`，记忆、技能、媒体都存在这里。
+启动配置中的网络渠道：
 
-**5. 常用对话命令**
+```bash
+uv run nanocat gateway --workdir ./data
+```
 
-| 命令                                     | 作用                         |
-| ---------------------------------------- | ---------------------------- |
-| `/session list` · `/session switch <id>` | 查看 / 切换会话              |
-| `/model <角色> <序号>`                   | 切换某个角色使用的模型       |
-| `/context`                               | 查看当前上下文用量           |
-| `/compact`                               | 手动整理压缩当前会话         |
-| `/status` · `/whoami`                    | 查看运行状态 / 身份信息      |
-| `/new` · `/stop` · `/restart`            | 新会话 / 停止当前任务 / 重启 |
+TUI 模式不会启动网络渠道；gateway 模式只启动配置中启用且通过 ACL 配置的渠道。可用渠道包括 Telegram、Discord、Slack、飞书、钉钉、QQ、企业微信、Mochat 和 Email。
 
----
+## 命令
 
-<p align="center"><sub>仅用于教育、研究与技术交流。基于 <a href="https://github.com/HKUDS/nanobot">nanobot</a>（MIT）。</sub></p>
+所有命令在 Provider 之前执行。`/help` 可查看当前注册命令及参数。
+
+| 命令 | 作用 |
+| --- | --- |
+| `/help [command\|group]` | 查看命令帮助 |
+| `/logs [N]` | 查看最近 N 行运行日志 |
+| `/new` `/stop` `/restart` `/whoami` | 新会话、停止任务、重启运行时、查看身份 |
+| `/model` | 查看模型；支持 `add`、`delete`、`agent`、`subagent`、`assistant` 和 `effort` |
+| `/model effort auto\|low\|medium\|high\|xhigh\|max` | 设置思考强度 |
+| `/compact` `/compact status` | 手动压缩会话；查看上下文预算和压缩状态 |
+| `/session list\|use\|delete` | 查看、切换和删除会话 |
+| `/memory status\|spaces\|search\|show\|add\|update\|delete\|preview\|distill\|processing` | 管理 Nowledge 记忆 |
+| `/cron list\|show\|add\|remove\|run\|enable\|disable` | 管理定时任务 |
+| `/approve once\|turn` | 批准当前操作一次或直到当前轮结束 |
+| `/approve forever\|cancel` | 启用或撤销当前会话的会话级授权 |
+| `/deny` | 拒绝当前敏感操作；`/reject` 为别名 |
+
+`/compact status` 已包含上下文状态查询，不再使用独立的 `/context` 命令。TUI 中的 `AUTO/YOLO` 切换对应会话级审批状态。
+
+## 开发
+
+```bash
+uv sync --extra dev --extra tui
+uv run ruff check nanocat
+```
+
+项目许可证为 [MIT](LICENSE)。
