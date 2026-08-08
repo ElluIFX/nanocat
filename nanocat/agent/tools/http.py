@@ -1,5 +1,5 @@
 """Structured HTTP request tool — method/headers/json → JSON {status, headers,
-body}, without the curl-via-exec quoting pain. SSRF-guarded like the web tools.
+body}, without the curl-via-exec quoting pain.
 
 Beyond one-shot requests it supports:
 - in-memory cookie sessions (`session`/`session_id`) — a persistent httpx client
@@ -74,16 +74,9 @@ class HttpRequestTool(Tool):
         self,
         manager: HttpSessionManager,
         proxy: str | None = None,
-        safety_check: bool = True,
     ):
         self._mgr = manager
         self._proxy = proxy
-        self._safety_check = safety_check
-
-    def _safety_enabled(self) -> bool:
-        from nanocat.config.loader import get_runtime_config
-
-        return self._safety_check and get_runtime_config().tools.global_safty_check
 
     @property
     def name(self) -> str:
@@ -145,14 +138,6 @@ class HttpRequestTool(Tool):
         stream: bool = False,
         **kwargs: Any,
     ) -> str:
-        from nanocat.security.network import validate_resolved_url, validate_url_target
-
-        safety_check = self._safety_enabled()
-        if safety_check:
-            ok, err = validate_url_target(url)
-            if not ok:
-                return json.dumps({"ok": False, "error": "blocked URL", "detail": err})
-
         use_session = session or bool(session_id)
 
         if stream:
@@ -197,11 +182,6 @@ class HttpRequestTool(Tool):
         finally:
             for h in handles:
                 h.close()
-
-        if safety_check:
-            ok, err = validate_resolved_url(str(resp.url))
-            if not ok:
-                return json.dumps({"ok": False, "error": "redirect blocked", "detail": err})
 
         text = resp.text
 
@@ -265,8 +245,6 @@ class HttpRequestTool(Tool):
         timeout: float,
         path: str,
     ) -> None:
-        from nanocat.security.network import validate_resolved_url
-
         content = body if json_body is None else None
         try:
             async with client.stream(
@@ -277,12 +255,6 @@ class HttpRequestTool(Tool):
                 content=content,
                 timeout=timeout,
             ) as resp:
-                if self._safety_enabled():
-                    ok, err = validate_resolved_url(str(resp.url))
-                    if not ok:
-                        with open(path, "w", encoding="utf-8") as f:
-                            f.write(f"[blocked redirect: {err}]")
-                        return
                 with open(path, "wb") as f:
                     async for chunk in resp.aiter_bytes():
                         f.write(chunk)

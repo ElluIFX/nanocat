@@ -14,7 +14,6 @@ import weakref
 from collections import deque
 from dataclasses import replace
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 
 from loguru import logger
@@ -274,7 +273,6 @@ class AgentLoop:
             SecurityPolicy(
                 config,
                 self.workspace,
-                extra_allowed_dirs=(Path(tempfile.gettempdir()),),
             ),
             intervention_broker,
             max_concurrent_calls=runtime_limits.max_concurrent_tool_calls,
@@ -327,16 +325,8 @@ class AgentLoop:
         return self._config.tools.web.proxy
 
     @property
-    def web_safety_check(self) -> bool:
-        return self._config.tools.global_safty_check and self._config.tools.web.safety_check
-
-    @property
     def cmd_config(self):
         return self._config.tools.cmd
-
-    @property
-    def filesystem_config(self):
-        return self._config.tools.filesystem
 
     @property
     def tips(self):
@@ -361,7 +351,6 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        extra_read = [Path(tempfile.gettempdir())]
         self.tools.register(ContextLookupTool(self.context_artifacts))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         if self._config.tools.enabled_builtin_tools.ask:
@@ -385,16 +374,12 @@ class AgentLoop:
                 self.tools.register(
                     cls(
                         workspace=self.workspace,
-                        extra_allowed_dirs=extra_read,
-                        filesystem_config=self._config.tools.filesystem,
                     )
                 )
         self._reg(
             DeleteTool(
                 workspace=self.workspace,
-                extra_allowed_dirs=extra_read,
                 force_to_trash=self._config.tools.filesystem.force_del_to_trash,
-                filesystem_config=self._config.tools.filesystem,
             )
         )
 
@@ -405,8 +390,6 @@ class AgentLoop:
                 self.tools.register(
                     LoadImageTool(
                         workspace=self.workspace,
-                        extra_allowed_dirs=extra_read,
-                        filesystem_config=self._config.tools.filesystem,
                         vision_model=self.model,
                     )
                 )
@@ -428,23 +411,16 @@ class AgentLoop:
                 timeout=self.cmd_config.timeout,
                 path_append=self.cmd_config.path_append or None,
                 env=self.cmd_config.env or None,
-                deny_regex=self.cmd_config.deny_regex or None,
-                allow_regex=self.cmd_config.allow_regex or None,
             )
         )
         self._reg(
             WebSearchTool(
                 config=self.web_search_config,
                 proxy=self.web_proxy,
-                safety_check=self.web_safety_check,
             )
         )
-        self._reg(WebFetchTool(proxy=self.web_proxy, safety_check=self.web_safety_check))
-        self._reg(
-            HttpRequestTool(
-                self.http_sessions, proxy=self.web_proxy, safety_check=self.web_safety_check
-            )
-        )
+        self._reg(WebFetchTool(proxy=self.web_proxy))
+        self._reg(HttpRequestTool(self.http_sessions, proxy=self.web_proxy))
         self._reg(WaitTool(send_callback=self.bus.publish_outbound))
         self._reg(TodoTool(send_callback=self.bus.publish_outbound))
         if self._config.tools.enabled_builtin_tools.subagent_tools:

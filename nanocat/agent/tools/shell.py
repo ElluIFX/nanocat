@@ -13,8 +13,6 @@ import sys
 import time
 from typing import Any
 
-from loguru import logger
-
 from nanocat.agent.tools.base import Tool, exc_message
 
 
@@ -46,23 +44,13 @@ class ExecTool(Tool):
         self,
         timeout: int = 60,
         working_dir: str | None = None,
-        workspace_dir: str | None = None,
-        deny_regex: list[str] | None = None,
-        allow_regex: list[str] | None = None,
         path_append: list[str] | None = None,
         env: dict[str, str] | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
-        self.workspace_dir = workspace_dir or working_dir
         self.path_append = path_append or []
         self.extra_env = env or {}
-
-        # Legacy constructor arguments remain accepted for compatibility. The
-        # runtime policy now owns command rules per runtime instead of mutating
-        # process-global guard state from each tool instance.
-        self._deny_regex = tuple(deny_regex or ())
-        self._allow_regex = tuple(allow_regex or ())
 
     @property
     def name(self) -> str:
@@ -139,23 +127,8 @@ class ExecTool(Tool):
         shell: bool = True,
         **kwargs: Any,
     ) -> str:
-        from nanocat.security.command import guard_command
-
         cwd = working_dir or self.working_dir or os.getcwd()
-
-        authorization = kwargs.pop("_security_authorization", None)
-        if authorization is None:
-            error = guard_command(
-                command,
-                cwd=cwd,
-                workspace=self.workspace_dir or cwd,
-                on_blocked=self._on_blocked,
-            )
-            if error:
-                return json.dumps(
-                    {"ok": False, "stdout": "", "stderr": error, "returncode": -1},
-                    ensure_ascii=False,
-                )
+        kwargs.pop("_security_authorization", None)
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
 
@@ -257,17 +230,3 @@ class ExecTool(Tool):
                 process.kill()
             except Exception:
                 pass
-
-    def _on_blocked(self, command: str, category: str, shell_type: str, reason: str) -> bool:
-        """Hook called when a command is about to be blocked.
-
-        Return True to temporarily allow the command.
-        """
-        logger.warning(
-            "[SHELL BLOCKED] category={} shell={} reason={} | command: {!r}",
-            category,
-            shell_type,
-            reason,
-            command,
-        )
-        return False

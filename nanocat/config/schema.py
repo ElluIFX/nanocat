@@ -35,6 +35,7 @@ class AgentDefaults(Base):
     model_config = ConfigDict(extra="ignore")
 
     model: str = "openai/gpt-4o"
+    reasoning_effort: str | None = None  # low / medium / high / xhigh / max
     assistant_model: str | None = (
         None  # lightweight model for auxiliary tasks (memory, evaluate, heartbeat); None = use model
     )
@@ -44,12 +45,14 @@ class AgentDefaults(Base):
     vision_model: str | None = (
         None  # model for ParseImageTool / adaptive image loading; None → assistant_model → model
     )
-    pulse_enabled: bool = False  # enable <pulse> internal emotional reflection
+    compaction_model: str | None = None  # independent low-cost model for session compaction
+    # Deprecated compatibility field: accepted from old configs but ignored at runtime.
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     max_tokens: int | None = 8192
     context_window_tokens: int = 65_536
     temperature: float | None = None
     max_tool_iterations: int = 40
+    compaction_enabled: bool = True
     compaction_threshold: float = Field(
         default=0.5,
         ge=0.05,
@@ -62,18 +65,7 @@ class AgentDefaults(Base):
         le=1000,
         description="Keep this many recent completed turns uncompressed.",
     )
-    compaction_enabled: bool = True
-    compaction_model: str | None = None  # independent low-cost model for session compaction
-    # Deprecated compatibility field: accepted from old configs but ignored at runtime.
-    memory_window: int | None = Field(default=None, exclude=True)
-    reasoning_effort: str | None = None  # low / medium / high / xhigh / max
-
-    @property
-    def should_warn_deprecated_memory_window(self) -> bool:
-        """Return True when old memoryWindow is present without contextWindowTokens."""
-        return (
-            self.memory_window is not None and "context_window_tokens" not in self.model_fields_set
-        )
+    pulse_enabled: bool = False
 
 
 class AgentsConfig(Base):
@@ -157,7 +149,6 @@ class WebSearchConfig(Base):
 class WebToolsConfig(Base):
     """Web tools configuration."""
 
-    safety_check: bool = True  # If false, skip SSRF and URL validation checks
     proxy: str | None = (
         None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     )
@@ -167,25 +158,26 @@ class WebToolsConfig(Base):
 class CmdToolConfig(Base):
     """Command tool configuration, shared by the exec and proc tools."""
 
-    safety_check: bool = True  # If false, skip command safety guard checks
     timeout: int = 60  # exec only (proc is long-lived)
     path_append: list[str] = Field(default_factory=list)  # dirs appended to exec/proc child PATH
     env: dict[str, str] = Field(default_factory=dict)  # extra env injected into exec/proc children
-    deny_regex: list[str] = Field(default_factory=list)  # extra command-guard deny patterns
-    allow_regex: list[str] = Field(default_factory=list)  # command-guard strict allow-list
-    # Confine exec/proc command paths to the working dir (enforced by the command guard).
-    restrict_to_workspace: bool = False
 
 
 class FilesystemToolConfig(Base):
     """Filesystem tool configuration."""
 
-    safety_check: bool = True  # If false, skip path restriction checks
     force_del_to_trash: bool = True  # delete tool only trashes; hides the permanent option
-    # Confine file tools (read/write/edit/delete/list/...) to the workspace boundary.
-    restrict_to_workspace: bool = False
-    deny_regex: list[str] = Field(default_factory=list)  # block file tools on matching paths
-    allow_regex: list[str] = Field(default_factory=list)  # strict allow-list for file-tool paths
+
+
+class ToolsPolicyConfig(Base):
+    """Runtime-wide tool security policy configuration."""
+
+    safty_check: bool = True
+    safty_safe_tool: list[str] = Field(default_factory=list)
+    safty_allow_regex: list[str] = Field(default_factory=list)
+    safty_deny_regex: list[str] = Field(default_factory=list)
+    restrict_path_to_workspace: bool = False
+    restrict_url_outside_local: bool = False
 
 
 class MCPServerConfig(Base):
@@ -215,7 +207,9 @@ class EnabledBuiltinToolsConfig(Base):
     web_search: bool = True
     web_fetch: bool = True
     wait: bool = True
-    ask: bool = True  # ask tool: pause mid-turn to block for a user reply (needs an interactive channel)
+    ask: bool = (
+        True  # ask tool: pause mid-turn to block for a user reply (needs an interactive channel)
+    )
     todo: bool = True
     subagent_tools: bool = True
     ssh_tools: bool = False  # SSH tools (ssh_open/send/read/close/list)
@@ -228,9 +222,7 @@ class ToolsConfig(Base):
     """Tools configuration."""
 
     max_return_chars: int = 10000  # Truncate tool results exceeding this; 0 = no limit
-    # Deliberately uses the public spelling ``globalSaftyCheck`` for compatibility.
-    # When false, all runtime security checks and approval gates are bypassed.
-    global_safty_check: bool = True
+    policy: ToolsPolicyConfig = Field(default_factory=ToolsPolicyConfig)
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     cmd: CmdToolConfig = Field(default_factory=CmdToolConfig)
     filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)
@@ -415,4 +407,4 @@ class Config(BaseSettings):
                 return spec.default_api_base
         return None
 
-    model_config = ConfigDict(env_prefix="NANOCAT_", env_nested_delimiter="__") # pyright: ignore
+    model_config = ConfigDict(env_prefix="NANOCAT_", env_nested_delimiter="__")  # pyright: ignore

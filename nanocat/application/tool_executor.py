@@ -327,6 +327,21 @@ class ToolExecutor:
             reason = "user rejected the sensitive operation"
         elif code == "security_batch_aborted":
             reason = "another tool call in the same batch was not executed"
+        if code == "security_intervention_rejected":
+            guidance = (
+                "The user explicitly rejected this tool call. Do not try to bypass "
+                "the approval. If the operation is necessary, stop, explain why to "
+                "the user, and ask whether the command should be modified."
+            )
+        elif code == "security_policy_denied":
+            guidance = (
+                "The security policy rejected this tool call. Do not try to bypass "
+                "the approval or evade the policy with another tool. If the operation "
+                "is necessary, stop, explain why to the user, and ask whether the "
+                "command should be modified."
+            )
+        else:
+            guidance = None
         payload: dict[str, Any] = {
             "ok": False,
             "error": {
@@ -342,6 +357,8 @@ class ToolExecutor:
                 "retryable": False,
             },
         }
+        if guidance:
+            payload["error"]["guidance"] = guidance
         if code == "security_intervention_rejected" and decision.reason:
             payload["error"]["policy_reason"] = decision.reason
         if state:
@@ -361,7 +378,10 @@ class ToolExecutor:
             + timedelta(seconds=self._intervention.default_timeout_seconds),
             resume_mode=ResumeMode.RETRY_CALL,
             tool_call_id=uuid4().hex,
-            metadata={"tool_name": decision.metadata.get("tool_name")},
+            metadata={
+                "tool_name": decision.metadata.get("tool_name"),
+                "tool_params": decision.metadata.get("tool_params"),
+            },
         )
         if context.state_hook is not None:
             context.state_hook(TurnState.WAITING_FOR_USER)

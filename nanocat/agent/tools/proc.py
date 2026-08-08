@@ -151,13 +151,9 @@ class ProcStartTool(Tool):
         **kwargs: Any,
     ) -> str:
         from nanocat.agent.tools.shell import build_command_env
-        from nanocat.security.command import guard_command
 
         run_cwd = cwd or self._working_dir
-        if kwargs.pop("_security_authorization", None) is None:
-            error = guard_command(command, cwd=run_cwd, workspace=self._working_dir)
-            if error:
-                return error
+        kwargs.pop("_security_authorization", None)
         env = build_command_env(self._env, self._path_append)
         return await self._mgr.start(command, run_cwd, cols, rows, env=env)
 

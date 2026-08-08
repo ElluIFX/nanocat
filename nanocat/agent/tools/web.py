@@ -8,14 +8,11 @@ import json
 import os
 import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
 import httpx
 from loguru import logger
 
 from nanocat.agent.tools.base import Tool, exc_message, tool_err, tool_ok
-
-_SECURITY_HINT = "The runtime network security policy blocked this request."
 
 if TYPE_CHECKING:
     from nanocat.config.schema import WebSearchConfig
@@ -40,26 +37,6 @@ def _normalize(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL scheme/domain. Does NOT check resolved IPs (use _validate_url_safe for that)."""
-    try:
-        p = urlparse(url)
-        if p.scheme not in ("http", "https"):
-            return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
-        if not p.netloc:
-            return False, "Missing domain"
-        return True, ""
-    except Exception as e:
-        return False, str(e)
-
-
-def _validate_url_safe(url: str) -> tuple[bool, str]:
-    """Validate URL with SSRF protection: scheme, domain, and resolved IP check."""
-    from nanocat.security.network import validate_url_target
-
-    return validate_url_target(url)
-
-
 def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
     """Format provider results into the shared JSON tool envelope (content holds
     the human-readable list)."""
@@ -81,18 +58,11 @@ class WebSearchTool(Tool):
         self,
         config: WebSearchConfig | None = None,
         proxy: str | None = None,
-        safety_check: bool = True,
     ):
         from nanocat.config.schema import WebSearchConfig
 
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
-        self._safety_check = safety_check
-
-    def _safety_enabled(self) -> bool:
-        from nanocat.config.loader import get_runtime_config
-
-        return self._safety_check and get_runtime_config().tools.global_safty_check
 
     @property
     def name(self) -> str:
@@ -185,10 +155,6 @@ class WebSearchTool(Tool):
             logger.warning("SEARXNG_BASE_URL not set, falling back to DuckDuckGo")
             return await self._search_duckduckgo(query, n)
         endpoint = f"{base_url.rstrip('/')}/search"
-        check = _validate_url_safe if self._safety_enabled() else _validate_url
-        is_valid, error_msg = check(endpoint)
-        if not is_valid:
-            return tool_err(f"invalid SearXNG URL: {error_msg}")
         try:
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
@@ -257,16 +223,9 @@ class WebFetchTool(Tool):
         self,
         max_chars: int = 50000,
         proxy: str | None = None,
-        safety_check: bool = True,
     ):
         self.max_chars = max_chars
         self.proxy = proxy
-        self._safety_check = safety_check
-
-    def _safety_enabled(self) -> bool:
-        from nanocat.config.loader import get_runtime_config
-
-        return self._safety_check and get_runtime_config().tools.global_safty_check
 
     @property
     def name(self) -> str:
@@ -297,13 +256,6 @@ class WebFetchTool(Tool):
         self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any
     ) -> str:
         max_chars = max_chars or self.max_chars
-        if self._safety_enabled():
-            is_valid, error_msg = _validate_url_safe(url)
-        else:
-            is_valid, error_msg = _validate_url(url)
-        if not is_valid:
-            return tool_err(f"URL validation failed: {error_msg}", hint=_SECURITY_HINT, url=url)
-
         result = await self._fetch_jina(url, max_chars)
         if result is None:
             result = await self._fetch_readability(url, extract_mode, max_chars)
@@ -360,13 +312,6 @@ class WebFetchTool(Tool):
             ) as client:
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
-
-            from nanocat.security.network import validate_resolved_url
-
-            if self._safety_enabled():
-                redir_ok, redir_err = validate_resolved_url(str(r.url))
-                if not redir_ok:
-                    return tool_err(f"Redirect blocked: {redir_err}", hint=_SECURITY_HINT, url=url)
 
             ctype = r.headers.get("content-type", "")
 

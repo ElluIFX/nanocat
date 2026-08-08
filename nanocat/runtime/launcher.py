@@ -93,15 +93,6 @@ def configure_logging(verbose: bool = False, local_mode: bool = False) -> int:
     return file_sink_id
 
 
-def warn_deprecated_memory_window(config: Config) -> None:
-    """Warn when running with old memoryWindow-only config."""
-    if config.agents.defaults.should_warn_deprecated_memory_window:
-        logger.warning(
-            "Deprecated 'memoryWindow' detected without 'contextWindowTokens'; "
-            "memoryWindow is ignored. Refresh your config template if needed."
-        )
-
-
 def build_runtime(
     *,
     workdir: str | None = None,
@@ -118,7 +109,6 @@ def build_runtime(
     paths = RuntimePaths.from_config_path(get_config_path(), workspace=config.workspace_path)
     config_snapshot = ConfigSnapshot(config=config, paths=paths)
     log_sink_id = configure_logging(verbose=verbose, local_mode=local_mode)
-    warn_deprecated_memory_window(config)
     sync_workspace_templates(config.workspace_path, silent=True)
 
     bus = MessageBus()

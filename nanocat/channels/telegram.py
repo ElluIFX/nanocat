@@ -20,7 +20,6 @@ from nanocat.channels.base import BaseChannel
 from nanocat.config.paths import get_media_dir
 from nanocat.config.schema import Base
 from nanocat.core.ports import ChannelCapabilities
-from nanocat.security.network import validate_url_target
 from nanocat.utils.helpers import split_message
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
@@ -272,9 +271,6 @@ class TelegramChannel(BaseChannel):
 
                 # Telegram Bot API accepts HTTP(S) URLs directly for media params.
                 if self._is_remote_media_url(media_path):
-                    ok, error = validate_url_target(media_path)
-                    if not ok:
-                        raise ValueError(f"unsafe media URL: {error}")
                     await sender(
                         chat_id=chat_id,
                         **{param: media_path},

@@ -1,9 +1,4 @@
-"""Path containment and resolution utilities.
-
-These helpers are deterministic guards used by both the policy layer and
-legacy tool implementations. Authorization is decided by the application
-executor; the helpers do not carry mutable approval state.
-"""
+"""Pure path parsing and resolution helpers used by the security policy."""
 
 from __future__ import annotations
 
@@ -13,7 +8,7 @@ from pathlib import Path
 
 
 def is_under(path: Path, directory: Path) -> bool:
-    """Return True when *path* is inside (or equal to) *directory*."""
+    """Return whether *path* is inside (or equal to) *directory*."""
     try:
         path.resolve().relative_to(directory.resolve())
         return True
@@ -35,23 +30,6 @@ def resolve_path(
         base = workspace or cwd or Path.cwd()
         p = base / p
     return p.resolve()
-
-
-def check_path_containment(
-    path: str | Path,
-    workspace: Path,
-    cwd: Path | None = None,
-) -> str | None:
-    """Return an error string if *path* escapes *workspace*, else None."""
-    p = Path(path).expanduser()
-    if not p.is_absolute():
-        base = workspace or cwd or Path.cwd()
-        p = base / p
-    p = p.resolve()
-
-    if not p.is_relative_to(workspace.resolve()):
-        return f"Path '{path}' is outside the workspace directory."
-    return None
 
 
 def extract_path_args(command: str) -> list[str]:
@@ -81,7 +59,7 @@ def extract_path_args(command: str) -> list[str]:
 
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute path-like strings from a command."""
-    win = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)
+    win = re.findall(r"[A-Za-z]:[\\/][^\s\"'|><;]+", command)
     home = re.findall(r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command)
     # POSIX-style "/abs/path" only applies off Windows. On Windows a leading
     # "/" token is a command flag (e.g. Everything's /ad, /a-d; cmd's /F), not a

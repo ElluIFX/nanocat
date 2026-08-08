@@ -5,7 +5,6 @@ import difflib
 import glob
 import json
 import mimetypes
-import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -19,68 +18,20 @@ _err = tool_err  # local alias to keep error call sites short
 def _resolve_path(
     path: str,
     workspace: Path | None = None,
-    extra_allowed_dirs: list[Path] | None = None,
-    filesystem_config: Any | None = None,
 ) -> Path:
-    """Resolve path against workspace (if relative) and enforce directory restriction.
-
-    The workspace is always the default containment boundary.
-    *extra_allowed_dirs* grant ADDITIONAL access beyond the workspace.
-    """
-    from nanocat.config.loader import get_runtime_config
-    from nanocat.security.path import is_under
-
+    """Resolve a path against the workspace without applying security policy."""
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
-    resolved = p.resolve()
-
-    runtime_config = get_runtime_config()
-    fs_cfg = filesystem_config or runtime_config.tools.filesystem
-    if runtime_config.tools.global_safty_check and fs_cfg.safety_check:
-        # Path-pattern guard: matched against the resolved path, normalized to
-        # forward slashes and lowercased (so patterns are cross-platform).
-        target = str(resolved).replace("\\", "/").lower()
-        if fs_cfg.allow_regex and not any(re.search(rx, target) for rx in fs_cfg.allow_regex):
-            raise PermissionError(
-                f"Path '{path}' is not in the filesystem allow-list."
-            )
-        for rx in fs_cfg.deny_regex:
-            if re.search(rx, target):
-                raise PermissionError(
-                    f"Path '{path}' is blocked by a filesystem deny pattern."
-                )
-        if fs_cfg.restrict_to_workspace:
-            boundaries: list[Path] = []
-            if workspace:
-                boundaries.append(workspace.resolve())
-            if extra_allowed_dirs:
-                boundaries.extend(d.resolve() for d in extra_allowed_dirs)
-            if boundaries and not any(is_under(resolved, d) for d in boundaries):
-                raise PermissionError(
-                    f"Path '{path}' is outside the workspace directory."
-                )
-    return resolved
+    return p.resolve()
 
 
 class _FsTool(Tool):
-    def __init__(
-        self,
-        workspace: Path | None = None,
-        extra_allowed_dirs: list[Path] | None = None,
-        filesystem_config: Any | None = None,
-    ):
+    def __init__(self, workspace: Path | None = None):
         self._workspace = workspace
-        self._extra_allowed_dirs = extra_allowed_dirs
-        self._filesystem_config = filesystem_config
 
     def _resolve(self, path: str) -> Path:
-        return _resolve_path(
-            path,
-            self._workspace,
-            self._extra_allowed_dirs,
-            self._filesystem_config,
-        )
+        return _resolve_path(path, self._workspace)
 
 
 # ---------------------------------------------------------------------------
@@ -901,11 +852,9 @@ class DeleteTool(_FsTool):
     def __init__(
         self,
         workspace: Path | None = None,
-        extra_allowed_dirs: list[Path] | None = None,
         force_to_trash: bool = True,
-        filesystem_config: Any | None = None,
     ):
-        super().__init__(workspace, extra_allowed_dirs, filesystem_config)
+        super().__init__(workspace)
         self._force_to_trash = force_to_trash
 
     @property
@@ -918,7 +867,7 @@ class DeleteTool(_FsTool):
             "Delete files and/or directories, sending them to the system recycle bin "
             "(recoverable). Use this instead of rm/del/Remove-Item in exec. Each entry in "
             "`paths` is a literal path or a glob pattern (*, ?, [...], ** for recursive). "
-            "Matches outside the workspace are skipped."
+            "Matches are processed in path order."
         )
         if not self._force_to_trash:
             base += " Set permanent=true to delete irreversibly (requires approval)."
@@ -948,16 +897,8 @@ class DeleteTool(_FsTool):
             }
         return {"type": "object", "properties": props, "required": ["paths"]}
 
-    def _boundaries(self) -> list[Path]:
-        bounds: list[Path] = []
-        if self._workspace:
-            bounds.append(self._workspace.resolve())
-        if self._extra_allowed_dirs:
-            bounds.extend(d.resolve() for d in self._extra_allowed_dirs)
-        return bounds
-
     def _expand(self, entry: str) -> tuple[list[Path], dict[str, Any] | None]:
-        """Resolve a literal path or expand a glob, enforcing the workspace guard."""
+        """Resolve a literal path or expand a glob."""
         if any(c in entry for c in "*?["):
             raw = Path(entry).expanduser()
             pattern = str(
@@ -965,29 +906,17 @@ class DeleteTool(_FsTool):
             )
             matched: list[Path] = []
             for hit in glob.glob(pattern, recursive=True):
-                try:
-                    matched.append(self._resolve(hit))  # skip out-of-workspace matches
-                except PermissionError:
-                    continue
+                matched.append(self._resolve(hit))
             if not matched:
                 return [], {"error": f"No paths matched pattern: {entry}"}
             return matched, None
 
-        try:
-            fp = self._resolve(entry)
-        except PermissionError as e:
-            return [], {"error": str(e)}
+        fp = self._resolve(entry)
         if not fp.exists() and not fp.is_symlink():
             return [], {"error": f"Path not found: {entry}"}
         return [fp], None
 
     def _delete_one(self, fp: Path, to_trash: bool, recursive: bool) -> dict[str, Any]:
-        if fp in self._boundaries():
-            return {
-                "ok": False,
-                "error": f"Refusing to delete a protected root directory: {fp}",
-                "hint": "Delete its contents individually instead.",
-            }
         if not fp.exists() and not fp.is_symlink():
             return {"ok": False, "error": f"Path not found: {fp}"}
         is_dir = fp.is_dir() and not fp.is_symlink()
@@ -1066,24 +995,6 @@ class DeleteTool(_FsTool):
         # Resolve the deletion mode. Trash is forced, or permanent needs approval.
         if self._force_to_trash:
             permanent = False
-        elif permanent:
-            from nanocat.config.loader import get_runtime_config
-            from nanocat.security import ToolAuthorization
-
-            runtime_config = get_runtime_config()
-            if self._filesystem_config is not None:
-                safety_check = self._filesystem_config.safety_check
-            else:
-                safety_check = runtime_config.tools.filesystem.safety_check
-            safety_check = runtime_config.tools.global_safty_check and safety_check
-            if (
-                safety_check
-                and not isinstance(kwargs.get("_security_authorization"), ToolAuthorization)
-            ):
-                return _err(
-                    "Permanent deletion is blocked by the runtime security policy.",
-                    "Omit permanent to send the targets to the recycle bin instead.",
-                )
 
         candidates: list[Path] = []
         failed: list[dict[str, Any]] = []

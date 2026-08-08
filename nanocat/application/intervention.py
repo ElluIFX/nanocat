@@ -172,9 +172,15 @@ def parse_intervention_action(text: str) -> ParsedInterventionAction | None:
 def intervention_prompt(request: InterventionRequest) -> str:
     """Build a scheduler-owned, credential-free prompt for any text channel."""
     expires = request.expires_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    tool_name = str(request.metadata.get("tool_name") or "unknown")
+    tool_params = str(request.metadata.get("tool_params") or "{}")
+    tool_name = tool_name.replace("`", "'")
+    tool_params = tool_params.replace("`", "'")
     return (
         "## Sensitive operation requires your decision\n\n"
         f"- **Capability:** `{request.capability}`\n\n"
+        f"- **Tool:** `{tool_name}`\n\n"
+        f"- **Parameters:** `{tool_params}`\n\n"
         f"- **Operation:** {request.summary}\n\n"
         f"- **Expires:** {expires}\n\n"
         "## Actions\n\n"
@@ -207,6 +213,8 @@ def make_bus_presenter(
                         "request_id": request.request_id,
                         "capability": request.capability,
                         "operation": request.summary,
+                        "tool_name": request.metadata.get("tool_name"),
+                        "tool_params": request.metadata.get("tool_params"),
                         "expires_at": request.expires_at.isoformat(),
                     },
                     request_id=request.request_id,

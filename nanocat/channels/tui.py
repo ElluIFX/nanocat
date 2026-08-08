@@ -107,7 +107,10 @@ _BOT_BORDER = "green"
 _SUBAGENT_BORDER = "yellow"
 _APPROVAL_BORDER = "bright_yellow"
 
-_INTERVENTION_FIELD_RE = re.compile(r"^(Capability|Operation|Expires):\s*(.*)$", re.MULTILINE)
+_INTERVENTION_FIELD_RE = re.compile(
+    r"^(Capability|Tool|Parameters|Operation|Expires):\s*(.*)$",
+    re.MULTILINE,
+)
 _SENSITIVE_DISPLAY_RE = re.compile(
     r"(?i)(authorization|cookie|password|passwd|secret|token|api[-_ ]?key)\s*[:=]\s*[^\s,;]+"
 )
@@ -241,6 +244,13 @@ def _intervention_payload(msg: OutboundMessage) -> dict[str, Any] | None:
         "request_id": request_id,
         "capability": _redact_intervention_text(
             metadata.get("capability") or fields.get("Capability")
+        ),
+        "tool_name": _redact_intervention_text(
+            metadata.get("tool_name") or fields.get("Tool")
+        ),
+        "tool_params": _redact_intervention_text(
+            metadata.get("tool_params") or fields.get("Parameters"),
+            limit=4000,
         ),
         "operation": _redact_intervention_text(
             metadata.get("operation") or fields.get("Operation")
@@ -532,6 +542,8 @@ if _TEXTUAL_OK:
             super().__init__(classes="approval-card")
             self.request_id = str(payload["request_id"])
             self.capability = str(payload.get("capability") or "unknown")
+            self.tool_name = str(payload.get("tool_name") or "unknown")
+            self.tool_params = str(payload.get("tool_params") or "{}")
             self.operation = str(payload.get("operation") or "Sensitive operation")
             self.expires = str(payload.get("expires") or "unknown")
             self.expires_at: datetime | None = payload.get("expires_at")
@@ -549,6 +561,8 @@ if _TEXTUAL_OK:
             text = Text()
             text.append("Sensitive operation requires approval", style="bold bright_yellow")
             text.append(f"\nCapability: {self.capability}")
+            text.append(f"\nTool: {self.tool_name}")
+            text.append(f"\nParameters: {self.tool_params}")
             text.append(f"\nOperation: {self.operation}")
             text.append(f"\nExpires: {self.expires}")
             return text
@@ -558,6 +572,8 @@ if _TEXTUAL_OK:
             if payload.get("expires_at") is not None:
                 self.expires_at = payload["expires_at"]
             self.capability = str(payload.get("capability") or self.capability)
+            self.tool_name = str(payload.get("tool_name") or self.tool_name)
+            self.tool_params = str(payload.get("tool_params") or self.tool_params)
             self.operation = str(payload.get("operation") or self.operation)
             self.expires = str(payload.get("expires") or self.expires)
             if self.is_attached:
