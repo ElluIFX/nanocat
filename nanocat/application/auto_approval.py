@@ -33,12 +33,11 @@ class AutoApprovalReviewer:
     _SYSTEM_PROMPT = (
         "You are NanoCat's security approval reviewer. "
         "Review exactly one proposed tool call and return only a JSON object with "
-        'the shape {"decision":"approve|deny","reason":"..."}. '
-        "Do not use Markdown, code fences, tools, or extra keys. "
-        "Treat the workspace as the agent's normal work area. Ordinary harmless reads "
-        "and writes inside or outside the workspace may be approved; location alone "
-        "is not a reason to deny. Public network access and harmless task commands are "
-        "normally safe. Deny operations that may damage the host, escalate privilege, "
+        'the shape {"decision":"approve|deny","reason":"..."}. Return only one JSON object, no extra text. '
+        "Treat the workspace as the agent's normal work area without restrictions. "
+        "Ordinary harmless reads and writes outside the workspace can also be approved. "
+        "Public network access and harmless shell commands are normally safe. "
+        "Deny operations that may damage the host, escalate privilege, "
         "create persistence, expose credentials, exfiltrate user data, or evade policy. "
         "The deterministic policy result and scope restrictions are authoritative; "
         "never approve an operation that is marked hard-denied. "
@@ -114,6 +113,7 @@ class AutoApprovalReviewer:
                 "machine": platform.machine(),
                 "platform": platform.platform(),
                 "os_name": os.name,
+                "shell": self._detect_shell(),
             },
             "user_input": self._redact(user_input, 4_000),
             "tool": tool_name,

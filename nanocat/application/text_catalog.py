@@ -41,6 +41,14 @@ class UserTextCatalog:
         "Review: {reason}\n\n"
         "Reply with `/approve` to run it once, or `/deny` to reject it."
     )
+    intervention_invalid: str = "Invalid approval command."
+    intervention_action_rejected: str = "Use `/approve` or `/deny` for this approval."
+    intervention_no_pending: str = "No pending approval."
+    intervention_approved: str = "Approved."
+    intervention_turn_approved: str = "Approved for this turn."
+    intervention_denied: str = "Denied."
+    intervention_yolo_enabled: str = "YOLO enabled. Use `/approve cancel` to disable."
+    intervention_yolo_disabled: str = "YOLO disabled."
     model_info: str = (
         "## 🐈 Model info\n\n"
         "- **Main Model:** `{agent_model}`\n\n"

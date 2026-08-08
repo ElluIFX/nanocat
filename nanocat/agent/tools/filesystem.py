@@ -5,6 +5,7 @@ import difflib
 import glob
 import json
 import mimetypes
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -873,6 +874,13 @@ class DeleteTool(_FsTool):
             base += " Set permanent=true to delete irreversibly (requires approval)."
         return base
 
+    def _resolve_delete_path(self, path: str) -> Path:
+        """Make a path absolute without resolving its final symlink target."""
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute() and self._workspace:
+            candidate = self._workspace / candidate
+        return Path(os.path.abspath(candidate))
+
     @property
     def parameters(self) -> dict[str, Any]:
         props: dict[str, Any] = {
@@ -900,18 +908,15 @@ class DeleteTool(_FsTool):
     def _expand(self, entry: str) -> tuple[list[Path], dict[str, Any] | None]:
         """Resolve a literal path or expand a glob."""
         if any(c in entry for c in "*?["):
-            raw = Path(entry).expanduser()
-            pattern = str(
-                raw if raw.is_absolute() or not self._workspace else self._workspace / raw
-            )
+            pattern = str(self._resolve_delete_path(entry))
             matched: list[Path] = []
             for hit in glob.glob(pattern, recursive=True):
-                matched.append(self._resolve(hit))
+                matched.append(self._resolve_delete_path(hit))
             if not matched:
                 return [], {"error": f"No paths matched pattern: {entry}"}
             return matched, None
 
-        fp = self._resolve(entry)
+        fp = self._resolve_delete_path(entry)
         if not fp.exists() and not fp.is_symlink():
             return [], {"error": f"Path not found: {entry}"}
         return [fp], None

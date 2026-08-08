@@ -1853,9 +1853,8 @@ class AgentLoop:
             result = CommandResult(
                 ok=False,
                 code=CommandErrorCode.INTERVENTION_NOT_FOUND,
-                title="Intervention response rejected",
-                message=action.error or "No pending intervention request.",
-                usage="/approve [once|turn|forever|cancel], /deny, or /reject",
+                title=USER_TEXT.intervention_invalid if action.error else USER_TEXT.intervention_no_pending,
+                message=action.error or "",
             )
             resolved = None
         elif (
@@ -1866,9 +1865,7 @@ class AgentLoop:
             result = CommandResult(
                 ok=False,
                 code=CommandErrorCode.INTERVENTION_NOT_FOUND,
-                title="Intervention response rejected",
-                message="This review accepts only `/approve` or `/deny`.",
-                usage="/approve or /deny",
+                title=USER_TEXT.intervention_action_rejected,
             )
             resolved = None
         else:
@@ -1879,26 +1876,21 @@ class AgentLoop:
             )
             accepted = resolved is not None
             if accepted and action.action is InterventionAction.REVOKE_SESSION:
-                title = "YOLO approval disabled"
-                message = "Session-wide tool approval is disabled immediately."
+                title = USER_TEXT.intervention_yolo_disabled
             elif accepted and action.action is InterventionAction.APPROVE_FOREVER:
-                title = "YOLO approval enabled"
-                message = "Session-wide tool approval is enabled until `/approve cancel`."
+                title = USER_TEXT.intervention_yolo_enabled
+            elif accepted and action.action is InterventionAction.APPROVE_TURN:
+                title = USER_TEXT.intervention_turn_approved
+            elif accepted and action.action is InterventionAction.REJECT:
+                title = USER_TEXT.intervention_denied
             elif accepted:
-                title = "Intervention response accepted"
-                message = "The scheduler accepted the response; the owning turn will resume."
+                title = USER_TEXT.intervention_approved
             else:
-                title = "Intervention response rejected"
-                message = "No matching pending intervention or session approval was found."
+                title = USER_TEXT.intervention_no_pending
             result = CommandResult(
                 ok=accepted,
                 code="ok" if accepted else CommandErrorCode.INTERVENTION_NOT_FOUND,
                 title=title,
-                message=message,
-                data={
-                    "intervention_action": action.action.value if action.action else "unknown",
-                    "intervention_state": resolved.state.value if resolved else "rejected",
-                },
             )
         mode = None
         if resolved is not None and accepted:
