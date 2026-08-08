@@ -113,6 +113,7 @@ class MemoryCompactor:
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         threshold: float = 0.5,
         no_compact_turns: int = 3,
+        enabled: bool = True,
         provider_resolver: Any | None = None,
         config: Any | None = None,
     ):
@@ -125,6 +126,7 @@ class MemoryCompactor:
         self.sessions = sessions
         self.threshold = threshold
         self.no_compact_turns = max(0, no_compact_turns)
+        self.enabled = enabled
         self._provider_resolver = provider_resolver
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
@@ -228,6 +230,7 @@ class MemoryCompactor:
             "completed_turns": len(
                 session.get_completed_turn_boundaries(start_idx=session.last_compacted)
             ),
+            "compaction_enabled": self.enabled,
             "compaction_available": self.pick_compaction_boundary(session) is not None,
             "compaction_model": self.model,
             "compaction_threshold": self.threshold,
@@ -442,6 +445,8 @@ class MemoryCompactor:
 
     async def maybe_compact_by_tokens(self, session: Session, force: bool = False) -> bool:
         """Compress older raw history into the session compacted memory."""
+        if not self.enabled and not force:
+            return False
         if not session.messages or self.context_window_tokens <= 0:
             return False
 
@@ -510,7 +515,6 @@ class MemoryCompactor:
 class NowledgeThreadManager:
     """Capture redacted session turns and synchronize them to one Nowledge Thread."""
 
-    _MAX_MSG_CHARS = 12_000
     _SENSITIVE_KEYWORDS = (
         "api_key",
         "apikey",
@@ -532,12 +536,22 @@ class NowledgeThreadManager:
         source: str = "nanocat",
         space_id: str | None = None,
         artifact_store: Any | None = None,
+        max_message_chars: int = 12_000,
+        auto_distill_enabled: bool = True,
+        distill_min_messages: int = 8,
+        distill_extraction_level: str = "guided",
+        distill_preferred_language: str = "zh",
     ):
         self._client = client
         self._sessions = sessions
         self._source = source
         self._space_id = space_id
         self._artifact_store = artifact_store
+        self._max_message_chars = max(512, int(max_message_chars))
+        self._auto_distill_enabled = auto_distill_enabled
+        self._distill_min_messages = max(1, int(distill_min_messages))
+        self._distill_extraction_level = distill_extraction_level
+        self._distill_preferred_language = distill_preferred_language
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     def _get_lock(self, session_key: str) -> asyncio.Lock:
@@ -592,18 +606,18 @@ class NowledgeThreadManager:
             text = self._text(content)
             if not text:
                 continue
-            if len(text) > self._MAX_MSG_CHARS and role == "tool" and self._artifact_store:
+            if len(text) > self._max_message_chars and role == "tool" and self._artifact_store:
                 text = self._artifact_store.capture(
                     session_key,
                     str(msg.get("name") or "tool"),
                     str(msg.get("tool_call_id")) if msg.get("tool_call_id") else None,
                     text,
                 )
-            elif len(text) > self._MAX_MSG_CHARS:
+            elif len(text) > self._max_message_chars:
                 text = (
-                    text[: self._MAX_MSG_CHARS // 2]
+                    text[: self._max_message_chars // 2]
                     + "\n...[message clipped by NanoCat]...\n"
-                    + text[-self._MAX_MSG_CHARS // 2 :]
+                    + text[-self._max_message_chars // 2 :]
                 )
             result.append({"role": role, "content": text})
 
@@ -679,17 +693,23 @@ class NowledgeThreadManager:
     async def append_turn_and_distill(self, session: Session, new_messages: list[dict]) -> None:
         """Synchronize a turn and opportunistically ask Nowledge to distill mature threads."""
         await self.append_turn(session, new_messages)
-        await self.distill_if_due(session)
+        if self._auto_distill_enabled:
+            await self.distill_if_due(session)
 
-    async def distill_if_due(self, session: Session, *, min_new_messages: int = 8) -> None:
+    async def distill_if_due(
+        self, session: Session, *, min_new_messages: int | None = None
+    ) -> None:
         """Run bounded triage/distill after enough new Thread messages accumulate."""
+        if not self._auto_distill_enabled:
+            return
+        threshold = self._distill_min_messages if min_new_messages is None else max(1, min_new_messages)
         lock = self._get_lock(session.key)
         async with lock:
             sync = session.metadata.get("_nowledge_thread_sync") or {}
             thread_id = sync.get("thread_id")
             acknowledged = int(sync.get("acked_source_index", 0) or 0)
             last_distilled = int(sync.get("last_distilled_source_index", 0) or 0)
-            if not thread_id or acknowledged - last_distilled < min_new_messages:
+            if not thread_id or acknowledged - last_distilled < threshold:
                 return
             formatted = self._format_messages(session.key, session.messages)
             content = "\n".join(f"{item['role']}: {item['content']}" for item in formatted)
@@ -700,7 +720,10 @@ class NowledgeThreadManager:
                     + content[-24_900:]
                 )
             try:
-                triage = await self._client.triage(content)
+                triage = await self._client.triage(
+                    content,
+                    preferred_language=self._distill_preferred_language,
+                )
                 worth_saving = triage.get(
                     "should_distill",
                     triage.get(
@@ -711,7 +734,8 @@ class NowledgeThreadManager:
                 if worth_saving is not False:
                     await self._client.distill(
                         thread_id,
-                        extraction_level="guided",
+                        extraction_level=self._distill_extraction_level,
+                        preferred_language=self._distill_preferred_language,
                         force_distill=False,
                     )
             except Exception as exc:

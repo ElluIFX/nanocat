@@ -137,6 +137,9 @@ class AgentLoop:
         self.context = ContextBuilder(
             config.workspace_path,
             nowledge_enabled=_mem.enabled,
+            nowledge_tools_enabled=(
+                _mem.enabled and config.tools.enabled_builtin_tools.memory_tools
+            ),
         )
         from nanocat.config.paths import get_sessions_dir
 
@@ -181,7 +184,20 @@ class AgentLoop:
 
         # Nowledge Mem integration (optional)
         self.nowledge_client: NowledgeClient | None = (
-            NowledgeClient(api_url=_mem.api_url, api_key=_mem.api_key, space_id=_mem.space_id)
+            NowledgeClient(
+                api_url=_mem.api_url,
+                api_key=_mem.api_key,
+                space_id=_mem.space_id,
+                source=_mem.thread_source,
+                preferred_language=_mem.distill_preferred_language,
+                request_timeout=_mem.request_timeout_s,
+                max_request_attempts=_mem.max_request_attempts,
+                retry_delay=_mem.retry_delay_s,
+                health_timeout=_mem.health_timeout_s,
+                health_cache_seconds=_mem.health_cache_seconds,
+                max_connections=_mem.max_connections,
+                max_keepalive_connections=_mem.max_keepalive_connections,
+            )
             if _mem.enabled
             else None
         )
@@ -192,13 +208,41 @@ class AgentLoop:
                 source=_mem.thread_source,
                 space_id=_mem.space_id,
                 artifact_store=self.context_artifacts,
+                max_message_chars=_mem.thread_message_max_chars,
+                auto_distill_enabled=_mem.auto_distill_enabled,
+                distill_min_messages=_mem.distill_min_messages,
+                distill_extraction_level=_mem.distill_extraction_level,
+                distill_preferred_language=_mem.distill_preferred_language,
             )
-            if self.nowledge_client
+            if self.nowledge_client and _mem.thread_capture_enabled
             else None
         )
         self.command_handlers = RuntimeCommandHandlers(
             self.cron_service,
             self.nowledge_client,
+            memory_settings={
+                "enabled": _mem.enabled,
+                "spaceId": _mem.space_id,
+                "threadSource": _mem.thread_source,
+                "threadCaptureEnabled": _mem.thread_capture_enabled,
+                "threadMessageMaxChars": _mem.thread_message_max_chars,
+                "autoDistillEnabled": _mem.auto_distill_enabled,
+                "distillMinMessages": _mem.distill_min_messages,
+                "distillExtractionLevel": _mem.distill_extraction_level,
+                "distillPreferredLanguage": _mem.distill_preferred_language,
+                "workingMemoryEnabled": _mem.working_memory_enabled,
+                "workingMemoryTimeoutS": _mem.working_memory_timeout_s,
+                "workingMemoryMaxChars": _mem.working_memory_max_chars,
+                "memoryToolsEnabled": config.tools.enabled_builtin_tools.memory_tools,
+                "autoInject": _mem.auto_inject.model_dump(by_alias=True),
+                "requestTimeoutS": _mem.request_timeout_s,
+                "maxRequestAttempts": _mem.max_request_attempts,
+                "retryDelayS": _mem.retry_delay_s,
+                "healthTimeoutS": _mem.health_timeout_s,
+                "healthCacheSeconds": _mem.health_cache_seconds,
+                "maxConnections": _mem.max_connections,
+                "maxKeepaliveConnections": _mem.max_keepalive_connections,
+            },
         )
         self.command_service = CommandService(
             self.command_router,
@@ -220,6 +264,7 @@ class AgentLoop:
             get_tool_definitions=self.tools.get_definitions,
             threshold=_defaults.compaction_threshold,
             no_compact_turns=_defaults.no_compact_history_num,
+            enabled=_defaults.compaction_enabled,
             provider_resolver=self._provider_resolver,
             config=config,
         )
@@ -436,7 +481,7 @@ class AgentLoop:
                 self.tools.register(tool)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
-        if self.nowledge_client:
+        if self.nowledge_client and self._config.tools.enabled_builtin_tools.memory_tools:
             from nanocat.agent.tools.nowledge import (
                 MemoryAddTool,
                 MemoryDeleteTool,
@@ -714,30 +759,35 @@ class AgentLoop:
         return any(marker in lowered for marker in markers)
 
     @classmethod
-    def _memory_search_eligible(cls, query: str) -> bool:
+    def _memory_search_eligible(cls, query: str, min_length: int = 4) -> bool:
         """Skip commands, acknowledgements, and empty chatter before searching."""
         text = query.strip()
         if not text or text.startswith("/"):
             return False
-        if len(text) < 4 and not cls._memory_recall_intent(text):
+        if len(text) < min_length and not cls._memory_recall_intent(text):
             return False
         return True
 
     async def _auto_inject_memories(self, query: str, session: Session) -> list[dict] | None:
         """Retrieve bounded Nowledge context before the provider call."""
         cfg = self._nowledge_auto_inject
-        if not cfg.enabled or not self.nowledge_client or not self._memory_search_eligible(query):
+        if (
+            not cfg.enabled
+            or not self.nowledge_client
+            or not self._memory_search_eligible(query, cfg.query_min_length)
+        ):
             return None
         recall_intent = self._memory_recall_intent(query)
         search_query = query.strip()
-        if recall_intent and len(search_query) < 24:
+        if recall_intent and len(search_query) < cfg.short_recall_max_length:
             previous = [
                 str(message.get("content") or "").strip()
                 for message in reversed(session.messages)
                 if message.get("role") == "user" and message.get("content")
-            ][:2]
+            ][: cfg.recall_context_messages]
             if previous:
-                search_query = "\n".join([*reversed(previous), search_query])[:2000]
+                search_query = "\n".join([*reversed(previous), search_query])[: cfg.query_max_length]
+        search_query = search_query[: cfg.query_max_length]
         mode = cfg.mode
         if mode == "auto":
             mode = "deep" if cfg.deep_on_recall and recall_intent else "fast"
@@ -790,24 +840,30 @@ class AgentLoop:
             seen.add(memory_id)
             recent_ids.append(memory_id)
         if cleaned:
-            session.metadata["_nowledge_auto_inject_ids"] = recent_ids[-32:]
+            session.metadata["_nowledge_auto_inject_ids"] = (
+                recent_ids[-cfg.dedupe_window :] if cfg.dedupe_window else []
+            )
             log = " / ".join(f"{mem['relevance'] * 100:.0f}%" for mem in cleaned)
             logger.debug("Auto-injected {} Nowledge memories ({})", len(cleaned), log)
         return cleaned or None
 
     async def _load_working_memory(self, session: Session) -> str | None:
         """Load Working Memory once per runtime session without blocking the turn budget."""
-        if not self.nowledge_client or session.key in self._nowledge_working_memory_loaded:
+        if (
+            not self.nowledge_client
+            or not self._config.memory.working_memory_enabled
+            or session.key in self._nowledge_working_memory_loaded
+        ):
             return None
         self._nowledge_working_memory_loaded.add(session.key)
         try:
             content = await asyncio.wait_for(
                 self.nowledge_client.get_working_memory(space_id=self._config.memory.space_id),
-                timeout=3.0,
+                timeout=self._config.memory.working_memory_timeout_s,
             )
             if not content:
                 return None
-            return content[:6_000]
+            return content[: self._config.memory.working_memory_max_chars]
         except (NowledgeRequestError, asyncio.TimeoutError) as exc:
             logger.debug("Nowledge Working Memory skipped for {}: {}", session.key, exc)
             return None
@@ -1690,6 +1746,7 @@ class AgentLoop:
             uncompacted_percent=status["uncompacted_percent"],
             history_messages=status["history_messages"],
             completed_turns=status["completed_turns"],
+            compaction_enabled="yes" if status["compaction_enabled"] else "no",
             compaction_available="yes" if status["compaction_available"] else "no",
             compaction_model=status["compaction_model"],
             compaction_threshold=status["compaction_threshold"],

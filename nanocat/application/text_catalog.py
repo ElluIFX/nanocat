@@ -88,6 +88,7 @@ class UserTextCatalog:
         "- msgs = {messages_uncompacted}/{messages_total} ({uncompacted_percent}%)\n\n"
         "- history = {history_messages}/{messages_total}\n\n"
         "- completed turns = {completed_turns}\n\n"
+        "- compaction enabled = {compaction_enabled}\n\n"
         "- compaction available = {compaction_available}\n\n"
         "- compaction model = `{compaction_model}`\n\n"
         "- compaction threshold = {compaction_threshold}\n\n"

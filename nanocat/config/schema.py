@@ -50,10 +50,19 @@ class AgentDefaults(Base):
     context_window_tokens: int = 65_536
     temperature: float | None = None
     max_tool_iterations: int = 40
-    compaction_threshold: float = (
-        0.5  # trigger session compaction when prompt exceeds this context fraction
+    compaction_threshold: float = Field(
+        default=0.5,
+        ge=0.05,
+        le=0.95,
+        description="Trigger session compaction at this fraction of the context window.",
     )
-    no_compact_history_num: int = 3  # keep this many recent turns raw
+    no_compact_history_num: int = Field(
+        default=3,
+        ge=1,
+        le=1000,
+        description="Keep this many recent completed turns uncompressed.",
+    )
+    compaction_enabled: bool = True
     compaction_model: str | None = None  # independent low-cost model for session compaction
     # Deprecated compatibility field: accepted from old configs but ignored at runtime.
     memory_window: int | None = Field(default=None, exclude=True)
@@ -212,6 +221,7 @@ class EnabledBuiltinToolsConfig(Base):
     ssh_tools: bool = False  # SSH tools (ssh_open/send/read/close/list)
     proc_tools: bool = True  # background process tools (proc_start/read/stop/list)
     http_request: bool = True  # structured HTTP request tool
+    memory_tools: bool = True  # Nowledge memory and captured Thread tools
 
 
 class ToolsConfig(Base):
@@ -250,10 +260,20 @@ class NowledgeAutoInjectConfig(Base):
 
     enabled: bool = False
     mode: Literal["auto", "fast", "deep"] = "auto"
-    max_num: int = 3
-    preview_length: int = 512
+    max_num: int = Field(default=3, ge=1, le=20)
+    preview_length: int = Field(default=512, ge=128, le=4096)
     deep_on_recall: bool = True
-    min_score: float = 0.25  # low guardrail; Nowledge ranking supplies the primary signal
+    min_score: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Low recall guardrail; Nowledge ranking remains the primary signal.",
+    )
+    query_min_length: int = Field(default=4, ge=0, le=256)
+    dedupe_window: int = Field(default=32, ge=0, le=256)
+    short_recall_max_length: int = Field(default=24, ge=0, le=512)
+    recall_context_messages: int = Field(default=2, ge=0, le=10)
+    query_max_length: int = Field(default=2_000, ge=256, le=10_000)
 
 
 class MemoryConfig(Base):
@@ -264,6 +284,22 @@ class MemoryConfig(Base):
     api_key: str | None = None
     thread_source: str = "nanocat"
     space_id: str | None = None
+    thread_capture_enabled: bool = True
+    thread_message_max_chars: int = Field(default=12_000, ge=512, le=100_000)
+    auto_distill_enabled: bool = True
+    distill_min_messages: int = Field(default=8, ge=1, le=1000)
+    distill_extraction_level: Literal["swift", "guided", "expert"] = "guided"
+    distill_preferred_language: str = "zh"
+    working_memory_enabled: bool = True
+    working_memory_timeout_s: float = Field(default=3.0, gt=0.0, le=30.0)
+    working_memory_max_chars: int = Field(default=6_000, ge=512, le=50_000)
+    request_timeout_s: float = Field(default=15.0, gt=0.0, le=120.0)
+    max_request_attempts: int = Field(default=2, ge=1, le=5)
+    retry_delay_s: float = Field(default=0.1, ge=0.0, le=10.0)
+    health_timeout_s: float = Field(default=2.0, gt=0.0, le=30.0)
+    health_cache_seconds: float = Field(default=5.0, ge=0.0, le=60.0)
+    max_connections: int = Field(default=20, ge=1, le=500)
+    max_keepalive_connections: int = Field(default=10, ge=0, le=500)
     auto_inject: NowledgeAutoInjectConfig = Field(default_factory=NowledgeAutoInjectConfig)
 
 

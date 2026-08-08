@@ -34,9 +34,12 @@ _SUBAGENT_EXCLUDED = frozenset(
         "message",
         "cron",
         "memory_search",
+        "memory_get",
         "memory_add",
         "memory_update",
         "memory_delete",
+        "memory_thread_search",
+        "memory_thread_get",
         "read_working_memory",
     }
 )

@@ -28,9 +28,15 @@ def _error(code: str, message: str, usage: str) -> CommandResult:
 class RuntimeCommandHandlers:
     """Execute stateful command groups without AgentLoop string dispatch."""
 
-    def __init__(self, cron_service: Any | None, memory_client: Any | None):
+    def __init__(
+        self,
+        cron_service: Any | None,
+        memory_client: Any | None,
+        memory_settings: dict[str, Any] | None = None,
+    ):
         self._cron = cron_service
         self._memory = memory_client
+        self._memory_settings = memory_settings or {}
 
     async def execute(
         self,
@@ -144,14 +150,10 @@ class RuntimeCommandHandlers:
         self, command: ParsedCommand, *, session: Any | None = None
     ) -> CommandResult:
         usage = "/memory status|spaces|search|show|add|update|delete|preview|distill|processing"
-        if self._memory is None:
-            return _error(CommandErrorCode.INVALID_STATE, "Nowledge memory is unavailable.", usage)
         action = command.subcommand
-        args = command.positional_args
-        options = command.options
-        try:
-            if action == "status":
-                available = await self._memory.is_available()
+        if action == "status":
+            try:
+                available = await self._memory.is_available() if self._memory is not None else False
                 agent_status = await self._memory.agent_status() if available else {}
                 return _ok(
                     json.dumps(
@@ -160,11 +162,26 @@ class RuntimeCommandHandlers:
                             "service": "nowledge",
                             "agent_running": agent_status.get("running"),
                             "queue_size": agent_status.get("queue_size"),
+                            "configuration": self._memory_settings,
                         },
                         ensure_ascii=False,
                     ),
                     effect="no-op",
                 )
+            except Exception as exc:
+                error_code = getattr(exc, "code", None)
+                if error_code:
+                    return _error(
+                        CommandErrorCode.COMMAND_FAILED,
+                        f"Nowledge request failed: {error_code}.",
+                        usage,
+                    )
+                raise
+        if self._memory is None:
+            return _error(CommandErrorCode.INVALID_STATE, "Nowledge memory is unavailable.", usage)
+        args = command.positional_args
+        options = command.options
+        try:
             if action == "processing":
                 result = await self._memory.processing_status()
                 return _ok(json.dumps(result, ensure_ascii=False, default=str), effect="no-op")
@@ -222,7 +239,6 @@ class RuntimeCommandHandlers:
                     else None,
                     unit_type=str(options["unit-type"]) if options.get("unit-type") else None,
                     space_id=str(options["space-id"]) if options.get("space-id") else None,
-                    source="nanocat",
                 )
                 memory = (result.get("memory") or result) if result else {}
                 memory_id = memory.get("id") or memory.get("memory_id") or "unknown"

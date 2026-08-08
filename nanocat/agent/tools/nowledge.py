@@ -319,7 +319,6 @@ class MemoryAddTool(Tool):
                 importance=importance,
                 unit_type=unit_type,
                 space_id=space_id,
-                source="nanocat",
             )
         except NowledgeRequestError as exc:
             return tool_err("Nowledge memory creation failed", code=exc.code)

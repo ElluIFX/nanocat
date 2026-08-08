@@ -38,12 +38,30 @@ class NowledgeClient:
         api_key: str | None = None,
         *,
         space_id: str | None = None,
+        source: str = "nanocat",
+        preferred_language: str = "zh",
         request_timeout: float = 15.0,
+        max_request_attempts: int = 2,
+        retry_delay: float = 0.1,
+        health_timeout: float = 2.0,
+        health_cache_seconds: float = 5.0,
+        max_connections: int = 20,
+        max_keepalive_connections: int = 10,
     ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
         self._space_id = space_id
+        self._source = source
+        self._preferred_language = preferred_language
         self._request_timeout = request_timeout
+        self._max_request_attempts = max(1, max_request_attempts)
+        self._retry_delay = max(0.0, retry_delay)
+        self._health_timeout = max(0.1, health_timeout)
+        self._health_cache_seconds = max(0.0, health_cache_seconds)
+        self._limits = httpx.Limits(
+            max_connections=max(1, max_connections),
+            max_keepalive_connections=max(0, min(max_connections, max_keepalive_connections)),
+        )
         self._http: httpx.AsyncClient | None = None
         self._closed = False
         self._health_until = 0.0
@@ -62,6 +80,7 @@ class NowledgeClient:
             self._http = httpx.AsyncClient(
                 headers=self._headers(),
                 timeout=httpx.Timeout(self._request_timeout),
+                limits=self._limits,
             )
         return self._http
 
@@ -82,7 +101,7 @@ class NowledgeClient:
         timeout: float | None = None,
         retryable: bool = False,
     ) -> Any:
-        attempts = 2 if retryable else 1
+        attempts = self._max_request_attempts if retryable else 1
         last_error: NowledgeRequestError | None = None
         for attempt in range(attempts):
             try:
@@ -101,7 +120,7 @@ class NowledgeClient:
                     retryable=True,
                 )
                 if attempt + 1 < attempts:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(self._retry_delay)
                     continue
                 raise last_error from exc
             except httpx.RequestError as exc:
@@ -111,7 +130,7 @@ class NowledgeClient:
                     retryable=True,
                 )
                 if attempt + 1 < attempts:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(self._retry_delay)
                     continue
                 raise last_error from exc
 
@@ -130,7 +149,7 @@ class NowledgeClient:
                     retryable=retry_status,
                 )
                 if retryable and retry_status and attempt + 1 < attempts:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(self._retry_delay)
                     continue
                 raise last_error
 
@@ -152,19 +171,19 @@ class NowledgeClient:
         if loop_time < self._health_until:
             return self._health_ok
         try:
-            await self._request("GET", "/health", timeout=2.0, retryable=True)
+            await self._request("GET", "/health", timeout=self._health_timeout, retryable=True)
         except NowledgeRequestError as exc:
             logger.debug("Nowledge health check failed: {}", exc.code)
             self._health_ok = False
         else:
             self._health_ok = True
-        self._health_until = loop_time + 5.0
+        self._health_until = loop_time + self._health_cache_seconds
         return self._health_ok
 
     async def search_memories(
         self,
         query: str,
-        limit: int = 10,
+        limit: int = 5,
         *,
         mode: str | None = None,
         include_entities: bool | None = None,
@@ -202,9 +221,11 @@ class NowledgeClient:
         return result if isinstance(result, dict) else {}
 
     async def create_memory(self, content: str, **fields: Any) -> dict[str, Any]:
+        source = fields.pop("source", None) or self._source
         payload = {
             "content": content,
             "space_id": fields.pop("space_id", None) or self._space_id,
+            "source": source,
             **{key: value for key, value in fields.items() if value is not None},
         }
         payload = {key: value for key, value in payload.items() if value is not None}
@@ -338,7 +359,7 @@ class NowledgeClient:
         query: str,
         *,
         mode: str = "full",
-        limit: int = 20,
+        limit: int = 5,
         source: str | None = None,
         space_id: str | None = None,
     ) -> dict[str, Any]:
@@ -389,18 +410,21 @@ class NowledgeClient:
         )
         return result if isinstance(result, dict) else {}
 
-    async def triage(self, thread_content: str, *, preferred_language: str = "zh") -> dict[str, Any]:
+    async def triage(
+        self, thread_content: str, *, preferred_language: str | None = None
+    ) -> dict[str, Any]:
+        language = preferred_language or self._preferred_language
         result = await self._request(
             "POST",
             "/memories/distill/triage",
-            json={"thread_content": thread_content[:50_000], "preferred_language": preferred_language},
+            json={"thread_content": thread_content[:50_000], "preferred_language": language},
         )
         return result if isinstance(result, dict) else {}
 
     async def preview_distill(self, thread_id: str, **fields: Any) -> dict[str, Any]:
         payload = {
             "thread_id": thread_id,
-            "preferred_language": "zh",
+            "preferred_language": self._preferred_language,
             "space_id": self._space_id,
             **fields,
         }
@@ -411,7 +435,7 @@ class NowledgeClient:
     async def distill(self, thread_id: str, **fields: Any) -> dict[str, Any]:
         payload = {
             "thread_id": thread_id,
-            "preferred_language": "zh",
+            "preferred_language": self._preferred_language,
             "space_id": self._space_id,
             **fields,
         }
