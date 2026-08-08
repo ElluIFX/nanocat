@@ -48,6 +48,8 @@ _SYSTEM_PROMPT = (
 async def evaluate_response(
     response: str,
     task_context: str,
+    provider_resolver=None,
+    config=None,
 ) -> bool:
     """Decide whether a background-task result should be delivered to the user.
 
@@ -55,12 +57,19 @@ async def evaluate_response(
     ``_decide()``).  Falls back to ``True`` (notify) on any failure so
     that important messages are never silently dropped.
     """
-    from nanocat.config.loader import get_runtime_config
     from nanocat.providers.manager import get_provider
 
-    cfg = get_runtime_config().agents.defaults
+    if config is None:
+        from nanocat.config.loader import get_runtime_config
+
+        config = get_runtime_config()
+    cfg = config.agents.defaults
     model = cfg.assistant_model or cfg.model
-    provider = get_provider(model)
+    provider = (
+        provider_resolver.resolve(model)
+        if provider_resolver is not None
+        else get_provider(model)
+    )
 
     try:
         llm_response = await provider.chat_with_retry(
@@ -75,6 +84,7 @@ async def evaluate_response(
             model=model,
             max_tokens=256,
             temperature=0.0,
+            reasoning_effort=None,
         )
 
         if not llm_response.has_tool_calls:

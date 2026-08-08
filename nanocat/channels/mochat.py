@@ -11,13 +11,14 @@ from typing import Any
 
 import httpx
 from loguru import logger
+from pydantic import Field
 
 from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.paths import get_runtime_subdir
 from nanocat.config.schema import Base
-from pydantic import Field
+from nanocat.core.ports import ChannelCapabilities
 
 try:
     import socketio
@@ -261,6 +262,7 @@ class MochatChannel(BaseChannel):
 
     name = "mochat"
     display_name = "Mochat"
+    capabilities = ChannelCapabilities(media=False, reply_threads=True)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -315,7 +317,7 @@ class MochatChannel(BaseChannel):
         if not await self._start_socket_client():
             await self._ensure_fallback_workers()
 
-        self._refresh_task = asyncio.create_task(self._refresh_loop())
+        self._refresh_task = self._track_task(asyncio.create_task(self._refresh_loop()))
         while self._running:
             await asyncio.sleep(1)
 
@@ -339,6 +341,7 @@ class MochatChannel(BaseChannel):
         if self._cursor_save_task:
             self._cursor_save_task.cancel()
             self._cursor_save_task = None
+        await self._cancel_owned_tasks()
         await self._save_session_cursors()
 
         if self._http:
@@ -622,11 +625,15 @@ class MochatChannel(BaseChannel):
         for sid in sorted(self._session_set):
             t = self._session_fallback_tasks.get(sid)
             if not t or t.done():
-                self._session_fallback_tasks[sid] = asyncio.create_task(self._session_watch_worker(sid))
+                self._session_fallback_tasks[sid] = self._track_task(
+                    asyncio.create_task(self._session_watch_worker(sid))
+                )
         for pid in sorted(self._panel_set):
             t = self._panel_fallback_tasks.get(pid)
             if not t or t.done():
-                self._panel_fallback_tasks[pid] = asyncio.create_task(self._panel_poll_worker(pid))
+                self._panel_fallback_tasks[pid] = self._track_task(
+                    asyncio.create_task(self._panel_poll_worker(pid))
+                )
 
     async def _stop_fallback_workers(self) -> None:
         self._fallback_mode = False
@@ -776,7 +783,9 @@ class MochatChannel(BaseChannel):
             state.entries.append(entry)
             if state.timer:
                 state.timer.cancel()
-            state.timer = asyncio.create_task(self._delay_flush_after(key, target_id, target_kind))
+            state.timer = self._track_task(
+                asyncio.create_task(self._delay_flush_after(key, target_id, target_kind))
+            )
 
     async def _delay_flush_after(self, key: str, target_id: str, target_kind: str) -> None:
         await asyncio.sleep(max(0, self.config.reply_delay_ms) / 1000.0)
@@ -875,7 +884,9 @@ class MochatChannel(BaseChannel):
             return
         self._session_cursor[session_id] = cursor
         if not self._cursor_save_task or self._cursor_save_task.done():
-            self._cursor_save_task = asyncio.create_task(self._save_cursor_debounced())
+            self._cursor_save_task = self._track_task(
+                asyncio.create_task(self._save_cursor_debounced())
+            )
 
     async def _save_cursor_debounced(self) -> None:
         await asyncio.sleep(CURSOR_SAVE_DEBOUNCE_S)

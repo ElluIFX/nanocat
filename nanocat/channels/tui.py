@@ -25,7 +25,9 @@ import json
 import queue
 import re
 import uuid
+from collections import deque
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.schema import Base
+from nanocat.core.ports import ChannelCapabilities
 
 try:
     from rich.box import ROUNDED
@@ -62,6 +65,13 @@ _MODEL_CATEGORIES = [
     ("Agent", "agent"),
     ("Subagent", "subagent"),
     ("Assistant", "assistant"),
+]
+_EFFORT_OPTIONS = [
+    ("Auto", "auto"),
+    ("Low", "low"),
+    ("Medium", "medium"),
+    ("High", "high"),
+    ("XHigh", "xhigh"),
     ("Max", "max"),
 ]
 
@@ -95,6 +105,12 @@ _COL_LEVEL = 8
 _USER_BORDER = "cyan"
 _BOT_BORDER = "green"
 _SUBAGENT_BORDER = "yellow"
+_APPROVAL_BORDER = "bright_yellow"
+
+_INTERVENTION_FIELD_RE = re.compile(r"^(Capability|Operation|Expires):\s*(.*)$", re.MULTILINE)
+_SENSITIVE_DISPLAY_RE = re.compile(
+    r"(?i)(authorization|cookie|password|passwd|secret|token|api[-_ ]?key)\s*[:=]\s*[^\s,;]+"
+)
 
 
 def _parse_subagent_result(text: str) -> dict[str, Any] | None:
@@ -179,6 +195,63 @@ def _summarize_args(args: Any, limit: int = 64) -> str:
     return text[: limit - 1] + "…" if len(text) > limit else text
 
 
+def _redact_intervention_text(value: Any, limit: int = 240) -> str:
+    """Keep scheduler-provided approval facts safe for terminal rendering."""
+    text = str(value or "").strip()
+    text = _SENSITIVE_DISPLAY_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
+    return text[: limit - 1] + "…" if len(text) > limit else text
+
+
+def _intervention_payload(msg: OutboundMessage) -> dict[str, Any] | None:
+    """Normalize scheduler-owned intervention metadata for the TUI bridge."""
+    metadata = msg.metadata or {}
+    request_id = str(metadata.get("request_id") or "").strip()
+    mode = str(metadata.get("_intervention_mode") or "").strip().lower()
+    if mode not in {"auto", "yolo"}:
+        mode = ""
+    if not request_id and not mode:
+        return None
+    if metadata.get("_intervention_update"):
+        return {
+            "request_id": request_id,
+            "state": str(metadata.get("intervention_state") or "updated"),
+            "detail": _redact_intervention_text(msg.content),
+            "mode": mode,
+        }
+
+    fields = dict(_INTERVENTION_FIELD_RE.findall(msg.content or ""))
+    raw_expiry = str(metadata.get("expires_at") or "").strip()
+    expiry_text = raw_expiry or str(fields.get("Expires") or "").strip()
+    expires_at: datetime | None = None
+    if expiry_text:
+        try:
+            expires_at = datetime.fromisoformat(expiry_text.replace("Z", "+00:00"))
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            else:
+                expires_at = expires_at.astimezone(timezone.utc)
+        except ValueError:
+            try:
+                expires_at = datetime.strptime(expiry_text, "%Y-%m-%d %H:%M:%S UTC").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                expires_at = None
+    return {
+        "request_id": request_id,
+        "capability": _redact_intervention_text(
+            metadata.get("capability") or fields.get("Capability")
+        ),
+        "operation": _redact_intervention_text(
+            metadata.get("operation") or fields.get("Operation")
+        ),
+        "expires": _redact_intervention_text(fields.get("Expires") or raw_expiry),
+        "expires_at": expires_at,
+        "state": "pending",
+        "mode": mode,
+    }
+
+
 class TuiConfig(Base):
     """Local TUI config. In local mode the sender is always the terminal user."""
 
@@ -207,8 +280,8 @@ if _TEXTUAL_OK:
 
         def on_mount(self) -> None:
             self._history: list[str] = []
-            self._hist_idx: int = -1   # -1 = live input, 0..n-1 = navigating
-            self._draft: str = ""      # saved text before entering history nav
+            self._hist_idx: int = -1  # -1 = live input, 0..n-1 = navigating
+            self._draft: str = ""  # saved text before entering history nav
             self._pending_media: list[str] = []  # clipboard images staged for the next send
             self._pending_pastes: list[str] = []  # large pasted text blocks staged for the send
             self._reconciling = False  # guard against the text-rewrite re-entering reconcile
@@ -229,9 +302,7 @@ if _TEXTUAL_OK:
             """Return staged media whose ``[Image N]`` placeholder is still in the
             text (so deleting a placeholder drops its image), then reset."""
             text = self.text
-            media = [
-                p for i, p in enumerate(self._pending_media, 1) if f"[Image {i}]" in text
-            ]
+            media = [p for i, p in enumerate(self._pending_media, 1) if f"[Image {i}]" in text]
             self._pending_media = []
             return media
 
@@ -239,6 +310,7 @@ if _TEXTUAL_OK:
             """Expand surviving ``[Pasted text #N ...]`` placeholders in *text* back
             to the full stored block (so the agent gets the real content), then
             reset. Deleted placeholders simply drop their block."""
+
             def _expand(m: "re.Match[str]") -> str:
                 i = int(m.group(1))
                 return self._pending_pastes[i - 1] if 1 <= i <= len(self._pending_pastes) else m[0]
@@ -260,9 +332,7 @@ if _TEXTUAL_OK:
             text = self.text
             n = len(buffer)
             present = {
-                int(m.group(1))
-                for m in re.finditer(pattern, text)
-                if 1 <= int(m.group(1)) <= n
+                int(m.group(1)) for m in re.finditer(pattern, text) if 1 <= int(m.group(1)) <= n
             }
             if len(present) == n:
                 return buffer  # every staged entry still referenced — nothing deleted
@@ -271,9 +341,7 @@ if _TEXTUAL_OK:
             new_buffer = [buffer[old - 1] for old in survivors]
             new_text = re.sub(
                 pattern,
-                lambda m: renumber(remap[int(m.group(1))], m)
-                if int(m.group(1)) in remap
-                else m[0],
+                lambda m: renumber(remap[int(m.group(1))], m) if int(m.group(1)) in remap else m[0],
                 text,
             )
             if new_text != text:
@@ -302,7 +370,10 @@ if _TEXTUAL_OK:
             line — only those whose index is currently staged, so hand-typed lookalikes
             stay ordinary text. The buffers are the single source of truth."""
             spans: list[tuple[int, int]] = []
-            for pat, buf in ((self._IMAGE_RE, self._pending_media), (self._PASTE_RE, self._pending_pastes)):
+            for pat, buf in (
+                (self._IMAGE_RE, self._pending_media),
+                (self._PASTE_RE, self._pending_pastes),
+            ):
                 n = len(buf)
                 spans += [
                     (m.start(), m.end())
@@ -325,7 +396,11 @@ if _TEXTUAL_OK:
             theme.syntax_styles.setdefault("nanocat_paste", Style(color="bright_cyan", bold=True))
             kinds = (
                 (rb"\[Image (\d+)\]", len(self._pending_media), "nanocat_image"),
-                (rb"\[Pasted text #(\d+) \+\d+ lines\]", len(self._pending_pastes), "nanocat_paste"),
+                (
+                    rb"\[Pasted text #(\d+) \+\d+ lines\]",
+                    len(self._pending_pastes),
+                    "nanocat_paste",
+                ),
             )
             for row, line in enumerate(self.document.lines):
                 lb = line.encode("utf-8")
@@ -444,6 +519,79 @@ if _TEXTUAL_OK:
         def on_button_pressed(self, event: Button.Pressed) -> None:
             self.dismiss(event.button.id == "confirm")
 
+    class _ApprovalCard(Vertical):
+        """Interactive presentation of one scheduler-owned approval request."""
+
+        class Decision(Message):
+            def __init__(self, request_id: str, action: str) -> None:
+                self.request_id = request_id
+                self.action = action
+                super().__init__()
+
+        def __init__(self, payload: dict[str, Any]) -> None:
+            super().__init__(classes="approval-card")
+            self.request_id = str(payload["request_id"])
+            self.capability = str(payload.get("capability") or "unknown")
+            self.operation = str(payload.get("operation") or "Sensitive operation")
+            self.expires = str(payload.get("expires") or "unknown")
+            self.expires_at: datetime | None = payload.get("expires_at")
+            self._state = "pending"
+
+        def compose(self) -> ComposeResult:
+            yield Static(self._details(), classes="approval-details")
+            yield Static("Waiting for your decision", classes="approval-status")
+            with Horizontal(classes="approval-actions"):
+                yield Button("Approve once", id="approve-once", variant="success")
+                yield Button("Approve for turn", id="approve-turn", variant="warning")
+                yield Button("Deny", id="deny", variant="error")
+
+        def _details(self) -> Text:
+            text = Text()
+            text.append("Sensitive operation requires approval", style="bold bright_yellow")
+            text.append(f"\nCapability: {self.capability}")
+            text.append(f"\nOperation: {self.operation}")
+            text.append(f"\nExpires: {self.expires}")
+            return text
+
+        def update_payload(self, payload: dict[str, Any]) -> None:
+            """Refresh duplicate prompt facts without reopening a terminal card."""
+            if payload.get("expires_at") is not None:
+                self.expires_at = payload["expires_at"]
+            self.capability = str(payload.get("capability") or self.capability)
+            self.operation = str(payload.get("operation") or self.operation)
+            self.expires = str(payload.get("expires") or self.expires)
+            if self.is_attached:
+                self.query_one(".approval-details", Static).update(self._details())
+
+        def set_state(self, state: str, detail: str) -> None:
+            """Render a monotonic terminal/submitting state and disable actions."""
+            if self._state not in {"pending", "submitting"} and state == "pending":
+                return
+            self._state = state
+            status_style = {
+                "accepted": "bold green",
+                "rejected": "bold red",
+                "expired": "bold yellow",
+                "cancelled": "bold yellow",
+                "failed": "bold red",
+                "submitting": "bold cyan",
+            }.get(state, "dim")
+            self.query_one(".approval-status", Static).update(Text(detail, style=status_style))
+            if state != "pending":
+                for button in self.query(Button):
+                    button.disabled = True
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            action = {
+                "approve-once": "once",
+                "approve-turn": "turn",
+                "deny": "deny",
+            }.get(event.button.id)
+            if action is None or self._state != "pending":
+                return
+            event.stop()
+            self.post_message(self.Decision(self.request_id, action))
+
     class _ChatApp(App):
         """Two-pane terminal app: chat on the left, live log on the right."""
 
@@ -454,15 +602,25 @@ if _TEXTUAL_OK:
         CSS = """
         Horizontal { height: 1fr; }
         #chat-pane { width: 2fr; border: round $accent; }
+        #approvals { height: auto; max-height: 16; overflow-y: auto; padding: 0 1; }
+        .approval-card { height: auto; border: round $warning; background: $surface; padding: 1; margin: 0 0 1 0; }
+        .approval-details { height: auto; }
+        .approval-status { height: auto; margin: 1 0 0 0; }
+        .approval-actions { height: 3; margin: 1 0 0 0; }
+        .approval-actions Button { margin: 0 1 0 0; min-width: 14; }
         #chat { height: 1fr; padding: 0 1; overflow-x: hidden; }
         #status { height: 1; color: $text-muted; padding: 0 1; }
         #prompt { border: none; height: 4; padding: 0 1; }
-        #toolbar { height: 1; padding: 0 1; }
-        #toolbar-spacer { width: 1fr; }
-        #toolbar Button { height: 1; border: none; width: auto; min-width: 6; margin: 0 1 0 0; }
-        #toolbar Select { height: 1; margin: 0 1 0 0; }
-        #toolbar #cat-select { width: 20; }
-        #toolbar #model-select { width: 38; }
+        #toolbar { height: 1; width: 100%; padding: 0 1; overflow: hidden; }
+        #toolbar-spacer { width: 1fr; min-width: 0; }
+        #toolbar Button { height: 1; border: none; width: auto; min-width: 6; margin: 0 1 0 0; padding: 0 1; }
+        #toolbar Select { height: 1; margin: 0 1 0 0; min-width: 0; }
+        #toolbar #cat-select { width: 16; }
+        #toolbar #model-select { width: 36; }
+        #toolbar #effort-select { width: 14; }
+        #approval-mode-status { display: none; }
+        #approval-mode { min-width: 8; }
+        #send { min-width: 8; }
         #toolbar SelectCurrent { border: none; height: 1; padding: 0 1; }
         #toolbar Select:focus > SelectCurrent { border: none; }
         #send { margin: 0; }
@@ -479,16 +637,25 @@ if _TEXTUAL_OK:
             super().__init__()
             self._channel = channel
             self._chat: RichLog | None = None
+            self._approvals: Vertical | None = None
             self._log: RichLog | None = None
             self._status: Static | None = None
             self._send: Button | None = None
+            self._approval_mode_button: Button | None = None
+            self._approval_mode_status: Static | None = None
+            self._yolo_enabled = False
             self._busy = False
             self._spin = 0
             self._suppress_next_model = False
+            self._suppress_next_effort = False
+            self._approval_cards: dict[str, _ApprovalCard] = {}
+            self._approval_terminal_ids: set[str] = set()
+            self._approval_terminal_order: deque[str] = deque(maxlen=256)
 
         def compose(self) -> ComposeResult:
             with Horizontal():
                 with Vertical(id="chat-pane"):
+                    yield Vertical(id="approvals")
                     yield RichLog(id="chat", wrap=True, markup=False, highlight=False, min_width=0)
                     yield Static("", id="status")
                     yield _ChatInput(id="prompt", soft_wrap=True, show_line_numbers=False)
@@ -498,7 +665,16 @@ if _TEXTUAL_OK:
                             _MODEL_CATEGORIES, id="cat-select", value="agent", allow_blank=False
                         )
                         yield Select([], id="model-select", prompt="Model", allow_blank=True)
+                        yield Select(
+                            _EFFORT_OPTIONS,
+                            id="effort-select",
+                            prompt="Effort",
+                            value=Select.NULL,
+                            allow_blank=True,
+                        )
                         yield Static(id="toolbar-spacer")
+                        yield Static(id="approval-mode-status")
+                        yield Button("AUTO", id="approval-mode", variant="success")
                         yield Button("Send", id="send", variant="success")
                 with Vertical(id="log-pane"):
                     yield Static(id="log-header")
@@ -506,11 +682,16 @@ if _TEXTUAL_OK:
 
         def on_mount(self) -> None:
             self._chat = self.query_one("#chat", RichLog)
+            self._approvals = self.query_one("#approvals", Vertical)
             self._log = self.query_one("#log", RichLog)
             self._status = self.query_one("#status", Static)
             self._send = self.query_one("#send", Button)
+            self._approval_mode_button = self.query_one("#approval-mode", Button)
+            self._approval_mode_status = self.query_one("#approval-mode-status", Static)
             self.query_one("#log-header", Static).update(self._log_header())
             self._populate_models()
+            self._populate_effort()
+            self._set_approval_mode(False)
             self._status.update(_INPUT_HINT)
             self.query_one("#prompt", _ChatInput).focus()
             self.set_interval(0.05, self._drain)
@@ -550,6 +731,24 @@ if _TEXTUAL_OK:
                 # setting it must NOT leave a stale flag that swallows the next pick).
                 sel.value = Select.BLANK
 
+        def _populate_effort(self) -> None:
+            try:
+                from nanocat.config.loader import get_runtime_config
+
+                effort = get_runtime_config().agents.defaults.reasoning_effort or "auto"
+            except Exception:
+                effort = "auto"
+            self._show_effort(effort)
+
+        def _show_effort(self, effort: str) -> None:
+            """Display the configured reasoning effort without submitting a command."""
+            values = {value for _, value in _EFFORT_OPTIONS}
+            selected = effort if effort in values else "auto"
+            sel = self.query_one("#effort-select", Select)
+            if sel.value != selected:
+                self._suppress_next_effort = True
+                sel.value = selected
+
         def _sync_model_to_category(self, category: str) -> None:
             """Refresh the model dropdown to show *category*'s current model."""
             try:
@@ -561,7 +760,6 @@ if _TEXTUAL_OK:
                     "agent": d.model,
                     "subagent": d.subagent_model,
                     "assistant": d.assistant_model,
-                    "max": d.max_model,
                 }.get(category)
             except Exception:
                 return
@@ -572,6 +770,11 @@ if _TEXTUAL_OK:
         async def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "quit":
                 self.push_screen(_QuitConfirm(), self._on_quit_decision)
+            elif event.button.id == "approval-mode":
+                self._set_approval_mode(not self._yolo_enabled)
+                self._channel.submit_threadsafe(
+                    "/approve forever" if self._yolo_enabled else "/approve cancel"
+                )
             elif event.button.id == "send":
                 if self._busy:
                     if self.query_one("#prompt", _ChatInput).text.strip():
@@ -582,15 +785,52 @@ if _TEXTUAL_OK:
                 else:
                     self._submit_current()
 
+        @on(_ApprovalCard.Decision)
+        def _on_approval_decision(self, event: _ApprovalCard.Decision) -> None:
+            card = self._approval_cards.get(event.request_id)
+            if card is None or card._state != "pending":
+                return
+            card.set_state("submitting", "Sending your decision to the scheduler…")
+            command = "/deny" if event.action == "deny" else f"/approve {event.action}"
+            # The UI only submits the canonical command through the normal TUI
+            # ingress; it never touches the runtime broker or its event loop.
+            self._channel.submit_threadsafe(command)
+
         def _on_quit_decision(self, confirmed: bool | None) -> None:
             if confirmed:
                 self.exit()
+
+        def _set_approval_mode(self, yolo_enabled: bool) -> None:
+            """Update the local approval-mode indicator without waiting for ingress."""
+            self._yolo_enabled = yolo_enabled
+            if self._approval_mode_button is None or self._approval_mode_status is None:
+                return
+            if yolo_enabled:
+                self._approval_mode_button.label = "YOLO"
+                self._approval_mode_button.variant = "error"
+                self._approval_mode_status.update(
+                    Text("YOLO · session approvals bypassed", style="bold red")
+                )
+            else:
+                self._approval_mode_button.label = "AUTO"
+                self._approval_mode_button.variant = "success"
+                self._approval_mode_status.update(
+                    Text("AUTO · sensitive actions require approval", style="green")
+                )
 
         def on_select_changed(self, event: Select.Changed) -> None:
             if event.select.id == "cat-select":
                 # Switching category refreshes the model dropdown to that slot.
                 if event.value is not Select.BLANK:
                     self._sync_model_to_category(str(event.value))
+                return
+            if event.select.id == "effort-select":
+                if event.value is Select.BLANK or event.value is Select.NULL:
+                    return
+                if self._suppress_next_effort:
+                    self._suppress_next_effort = False
+                    return
+                self._channel.submit_threadsafe(f"/model effort {event.value}")
                 return
             if event.select.id != "model-select":
                 return
@@ -708,7 +948,7 @@ if _TEXTUAL_OK:
                 name = str(call.get("name", "?"))
                 line = Text()
                 if phase == "start":
-                    line.append("  ⟳ ", style="yellow")
+                    line.append("  ⚒ ", style="yellow")
                     line.append(name, style="bold yellow")
                     arg = _summarize_args(call.get("args"))
                     if arg:
@@ -722,9 +962,79 @@ if _TEXTUAL_OK:
                         line.append(f"  {preview[:100]}", style="dim")
                 self._chat.write(line)
 
+        def _show_approval(self, payload: dict[str, Any]) -> None:
+            request_id = str(payload["request_id"])
+            if request_id in self._approval_terminal_ids:
+                return
+            card = self._approval_cards.get(request_id)
+            if card is not None:
+                card.update_payload(payload)
+                return
+            if self._approvals is None:
+                return
+            card = _ApprovalCard(payload)
+            self._approval_cards[request_id] = card
+            self._approvals.mount(card)
+
+        def _write_approval_status(self, payload: dict[str, Any]) -> None:
+            assert self._chat is not None
+            state = str(payload.get("state") or "updated").upper()
+            self._chat.write(
+                Panel(
+                    Text(str(payload.get("detail") or "Approval request updated.")),
+                    title=f"Approval · {state}",
+                    title_align="left",
+                    border_style=_APPROVAL_BORDER,
+                    box=ROUNDED,
+                    padding=(0, 1),
+                )
+            )
+            self._chat.write("")
+
+        def _remember_terminal_approval(self, request_id: str) -> None:
+            if request_id in self._approval_terminal_ids:
+                return
+            if len(self._approval_terminal_order) == self._approval_terminal_order.maxlen:
+                oldest = self._approval_terminal_order.popleft()
+                self._approval_terminal_ids.discard(oldest)
+            self._approval_terminal_order.append(request_id)
+            self._approval_terminal_ids.add(request_id)
+
+        def _update_approval(self, payload: dict[str, Any]) -> None:
+            request_id = str(payload["request_id"])
+            if request_id in self._approval_terminal_ids:
+                return
+            card = self._approval_cards.get(request_id)
+            if card is None:
+                self._write_approval_status(payload)
+                self._remember_terminal_approval(request_id)
+                return
+            state = str(payload.get("state") or "updated")
+            card.set_state(state, str(payload.get("detail") or "Approval request updated."))
+            if state not in {"pending", "submitting"}:
+                self._approval_cards.pop(request_id, None)
+                self._write_approval_status(payload)
+                self._remember_terminal_approval(request_id)
+                if card.is_attached:
+                    card.remove()
+
+        def _expire_approvals(self) -> None:
+            now = datetime.now(timezone.utc)
+            for request_id, card in tuple(self._approval_cards.items()):
+                if card._state != "pending" or card.expires_at is None or now < card.expires_at:
+                    continue
+                self._update_approval(
+                    {
+                        "request_id": request_id,
+                        "state": "expired",
+                        "detail": "This approval request expired before a decision was accepted.",
+                    }
+                )
+
         def _tick_spinner(self) -> None:
             # Idle status (the hint) is owned by _set_busy / on_mount; here we
             # only animate the spinner while a turn is in flight.
+            self._expire_approvals()
             if self._status is None or not self._busy:
                 return
             self._spin = (self._spin + 1) % len(_SPINNER)
@@ -751,6 +1061,12 @@ if _TEXTUAL_OK:
                     self._write_progress(payload)
                 elif kind == "tool_event":
                     self._write_tool_event(payload)
+                elif kind == "approval":
+                    self._show_approval(payload)
+                elif kind == "approval_update":
+                    self._update_approval(payload)
+                elif kind == "approval_mode":
+                    self._set_approval_mode(payload.get("mode") == "yolo")
 
         @staticmethod
         def _log_table() -> "Table":
@@ -798,7 +1114,12 @@ class TuiChannel(BaseChannel):
 
     name = "tui"
     display_name = "Local TUI"
-    wants_tool_events = True
+    capabilities = ChannelCapabilities(
+        progress=True,
+        tool_events=True,
+        media=False,
+        interactive_reply=True,
+    )
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -881,9 +1202,7 @@ class TuiChannel(BaseChannel):
             logger.warning("TUI received input before the runtime loop was bound")
             return
         asyncio.run_coroutine_threadsafe(
-            self._handle_message(
-                sender_id="local", chat_id="local", content=text, media=media
-            ),
+            self._handle_message(sender_id="local", chat_id="local", content=text, media=media),
             loop,
         )
 
@@ -918,9 +1237,26 @@ class TuiChannel(BaseChannel):
                 self._app.exit()
             except Exception as e:
                 logger.debug("TUI app exit failed: {}", e)
+        if self._log_sink_id is not None:
+            logger.remove(self._log_sink_id)
+            self._log_sink_id = None
+        await self._cancel_owned_tasks()
 
     async def send(self, msg: OutboundMessage) -> None:
         meta = msg.metadata or {}
+        if meta.get("_intervention"):
+            payload = _intervention_payload(msg)
+            if payload is not None:
+                if payload.get("mode"):
+                    self._display_q.put(("approval_mode", payload))
+                if payload.get("request_id"):
+                    self._display_q.put(
+                        (
+                            "approval_update" if meta.get("_intervention_update") else "approval",
+                            payload,
+                        )
+                    )
+                return
         if meta.get("_tool_event"):
             self._display_q.put(("tool_event", meta["_tool_event"]))
             return

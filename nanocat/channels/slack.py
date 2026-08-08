@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from loguru import logger
+from pydantic import Field
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.socket_mode.websockets import SocketModeClient
@@ -13,10 +14,9 @@ from slackify_markdown import slackify_markdown
 
 from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
-from pydantic import Field
-
 from nanocat.channels.base import BaseChannel
 from nanocat.config.schema import Base
+from nanocat.core.ports import ChannelCapabilities
 
 
 class SlackDMConfig(Base):
@@ -50,6 +50,7 @@ class SlackChannel(BaseChannel):
 
     name = "slack"
     display_name = "Slack"
+    capabilities = ChannelCapabilities(progress=True, media=True, reply_threads=True)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -106,6 +107,14 @@ class SlackChannel(BaseChannel):
             except Exception as e:
                 logger.warning("Slack socket close failed: {}", e)
             self._socket_client = None
+        if self._web_client:
+            try:
+                result = self._web_client.close()
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception as e:
+                logger.warning("Slack web client close failed: {}", e)
+            self._web_client = None
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Slack."""
@@ -276,6 +285,8 @@ class SlackChannel(BaseChannel):
         return True
 
     def _should_respond_in_channel(self, event_type: str, text: str, chat_id: str) -> bool:
+        if text.lstrip().startswith("/"):
+            return True
         if self.config.group_policy == "open":
             return True
         if self.config.group_policy == "mention":

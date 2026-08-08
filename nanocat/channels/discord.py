@@ -6,15 +6,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from pydantic import Field
 import websockets
 from loguru import logger
+from pydantic import Field
 
 from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.paths import get_media_dir
 from nanocat.config.schema import Base
+from nanocat.core.ports import ChannelCapabilities
 from nanocat.utils.helpers import split_message
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
@@ -38,6 +39,7 @@ class DiscordChannel(BaseChannel):
 
     name = "discord"
     display_name = "Discord"
+    capabilities = ChannelCapabilities(media=True, reply_threads=True)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -87,6 +89,7 @@ class DiscordChannel(BaseChannel):
         for task in self._typing_tasks.values():
             task.cancel()
         self._typing_tasks.clear()
+        await self._cancel_owned_tasks()
         if self._ws:
             await self._ws.close()
             self._ws = None
@@ -283,7 +286,7 @@ class DiscordChannel(BaseChannel):
                     break
                 await asyncio.sleep(interval_s)
 
-        self._heartbeat_task = asyncio.create_task(heartbeat_loop())
+        self._heartbeat_task = self._track_task(asyncio.create_task(heartbeat_loop()))
 
     async def _handle_message_create(self, payload: dict[str, Any]) -> None:
         """Handle incoming Discord messages."""
@@ -350,6 +353,8 @@ class DiscordChannel(BaseChannel):
 
     def _should_respond_in_group(self, payload: dict[str, Any], content: str) -> bool:
         """Check if bot should respond in a group channel based on policy."""
+        if content.lstrip().startswith("/"):
+            return True
         if self.config.group_policy == "open":
             return True
 
@@ -386,7 +391,7 @@ class DiscordChannel(BaseChannel):
                     return
                 await asyncio.sleep(8)
 
-        self._typing_tasks[channel_id] = asyncio.create_task(typing_loop())
+        self._typing_tasks[channel_id] = self._track_task(asyncio.create_task(typing_loop()))
 
     async def _stop_typing(self, channel_id: str) -> None:
         """Stop typing indicator for a channel."""

@@ -7,16 +7,14 @@ from typing import TYPE_CHECKING
 
 from nanocat.providers.base import LLMProvider, LLMResponse
 
-__all__ = ["LLMProvider", "LLMResponse", "LiteLLMProvider", "OpenAICodexProvider", "AzureOpenAIProvider"]
+__all__ = ["LLMProvider", "LLMResponse", "LiteLLMProvider", "OpenAICodexProvider"]
 
 _LAZY_IMPORTS = {
     "LiteLLMProvider": ".litellm_provider",
     "OpenAICodexProvider": ".openai_codex_provider",
-    "AzureOpenAIProvider": ".azure_openai_provider",
 }
 
 if TYPE_CHECKING:
-    from nanocat.providers.azure_openai_provider import AzureOpenAIProvider
     from nanocat.providers.litellm_provider import LiteLLMProvider
     from nanocat.providers.openai_codex_provider import OpenAICodexProvider
 

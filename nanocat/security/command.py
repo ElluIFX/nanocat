@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
+from nanocat.security.command_analyzer import CommandRisk, analyze_command
 from nanocat.security.path import (
     extract_absolute_paths,
     extract_path_args,
@@ -91,7 +92,7 @@ _DELETE_REDIRECT_MSG = (
     "Use the `delete` tool instead — it sends files to the system recycle bin by "
     "default (recoverable) and returns structured results. Pass permanent=true for "
     "irreversible deletion. If shell-level deletion is truly required, explain why "
-    "and ask the user to /approve."
+    "and use an explicitly permitted deletion workflow."
 )
 
 
@@ -138,63 +139,34 @@ def guard_command(
     *,
     on_blocked: Callable[[str, str, str, str], bool] | None = None,
 ) -> str | None:
-    """Check *command* against all safety rules.
+    """Compatibility adapter for direct tool calls.
 
-    Returns an error string if blocked, None if allowed.
-    *on_blocked* is called before blocking and can return True to override.
+    The runtime policy is authoritative. This adapter applies the same
+    deterministic analyzer to legacy/direct tool invocations and never allows
+    an unknown command merely because a regex did not match.
     """
     from nanocat.config.loader import get_runtime_config
 
     runtime_config = get_runtime_config()
     cmd_config = runtime_config.tools.cmd
-    if not cmd_config.safety_check:
+    if not runtime_config.tools.global_safty_check or not cmd_config.safety_check:
         return None
 
     cmd = command.strip()
     lower = cmd.lower()
-    workspace_path = Path(workspace).resolve()
     cwd_path = Path(cwd).resolve()
     restrict = cmd_config.restrict_to_workspace
 
-    # Allow-list check (if configured, ALLOW_ALWAYS acts as strict allow-list)
-    if _ALLOW_ALWAYS:
-        if not any(re.search(p, lower) for p in _ALLOW_ALWAYS):
-            return "Error: Command blocked by safety guard (not in allow-list)"
+    if cmd_config.allow_regex and not any(re.search(pattern, lower) for pattern in cmd_config.allow_regex):
+        return _block_msg("command is not in the configured allow-list")
+    if any(re.search(pattern, lower) for pattern in cmd_config.deny_regex):
+        return _block_msg("configured command deny rule matched")
 
-    # Route local file-delete commands to the `delete` tool (recycle-bin aware).
-    if getattr(runtime_config.tools.enabled_builtin_tools, "delete", True):
-        if redirect := _delete_redirect(lower):
-            return redirect
-
-    # Unconditional deny
-    for p in _UNCONDITIONAL:
-        if re.search(p, lower):
-            reason = "dangerous pattern [custom]"
-            if on_blocked and on_blocked(cmd, _SYSTEM, _ANY, reason):
-                break
-            return _block_msg(reason)
-
-    for pattern, shell_type, category in _DENY_RULES:
-        if not re.search(pattern, lower, re.DOTALL):
-            continue
-
-        if category == _FILE:
-            reason = f"file-dangerous command [{shell_type}]"
-        elif category == _NETWORK:
-            reason = f"network-exploit command [{shell_type}]"
-        elif category == _POLICY:
-            reason = f"disallowed command [{shell_type}]"
-        else:
-            reason = f"system-dangerous command [{shell_type}]"
-
-        # File-dangerous commands are allowed if all paths are in workspace.
-        if category == _FILE:
-            if _file_danger_in_workspace(cmd, cwd, workspace_path):
-                continue
-
-        if on_blocked and on_blocked(cmd, category, shell_type, reason):
-            continue
-
+    analysis = analyze_command(cmd)
+    if analysis.risk is not CommandRisk.SAFE:
+        reason = analysis.reason or "command requires runtime approval"
+        if on_blocked:
+            on_blocked(cmd, analysis.risk.value, analysis.shell, reason)
         return _block_msg(reason)
 
     # SSRF check
@@ -241,8 +213,4 @@ def _file_danger_in_workspace(command: str, cwd: str, workspace: Path) -> bool:
 
 
 def _block_msg(reason: str) -> str:
-    return (
-        f"Error: Command blocked by safety guard ({reason})"
-        "\nIf you believe this action is necessary, explain the reason to the user "
-        "and ask them to use /approve to temporarily bypass this check."
-    )
+    return f"Error: Command blocked by safety guard ({reason})"

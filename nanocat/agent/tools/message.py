@@ -1,5 +1,7 @@
 """Message tool for sending messages to users."""
 
+import json
+from contextvars import ContextVar
 from typing import Any, Awaitable, Callable
 
 from nanocat.agent.tools.base import Tool, tool_err, tool_ok
@@ -7,8 +9,6 @@ from nanocat.bus.events import OutboundMessage
 
 
 class MessageTool(Tool):
-    """Tool to send messages to users on chat channels."""
-
     def __init__(
         self,
         send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
@@ -17,24 +17,48 @@ class MessageTool(Tool):
         default_message_id: str | None = None,
     ):
         self._send_callback = send_callback
-        self._default_channel = default_channel
-        self._default_chat_id = default_chat_id
-        self._default_message_id = default_message_id
-        self._sent_in_turn: bool = False
+        self._channel_context: ContextVar[str] = ContextVar(
+            "message_channel", default=default_channel
+        )
+        self._chat_context: ContextVar[str] = ContextVar("message_chat", default=default_chat_id)
+        self._message_context: ContextVar[str | None] = ContextVar(
+            "message_id", default=default_message_id
+        )
+        self._sent_turns: set[str] = set()
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Set the current message context."""
-        self._default_channel = channel
-        self._default_chat_id = chat_id
-        self._default_message_id = message_id
+        self._channel_context.set(channel)
+        self._chat_context.set(chat_id)
+        self._message_context.set(message_id)
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         """Set the callback for sending messages."""
         self._send_callback = callback
 
-    def start_turn(self) -> None:
-        """Reset per-turn send tracking."""
-        self._sent_in_turn = False
+    def sent_in_turn(self, turn_id: str) -> bool:
+        """Return whether this tool sent to its owning conversation in a turn."""
+        return turn_id in self._sent_turns
+
+    def forget_turn(self, turn_id: str) -> None:
+        """Release turn-local delivery state after the owning turn is persisted."""
+        self._sent_turns.discard(turn_id)
+
+    def record_execution(self, context: Any, params: dict[str, Any], result: str) -> None:
+        """Track successful sends without using shared mutable turn state."""
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            return
+        if not payload.get("ok"):
+            return
+        channel = params.get("channel") or context.conversation.channel
+        if channel != context.conversation.channel:
+            return
+        chat_id = params.get("chat_id") or context.conversation.chat_id
+        if chat_id != context.conversation.chat_id:
+            return
+        self._sent_turns.add(context.turn_id)
 
     @property
     def name(self) -> str:
@@ -73,9 +97,12 @@ class MessageTool(Tool):
         attachments: list[str] | None = None,
         **kwargs: Any,
     ) -> str:
-        channel = channel or self._default_channel
-        chat_id = chat_id or self._default_chat_id
-        message_id = message_id or self._default_message_id
+        default_channel = self._channel_context.get()
+        default_chat_id = self._chat_context.get()
+        default_message_id = self._message_context.get()
+        channel = channel or default_channel
+        chat_id = chat_id or default_chat_id
+        message_id = message_id or default_message_id
 
         if not channel or not chat_id:
             return tool_err("No target channel/chat specified")
@@ -95,8 +122,6 @@ class MessageTool(Tool):
 
         try:
             await self._send_callback(msg)
-            if channel == self._default_channel and chat_id == self._default_chat_id:
-                self._sent_in_turn = True
             return tool_ok(
                 channel=channel,
                 chat_id=chat_id,
@@ -107,15 +132,6 @@ class MessageTool(Tool):
 
 
 class AskTool(Tool):
-    """Ask the user a question mid-turn and block for their reply.
-
-    Folds a clarifying round-trip into the tool-call chain: instead of ending the
-    turn to ask (which stops the flow), the agent calls ``ask``, the question is
-    sent to the user's channel, and their next reply is returned as this tool's
-    result. The turn stays in-flight, so the reply arrives via the loop's steer
-    buffer; ``reply_waiter`` consumes it (see ``AgentLoop._wait_for_reply``).
-    """
-
     def __init__(
         self,
         send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
@@ -125,18 +141,20 @@ class AskTool(Tool):
     ):
         self._send_callback = send_callback
         self._reply_waiter = reply_waiter
-        self._default_channel = default_channel
-        self._default_chat_id = default_chat_id
-        self._session_key = ""
+        self._channel_context: ContextVar[str] = ContextVar(
+            "ask_channel", default=default_channel
+        )
+        self._chat_context: ContextVar[str] = ContextVar("ask_chat", default=default_chat_id)
+        self._session_context: ContextVar[str] = ContextVar("ask_session", default="")
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Set the current message context (message_id accepted for a uniform signature)."""
-        self._default_channel = channel
-        self._default_chat_id = chat_id
+        self._channel_context.set(channel)
+        self._chat_context.set(chat_id)
 
     def set_session_key(self, session_key: str) -> None:
         """Set the exact session key (may be thread-scoped) used to match the user's reply."""
-        self._session_key = session_key
+        self._session_context.set(session_key)
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         self._send_callback = callback
@@ -180,14 +198,16 @@ class AskTool(Tool):
         }
 
     async def execute(self, question: str, timeout_s: float = 300, **kwargs: Any) -> str:
-        if not self._send_callback or not self._default_channel or not self._default_chat_id:
+        channel = self._channel_context.get()
+        chat_id = self._chat_context.get()
+        if not self._send_callback or not channel or not chat_id:
             return tool_err("Ask is unavailable: no channel/send context configured.")
         if not self._reply_waiter:
             return tool_err("Ask is unavailable: reply waiter not configured.")
 
         msg = OutboundMessage(
-            channel=self._default_channel,
-            chat_id=self._default_chat_id,
+            channel=channel,
+            chat_id=chat_id,
             content=question,
             media=[],
             metadata={},
@@ -197,7 +217,7 @@ class AskTool(Tool):
         except Exception as e:
             return tool_err(f"Failed to send question: {e}")
 
-        session_key = self._session_key or f"{self._default_channel}:{self._default_chat_id}"
+        session_key = self._session_context.get() or f"{channel}:{chat_id}"
         timeout = timeout_s if timeout_s and timeout_s > 0 else None
         answer = await self._reply_waiter(session_key, timeout)
         if answer is None:

@@ -1,6 +1,7 @@
 """Todo tool for managing multi-step task lists within a session."""
 
 import uuid
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -12,6 +13,11 @@ _SESSION_KEY = "_todo_lists"
 
 _STATUS_ORDER = {"PENDING": 0, "INPROGRESS": 1, "COMPLETED": 2}
 _STATUS_MARK = {"PENDING": "[ ]", "INPROGRESS": "[-]", "COMPLETED": "[x]"}
+_PROGRESS_INSTRUCTION = (
+    "MANDATORY: keep this list updated in real time; set each task INPROGRESS before "
+    "starting it and COMPLETED immediately after finishing it. Never mark all tasks "
+    "completed only at the end. Append newly discovered tasks."
+)
 
 
 @dataclass
@@ -79,18 +85,6 @@ def _save(session: Session | None, todo: TodoList) -> None:
 
 
 class TodoTool(Tool):
-    """Tool for managing structured todo lists within the current session.
-
-    IMPORTANT: When the user asks you to perform any multi-step task, you MUST:
-    1. First call todo/create to plan all steps before executing anything.
-    2. Use todo/update to mark each step INPROGRESS before starting it, and COMPLETED when done.
-    3. Use todo/append if new steps are discovered during execution.
-    4. Call todo/complete when all tasks are done.
-
-    Never start executing a multi-step task without first creating a todo list.
-    Never ask the user "what should I do next?" mid-pipeline — update the todo and proceed.
-    """
-
     def __init__(
         self,
         send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
@@ -98,24 +92,35 @@ class TodoTool(Tool):
         default_chat_id: str = "",
     ):
         self._send_callback = send_callback
-        self._default_channel = default_channel
-        self._default_chat_id = default_chat_id
-        self._session: Session | None = None
+        self._channel_context: ContextVar[str] = ContextVar(
+            "todo_channel", default=default_channel
+        )
+        self._chat_context: ContextVar[str] = ContextVar("todo_chat", default=default_chat_id)
+        self._session_context: ContextVar[Session | None] = ContextVar(
+            "todo_session", default=None
+        )
 
     def set_context(self, channel: str, chat_id: str, session: Session | None = None) -> None:
-        self._default_channel = channel
-        self._default_chat_id = chat_id
+        self._channel_context.set(channel)
+        self._chat_context.set(chat_id)
         if session is not None:
-            self._session = session
+            self._session_context.set(session)
+
+    @property
+    def _session(self) -> Session | None:
+        """Return the session bound to the current tool execution context."""
+        return self._session_context.get()
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         self._send_callback = callback
 
     async def _notify(self, todo: TodoList) -> None:
-        if self._send_callback and self._default_channel and self._default_chat_id:
+        channel = self._channel_context.get()
+        chat_id = self._chat_context.get()
+        if self._send_callback and channel and chat_id:
             msg = OutboundMessage(
-                channel=self._default_channel,
-                chat_id=self._default_chat_id,
+                channel=channel,
+                chat_id=chat_id,
                 content=_render_md(todo),
                 media=[],
                 metadata={},
@@ -134,7 +139,8 @@ class TodoTool(Tool):
         return (
             "Manage todo lists for multi-step tasks in this session. For any task with "
             "2+ steps you MUST create a list before executing, mark each step INPROGRESS "
-            "then COMPLETED, and keep going without asking what to do next. "
+            "then COMPLETED in real time (never all at the end), and keep going without "
+            "asking what to do next. "
             "Actions: create | check | update | append | complete."
         )
 
@@ -218,7 +224,12 @@ class TodoTool(Tool):
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
-        return tool_ok(id=todo.id, name=name, task_count=len(tasks))
+        return tool_ok(
+            id=todo.id,
+            name=name,
+            task_count=len(tasks),
+            instruction=_PROGRESS_INSTRUCTION,
+        )
 
     async def _check(self, id: str | None = None, **_: Any) -> str:
         if not id:

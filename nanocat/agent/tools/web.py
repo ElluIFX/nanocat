@@ -15,10 +15,7 @@ from loguru import logger
 
 from nanocat.agent.tools.base import Tool, exc_message, tool_err, tool_ok
 
-_APPROVE_HINT = (
-    "If you believe this action is necessary, explain the reason to the user "
-    "and ask them to use /approve to temporarily bypass this check."
-)
+_SECURITY_HINT = "The runtime network security policy blocked this request."
 
 if TYPE_CHECKING:
     from nanocat.config.schema import WebSearchConfig
@@ -80,8 +77,6 @@ def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
 
 
 class WebSearchTool(Tool):
-    """Search the web using the configured provider."""
-
     def __init__(
         self,
         config: WebSearchConfig | None = None,
@@ -93,6 +88,11 @@ class WebSearchTool(Tool):
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
         self._safety_check = safety_check
+
+    def _safety_enabled(self) -> bool:
+        from nanocat.config.loader import get_runtime_config
+
+        return self._safety_check and get_runtime_config().tools.global_safty_check
 
     @property
     def name(self) -> str:
@@ -185,13 +185,7 @@ class WebSearchTool(Tool):
             logger.warning("SEARXNG_BASE_URL not set, falling back to DuckDuckGo")
             return await self._search_duckduckgo(query, n)
         endpoint = f"{base_url.rstrip('/')}/search"
-        from nanocat.security import safety_bypass
-
-        check = (
-            _validate_url_safe
-            if self._safety_check and not safety_bypass.get()
-            else _validate_url
-        )
+        check = _validate_url_safe if self._safety_enabled() else _validate_url
         is_valid, error_msg = check(endpoint)
         if not is_valid:
             return tool_err(f"invalid SearXNG URL: {error_msg}")
@@ -259,8 +253,6 @@ class WebSearchTool(Tool):
 
 
 class WebFetchTool(Tool):
-    """Fetch and extract readable content from a URL."""
-
     def __init__(
         self,
         max_chars: int = 50000,
@@ -270,6 +262,11 @@ class WebFetchTool(Tool):
         self.max_chars = max_chars
         self.proxy = proxy
         self._safety_check = safety_check
+
+    def _safety_enabled(self) -> bool:
+        from nanocat.config.loader import get_runtime_config
+
+        return self._safety_check and get_runtime_config().tools.global_safty_check
 
     @property
     def name(self) -> str:
@@ -299,15 +296,13 @@ class WebFetchTool(Tool):
     async def execute(
         self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any
     ) -> str:
-        from nanocat.security import safety_bypass
-
         max_chars = max_chars or self.max_chars
-        if self._safety_check and not safety_bypass.get():
+        if self._safety_enabled():
             is_valid, error_msg = _validate_url_safe(url)
         else:
             is_valid, error_msg = _validate_url(url)
         if not is_valid:
-            return tool_err(f"URL validation failed: {error_msg}", hint=_APPROVE_HINT, url=url)
+            return tool_err(f"URL validation failed: {error_msg}", hint=_SECURITY_HINT, url=url)
 
         result = await self._fetch_jina(url, max_chars)
         if result is None:
@@ -366,13 +361,12 @@ class WebFetchTool(Tool):
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
 
-            from nanocat.security import safety_bypass
             from nanocat.security.network import validate_resolved_url
 
-            if self._safety_check and not safety_bypass.get():
+            if self._safety_enabled():
                 redir_ok, redir_err = validate_resolved_url(str(r.url))
                 if not redir_ok:
-                    return tool_err(f"Redirect blocked: {redir_err}", hint=_APPROVE_HINT, url=url)
+                    return tool_err(f"Redirect blocked: {redir_err}", hint=_SECURITY_HINT, url=url)
 
             ctype = r.headers.get("content-type", "")
 

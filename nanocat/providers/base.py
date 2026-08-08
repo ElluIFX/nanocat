@@ -103,6 +103,16 @@ class LLMProvider(ABC):
         self.generation: GenerationSettings = GenerationSettings()
         self.name = "LLMProvider"
 
+    async def aclose(self) -> None:
+        """Close an adapter-owned async HTTP client when one exists."""
+        client = getattr(self, "_client", None)
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        result = close()
+        if hasattr(result, "__await__"):
+            await result
+
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Sanitize message content: fix empty blocks, strip internal _meta fields."""

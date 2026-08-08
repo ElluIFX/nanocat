@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from loguru import logger
 
 from nanocat.bus.events import InboundMessage, OutboundMessage
 from nanocat.bus.queue import MessageBus
+from nanocat.core.ports import ChannelCapabilities
 
 
 class BaseChannel(ABC):
@@ -38,6 +40,27 @@ class BaseChannel(ABC):
         self.bus = bus
         self.__running: bool = False
         self._transcription_provider: Any = None
+        self._owned_tasks: set[asyncio.Task[Any]] = set()
+
+    @property
+    def capabilities(self) -> ChannelCapabilities:
+        """Return SDK-neutral capabilities for dispatcher and UI projection."""
+        return ChannelCapabilities(tool_events=self.wants_tool_events)
+
+    def _track_task(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        """Register a channel-owned task for deterministic shutdown."""
+        self._owned_tasks.add(task)
+        task.add_done_callback(self._owned_tasks.discard)
+        return task
+
+    async def _cancel_owned_tasks(self) -> None:
+        """Cancel and drain tasks created by the channel adapter."""
+        tasks = tuple(task for task in self._owned_tasks if not task.done())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._owned_tasks.clear()
 
     @property
     def _running(self) -> bool:
@@ -133,6 +156,7 @@ class BaseChannel(ABC):
             media=media or [],
             metadata=metadata or {},
             session_key_override=session_key,
+            principal_id=str(sender_id),
         )
 
         await self.bus.publish_inbound(msg)

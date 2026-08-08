@@ -16,6 +16,11 @@ if not defined PY (
     echo Python 3.11+ not found. Please install it first: https://www.python.org/downloads/
     exit /b 1
 )
+%PY% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+if errorlevel 1 (
+    echo Python 3.11+ is required.
+    exit /b 1
+)
 
 REM --- uv: install via pip if missing ---
 where uv >nul 2>nul

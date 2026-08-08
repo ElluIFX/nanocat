@@ -27,6 +27,7 @@ class CronPayload:
     message: str = ""
     channel: str | None = None  # e.g. "telegram"
     to: str | None = None  # e.g. phone number
+    principal_id: str | None = None  # principal that created the scheduled turn
     # never=silent, always=unconditional delivery, smart=evaluate with assistant model
     notify_mode: Literal["never", "always", "smart"] = "smart"
 

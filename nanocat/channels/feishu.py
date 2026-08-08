@@ -1,24 +1,23 @@
 """Feishu/Lark channel implementation using lark-oapi SDK with WebSocket long connection."""
 
 import asyncio
+import importlib.util
 import json
 import os
 import re
 import threading
 from collections import OrderedDict
-from pathlib import Path
 from typing import Any, Literal
 
 from loguru import logger
+from pydantic import Field
 
 from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.paths import get_media_dir
 from nanocat.config.schema import Base
-from pydantic import Field
-
-import importlib.util
+from nanocat.core.ports import ChannelCapabilities
 
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
 
@@ -260,6 +259,7 @@ class FeishuChannel(BaseChannel):
 
     name = "feishu"
     display_name = "Feishu"
+    capabilities = ChannelCapabilities(progress=True, media=True, reply_threads=True)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -273,6 +273,7 @@ class FeishuChannel(BaseChannel):
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
+        self._ws_stop = threading.Event()
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -294,6 +295,7 @@ class FeishuChannel(BaseChannel):
 
         import lark_oapi as lark
         self._running = True
+        self._ws_stop.clear()
         self._loop = asyncio.get_running_loop()
 
         # Create Lark client for sending messages
@@ -335,20 +337,19 @@ class FeishuChannel(BaseChannel):
         # instead of the already-running main asyncio loop, which would cause
         # "This event loop is already running" errors.
         def run_ws():
-            import time
             import lark_oapi.ws.client as _lark_ws_client
             ws_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(ws_loop)
             # Patch the module-level loop used by lark's ws Client.start()
             _lark_ws_client.loop = ws_loop
             try:
-                while self._running:
+                while self._running and not self._ws_stop.is_set():
                     try:
                         self._ws_client.start()
                     except Exception as e:
                         logger.warning("Feishu WebSocket error: {}", e)
-                    if self._running:
-                        time.sleep(5)
+                    if self._running and not self._ws_stop.is_set():
+                        self._ws_stop.wait(5)
             finally:
                 ws_loop.close()
 
@@ -371,6 +372,16 @@ class FeishuChannel(BaseChannel):
         Reference: https://github.com/larksuite/oapi-sdk-python/blob/v2_main/lark_oapi/ws/client.py#L86
         """
         self._running = False
+        self._ws_stop.set()
+        thread = self._ws_thread
+        if thread is not None and thread.is_alive():
+            await asyncio.to_thread(thread.join, 10.0)
+            if thread.is_alive():
+                logger.warning("Feishu WebSocket thread did not stop before timeout")
+        else:
+            self._ws_client = None
+        self._ws_thread = None
+        await self._cancel_owned_tasks()
         logger.info("Feishu bot stopped")
 
     def _is_bot_mentioned(self, message: Any) -> bool:
@@ -390,13 +401,24 @@ class FeishuChannel(BaseChannel):
 
     def _is_group_message_for_bot(self, message: Any) -> bool:
         """Allow group messages when policy is open or bot is @mentioned."""
+        raw_content = getattr(message, "content", "") or ""
+        try:
+            text = str(json.loads(raw_content).get("text", ""))
+        except (TypeError, json.JSONDecodeError):
+            text = str(raw_content)
+        if text.lstrip().startswith("/"):
+            return True
         if self.config.group_policy == "open":
             return True
         return self._is_bot_mentioned(message)
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
         """Sync helper for adding reaction (runs in thread pool)."""
-        from lark_oapi.api.im.v1 import CreateMessageReactionRequest, CreateMessageReactionRequestBody, Emoji
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+        )
         try:
             request = CreateMessageReactionRequest.builder() \
                 .message_id(message_id) \

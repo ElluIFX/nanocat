@@ -3,6 +3,7 @@
 import json
 import time
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -86,29 +87,69 @@ def build_assistant_message(
     return msg
 
 
+def _normalize_for_token_estimate(value: Any) -> Any:
+    """Keep provider-visible structure while bounding non-text media cost."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"timestamp", "_meta"}:
+                continue
+            if key == "image_url" and isinstance(item, dict):
+                result[key] = {"url": "[image omitted]"}
+                result["_estimated_image_tokens"] = 1024
+                continue
+            result[key] = _normalize_for_token_estimate(item)
+        return result
+    if isinstance(value, list):
+        return [_normalize_for_token_estimate(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _token_estimate_payload(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> str:
+    payload = {
+        "messages": _normalize_for_token_estimate(messages),
+        "tools": _normalize_for_token_estimate(tools or []),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def estimate_prompt_tokens_fast(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> int:
+    """Return a bounded O(n) estimate without tokenizer or network calls."""
+    payload = _token_estimate_payload(messages, tools)
+    image_tokens = sum(
+        1024
+        for message in messages
+        for block in (message.get("content") or [],)
+        if isinstance(block, list)
+        for item in block
+        if isinstance(item, dict) and item.get("type") == "image_url"
+    )
+    return max(1, (len(payload) + 3) // 4 + image_tokens)
+
+
+@lru_cache(maxsize=1)
+def _cl100k_encoding():
+    return tiktoken.get_encoding("cl100k_base")
+
+
 def estimate_prompt_tokens(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
 ) -> int:
     """Estimate prompt tokens with tiktoken."""
     try:
-        enc = tiktoken.get_encoding("cl100k_base")
-        parts: list[str] = []
-        for msg in messages:
-            content = msg.get("content")
-            if isinstance(content, str):
-                parts.append(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        txt = part.get("text", "")
-                        if txt:
-                            parts.append(txt)
-        if tools:
-            parts.append(json.dumps(tools, ensure_ascii=False))
-        return len(enc.encode("\n".join(parts)))
+        enc = _cl100k_encoding()
+        return len(enc.encode(_token_estimate_payload(messages, tools)))
     except Exception:
-        return 0
+        return estimate_prompt_tokens_fast(messages, tools)
 
 
 def estimate_prompt_tokens_chain(

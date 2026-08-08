@@ -21,6 +21,7 @@ from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.base import BaseChannel
 from nanocat.config.schema import Base
+from nanocat.core.ports import ChannelCapabilities
 
 
 class EmailConfig(Base):
@@ -35,6 +36,7 @@ class EmailConfig(Base):
     imap_password: str = ""
     imap_mailbox: str = "INBOX"
     imap_use_ssl: bool = True
+    imap_timeout_seconds: float = 30.0
 
     smtp_host: str = ""
     smtp_port: int = 587
@@ -66,6 +68,7 @@ class EmailChannel(BaseChannel):
 
     name = "email"
     display_name = "Email"
+    capabilities = ChannelCapabilities(media=False, reply_threads=True)
     _IMAP_MONTHS = (
         "Jan",
         "Feb",
@@ -94,6 +97,7 @@ class EmailChannel(BaseChannel):
         self._last_message_id_by_chat: dict[str, str] = {}
         self._processed_uids: set[str] = set()  # Capped to prevent unbounded growth
         self._MAX_PROCESSED_UIDS = 100000
+        self._poll_event: asyncio.Event | None = None
 
     async def start(self) -> None:
         """Start polling IMAP for inbound emails."""
@@ -108,6 +112,7 @@ class EmailChannel(BaseChannel):
             return
 
         self._running = True
+        self._poll_event = asyncio.Event()
         logger.info("Starting Email channel (IMAP polling mode)...")
 
         poll_seconds = max(5, int(self.config.poll_interval_seconds))
@@ -133,11 +138,17 @@ class EmailChannel(BaseChannel):
             except Exception as e:
                 logger.error("Email polling error: {}", e)
 
-            await asyncio.sleep(poll_seconds)
+            try:
+                await asyncio.wait_for(self._poll_event.wait(), timeout=poll_seconds)
+            except asyncio.TimeoutError:
+                pass
+            self._poll_event.clear()
 
     async def stop(self) -> None:
         """Stop polling loop."""
         self._running = False
+        if self._poll_event is not None:
+            self._poll_event.set()
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send email via SMTP."""
@@ -271,10 +282,11 @@ class EmailChannel(BaseChannel):
         messages: list[dict[str, Any]] = []
         mailbox = self.config.imap_mailbox or "INBOX"
 
+        timeout = max(1.0, float(self.config.imap_timeout_seconds))
         if self.config.imap_use_ssl:
-            client = imaplib.IMAP4_SSL(self.config.imap_host, self.config.imap_port)
+            client = imaplib.IMAP4_SSL(self.config.imap_host, self.config.imap_port, timeout=timeout)
         else:
-            client = imaplib.IMAP4(self.config.imap_host, self.config.imap_port)
+            client = imaplib.IMAP4(self.config.imap_host, self.config.imap_port, timeout=timeout)
 
         try:
             client.login(self.config.imap_username, self.config.imap_password)

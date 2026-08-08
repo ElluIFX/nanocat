@@ -14,8 +14,9 @@ build/
 *.pyz
 *.pywz
 *.pyzz
-.venv/
+.*
 venv/
+data/
 __pycache__/
 poetry.lock
 botpy.log
@@ -23,15 +24,5 @@ nano.*.save
 .DS_Store
 uv.lock
 
-AGENT.md
+AGENTS.md
 CLAUDE.md
-
-# nanocat runtime state (anchored at the working dir, default = CWD)
-/data/
-/config.json
-/workspace/
-/sessions/
-/cron/
-/logs/
-/media/
-.pending_restart_notify.json

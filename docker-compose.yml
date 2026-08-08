@@ -3,13 +3,13 @@ x-common-config: &common-config
     context: .
     dockerfile: Dockerfile
   volumes:
-    - ~/.nanocat:/root/.nanocat
+    - ./data:/app/data
 
 services:
   nanocat-gateway:
     container_name: nanocat-gateway
     <<: *common-config
-    command: ["gateway"]
+    command: ["gateway", "-w", "/app/data"]
     restart: unless-stopped
     ports:
       - 18790:18790
@@ -26,6 +26,6 @@ services:
     <<: *common-config
     profiles:
       - cli
-    command: ["status"]
+    command: ["tui", "-w", "/app/data"]
     stdin_open: true
     tty: true

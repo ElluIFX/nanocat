@@ -7,6 +7,7 @@ from nanocat.config.paths import (
     get_legacy_sessions_dir,
     get_logs_dir,
     get_media_dir,
+    get_runtime_paths,
     get_runtime_subdir,
     get_workspace_path,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "get_config_path",
     "get_data_dir",
     "get_runtime_subdir",
+    "get_runtime_paths",
     "get_media_dir",
     "get_cron_dir",
     "get_logs_dir",
