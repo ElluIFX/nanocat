@@ -1,6 +1,7 @@
 """Utility functions for NanoCat."""
 
 import json
+import os
 import time
 from datetime import datetime
 from functools import lru_cache
@@ -21,6 +22,18 @@ def detect_image_mime(data: bytes) -> str | None:
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def detect_shell() -> str:
+    shell = os.environ.get("SHELL") or os.environ.get("COMSPEC")
+    if shell:
+        return shell
+    if os.name == "nt":
+        # Windows defaults to PowerShell when available.
+        if os.environ.get("PSModulePath"):
+            return "powershell.exe"
+        return "cmd.exe"
+    return "/bin/sh"
 
 
 def ensure_dir(path: Path) -> Path:

@@ -16,8 +16,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
-from nanocat.security.command import extract_command_urls
-from nanocat.security.command_analyzer import CommandRisk, analyze_command
+from nanocat.security.command import CommandRisk, analyze_command, extract_command_urls
 from nanocat.security.network import is_local_url
 from nanocat.security.path import extract_absolute_paths, is_under, resolve_path
 
@@ -89,9 +88,7 @@ def _redact_value(value: Any, key: str | None = None) -> Any:
 
 
 def _safe_params(params: dict[str, Any], limit: int = 4000) -> str:
-    text = json.dumps(
-        _redact_value(params), ensure_ascii=False, separators=(",", ":"), default=str
-    )
+    text = json.dumps(_redact_value(params), ensure_ascii=False, separators=(",", ":"), default=str)
     return text[:limit] + ("..." if len(text) > limit else "")
 
 

@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from loguru import logger
 
+from nanocat.utils.helpers import detect_shell
+
 Decision = Literal["approve", "deny", "unavailable"]
 
 
@@ -113,7 +115,7 @@ class AutoApprovalReviewer:
                 "machine": platform.machine(),
                 "platform": platform.platform(),
                 "os_name": os.name,
-                "shell": self._detect_shell(),
+                "shell": detect_shell(),
             },
             "user_input": self._redact(user_input, 4_000),
             "tool": tool_name,
