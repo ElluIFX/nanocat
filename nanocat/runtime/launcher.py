@@ -131,6 +131,16 @@ def build_runtime(
     agent = AgentService(agent_engine)
     system_turns = SystemTurnGateway(agent, bus)
 
+    from nanocat.application.control import ApplicationControlService
+
+    control = ApplicationControlService(
+        engine=agent_engine,
+        config=config,
+        session_manager=session_manager,
+        intervention=intervention,
+        supervisor=None,  # bound after the supervisor is constructed below
+    )
+
     async def on_cron_job(job: CronJob) -> str | None:
         from nanocat.agent.tools.cron import CronTool
         from nanocat.utils.evaluator import evaluate_response
@@ -282,6 +292,11 @@ def build_runtime(
     )
     runtime.supervisor = RuntimeSupervisor(runtime)
     agent.set_runtime_supervisor(runtime.supervisor)
+    control.set_supervisor(runtime.supervisor)
+    tui_channel = channels.get_channel("tui")
+    bind_control = getattr(tui_channel, "bind_control", None)
+    if callable(bind_control):
+        bind_control(control)
     return runtime
 
 

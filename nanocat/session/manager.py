@@ -343,6 +343,44 @@ class SessionManager:
             meta["sessions"][session_id]["name"] = name
             self._write_metadata(channel, meta)
 
+    def delete_session(self, channel: str, session_id: str) -> bool:
+        """Remove one non-active session: metadata entry, cache and JSONL file.
+
+        The session file is moved to the OS trash when possible so deletion is
+        recoverable. The active session of a chat is refused — callers must
+        switch away first. Returns False when the session is unknown, still
+        active, or the file could not be removed.
+        """
+        meta = self._read_metadata(channel)
+        info = meta.get("sessions", {}).get(session_id)
+        if info is None:
+            return False
+        chat_id = info.get("chat_id", "")
+        chat_meta = meta.get("chats", {}).get(chat_id) or {}
+        if chat_meta.get("active") == session_id:
+            return False
+        meta["sessions"].pop(session_id, None)
+        self._write_metadata(channel, meta)
+        for key, cached in tuple(self._cache.items()):
+            if cached.channel == channel and cached.id == session_id:
+                self._cache.pop(key, None)
+        path = self._session_path(channel, session_id)
+        if not path.exists():
+            return True
+        try:
+            from send2trash import send2trash
+
+            send2trash(str(path))
+            return True
+        except Exception as e:
+            logger.warning("send2trash failed for {}: {}; falling back to unlink", path, e)
+        try:
+            path.unlink()
+            return True
+        except OSError as e:
+            logger.error("Failed to delete session file {}: {}", path, e)
+            return False
+
     def get_session(self, channel: str, session_id: str) -> Session | None:
         """Load a session by channel and session ID."""
         return self._load(channel, session_id)

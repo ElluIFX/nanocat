@@ -100,7 +100,7 @@ class CommandRouter:
                 "Compact the conversation or show context status",
                 "/compact [status]",
             ),
-            "session": ("Inspect or switch sessions", "/session [list|use|delete]"),
+            "session": ("Inspect or switch sessions", "/session [list|view|switch]"),
         }
         specs = []
         for name in legacy_names:
