@@ -62,7 +62,6 @@ from nanocat.agent.tools.wait import WaitTool
 from nanocat.agent.tools.web import WebFetchTool, WebSearchTool
 from nanocat.application.auto_approval import AutoApprovalReviewer
 from nanocat.application.command_handlers import RuntimeCommandHandlers
-from nanocat.application.command_parser import CommandClassification
 from nanocat.application.command_router import CommandRouter
 from nanocat.application.command_service import CommandCallbacks, CommandService
 from nanocat.application.intervention import parse_intervention_action
@@ -171,6 +170,8 @@ class AgentLoop:
         self._steer_buf: dict[str, list[InboundMessage]] = {}
         self._steer_events: dict[str, asyncio.Event] = {}
         self._progressed: dict[str, bool] = {}
+        self._exclusive_sessions: set[str] = set()
+        self._command_dispatcher: Any | None = None
         self._nowledge_working_memory_loaded: set[str] = set()
         self.subagents._steer_inject = self._steer_buf
         self.subagents._is_live = lambda sk: any(
@@ -571,22 +572,53 @@ class AgentLoop:
             logger.debug("[PULSE]\n{}", pulse)
         return strip_pulse(text) or None
 
-    @staticmethod
-    def _extract_slash_command(text: str) -> str | None:
-        """Extract normalized slash command name, e.g. '/model x' -> 'model'."""
-        raw = text.strip()
-        if not raw.startswith("/"):
-            return None
-        token = raw.split(maxsplit=1)[0][1:]
-        if not token:
-            return None
-        # Telegram-style /cmd@botname support
-        return token.split("@", 1)[0].strip().lower() or None
-
     def _any_session_busy(self) -> bool:
         """Return whether at least one user turn is actively executing."""
         active_states = {TurnState.RUNNING, TurnState.WAITING_FOR_USER}
         return any(record.state in active_states for record in self.turns.snapshot())
+
+    @property
+    def command_dispatcher(self) -> Any | None:
+        """Return the runtime-owned command dispatcher when attached."""
+        return self._command_dispatcher
+
+    def set_command_dispatcher(self, dispatcher: Any) -> None:
+        """Attach the runtime-owned command dispatcher."""
+        self._command_dispatcher = dispatcher
+
+    def is_session_busy(self, session_key: str) -> bool:
+        """Return whether a session has queued, active, or exclusive work."""
+        if session_key in self._exclusive_sessions:
+            return True
+        if self.bus.pending_inbound(session_key) > 0:
+            return True
+        tasks = self._active_tasks.get(session_key, ())
+        if any(not task.done() for task in tasks):
+            return True
+        lock = self._session_locks.get(session_key)
+        if lock is not None and lock.locked():
+            return True
+        return any(
+            record.session_key == session_key
+            and record.state in {TurnState.RUNNING, TurnState.WAITING_FOR_USER}
+            for record in self.turns.snapshot()
+        )
+
+    def try_reserve_session_operation(self, session_key: str) -> bool:
+        """Atomically reserve a session operation from the event-loop thread."""
+        if self.is_session_busy(session_key):
+            return False
+        self._exclusive_sessions.add(session_key)
+        return True
+
+    def release_session_operation(self, session_key: str) -> None:
+        """Release a previously reserved session operation."""
+        self._exclusive_sessions.discard(session_key)
+
+    async def _wait_for_session_operation(self, session_key: str) -> None:
+        """Yield while an exclusive command owns the session."""
+        while session_key in self._exclusive_sessions:
+            await asyncio.sleep(0)
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
@@ -600,10 +632,6 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
-
-    def _is_standalone_cmd(self, msg: InboundMessage) -> bool:
-        """Return True if *msg* is an independent command that must not interrupt LLM turns."""
-        return self.command_router.is_standalone(msg.content)
 
     @staticmethod
     def _merge_messages(prev: InboundMessage, new: InboundMessage) -> InboundMessage:
@@ -1120,57 +1148,16 @@ class AgentLoop:
                 logger.warning("Error consuming inbound message: {}, continuing...", e)
                 continue
 
-            intervention_response = await self.command_service.dispatch_intervention(msg)
-            if intervention_response is not None:
-                await self.bus.publish_outbound(intervention_response)
-                continue
-
-            inspection = self.command_router.inspect(msg.content)
-            escaped_command = False
-            if inspection.classified.kind is CommandClassification.ESCAPED_TEXT:
-                msg = replace(msg, content=inspection.classified.text)
-                escaped_command = True
-            elif inspection.result is not None:
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=self.command_router.feedback(inspection.result),
-                        event_id=msg.event_id,
-                        correlation_id=msg.correlation_id,
-                        metadata={"_control": True},
-                    )
-                )
-                continue
-
-            command_name = self._extract_slash_command(msg.content)
-            is_control_command = not escaped_command and self._is_standalone_cmd(msg)
             if (
                 self.intervention is not None
-                and not is_control_command
                 and self.intervention.defer(
                     ConversationRef(msg.channel, msg.chat_id, msg.session_key), msg
                 )
             ):
                 continue
-            if not escaped_command and command_name == "stop":
-                if self.intervention is not None:
-                    await self.intervention.cancel_session(msg.session_key)
-                self.turns.cancel_session(msg.session_key, "stopped by user")
-                await self._handle_stop(msg)
-                self._pending_buf.pop(msg.session_key, None)
-                self._session_gen.pop(msg.session_key, None)
-                self._steer_buf.pop(msg.session_key, None)
-                self._wake_reply_waiter(msg.session_key)
-                self._progressed.pop(msg.session_key, None)
-            elif not escaped_command and command_name == "restart":
-                if self.intervention is not None:
-                    await self.intervention.cancel_session(msg.session_key)
-                self.turns.cancel_session(msg.session_key, "restart requested")
-                await self._handle_restart(msg)
-            elif (not escaped_command and self._is_standalone_cmd(msg)) or msg.channel == "system":
+            if msg.channel == "system":
                 # Standalone commands and system messages (e.g. subagent results):
-                # queue normally, do NOT interrupt an in-flight LLM turn.
+                # Queue system messages normally without command routing.
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(
@@ -1238,7 +1225,7 @@ class AgentLoop:
         await asyncio.gather(consume_task, return_exceptions=True)
         return None
 
-    async def _handle_stop(self, msg: InboundMessage) -> None:
+    async def _handle_stop(self, msg: InboundMessage) -> OutboundMessage:
         """Cancel all active tasks and subagents for the session."""
         tasks = self._active_tasks.pop(msg.session_key, [])
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
@@ -1248,29 +1235,40 @@ class AgentLoop:
             except (asyncio.CancelledError, Exception):
                 pass
         sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
+        self._pending_buf.pop(msg.session_key, None)
+        self._session_gen.pop(msg.session_key, None)
+        self._steer_buf.pop(msg.session_key, None)
+        self._wake_reply_waiter(msg.session_key)
+        self._progressed.pop(msg.session_key, None)
         total = cancelled + sub_cancelled
         content = self.tips.stop_tasks.format(count=total) if total else self.tips.stop_idle
-        await self.bus.publish_outbound(
-            OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=content,
-            )
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=content,
+            event_id=msg.event_id,
+            correlation_id=msg.correlation_id,
+            request_id=msg.request_id,
+            principal_id=msg.principal_id,
+            metadata={"_control": True, "_command": "stop"},
         )
 
-    async def _handle_restart(self, msg: InboundMessage) -> None:
+    async def _handle_restart(self, msg: InboundMessage) -> OutboundMessage:
         """Restart the process in-place via os.execv."""
-        await self.bus.publish_outbound(
-            OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=self.tips.restart,
-            )
+        response = OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=self.tips.restart,
+            event_id=msg.event_id,
+            correlation_id=msg.correlation_id,
+            request_id=msg.request_id,
+            principal_id=msg.principal_id,
+            metadata={"_control": True, "_command": "restart"},
         )
 
         if self._runtime_supervisor is not None:
             await self._runtime_supervisor.request_restart(msg.channel, msg.chat_id)
-            return
+            return response
 
         try:
             from nanocat.config.paths import get_restart_notify_path
@@ -1290,6 +1288,7 @@ class AgentLoop:
             os.execv(sys.executable, [sys.executable, "-m", "nanocat"] + sys.argv[1:])
 
         asyncio.create_task(_do_restart())
+        return response
 
     async def _dispatch_restart_notify(self) -> None:
         """Send a restart-done notification if one was persisted before the last restart."""
@@ -1922,6 +1921,7 @@ class AgentLoop:
         that if a newer message arrived during processing (interrupt) this
         task can discard its results transparently.
         """
+        await self._wait_for_session_operation(msg.session_key)
         session_lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
         async with session_lock:
             async with self._turn_slots:
@@ -1986,6 +1986,7 @@ class AgentLoop:
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
         self._active_tasks.clear()
+        self._exclusive_sessions.clear()
 
         background_tasks = tuple(
             task
@@ -2150,10 +2151,6 @@ class AgentLoop:
             session = self.sessions.get_or_create(msg.channel, msg.chat_id)
             session.metadata["_last_principal_id"] = msg.principal_id or msg.sender_id
 
-        command_outcome = await self.command_service.dispatch(msg, session)
-        if command_outcome.response is not None:
-            return command_outcome.response
-        msg = command_outcome.message or msg
         if not transient:
             await self.memory_compactor.maybe_compact_by_tokens(session)
 
@@ -2377,23 +2374,16 @@ class AgentLoop:
             content=content,
             metadata=dict(metadata or {}),
         )
-        intervention_response = await self.command_service.dispatch_intervention(msg)
-        if intervention_response is not None:
-            return intervention_response.content
-
-        inspection = self.command_router.inspect(content)
-        if inspection.classified.kind is CommandClassification.ESCAPED_TEXT:
-            pass
-        elif inspection.result is not None:
-            return self.command_router.feedback(inspection.result)
-        elif inspection.spec is not None and inspection.spec.name == "stop":
-            self.stop()
-            return self.tips.stop_idle
-        elif inspection.spec is not None and inspection.spec.name == "restart":
-            await self._handle_restart(msg)
-            return self.tips.restart
+        if MessageBus.is_command_candidate(content):
+            if self._command_dispatcher is None:
+                raise RuntimeError("command dispatcher is unavailable")
+            response = await self._command_dispatcher.execute(msg, publish=False)
+            return response.content if response is not None else ""
+        if MessageBus.is_escaped_text(content):
+            msg = replace(msg, content=MessageBus.normalize_escaped_text(content))
 
         async def _run() -> str:
+            await self._wait_for_session_operation(session_key)
             session_lock = self._session_locks.setdefault(session_key, asyncio.Lock())
             async with session_lock:
                 async with self._turn_slots:

@@ -46,3 +46,4 @@ class RuntimeContext:
     supervisor: Any | None = None
     log_sink_id: int | None = None
     intervention: Any | None = None
+    command_dispatcher: Any | None = None

@@ -14,14 +14,14 @@ objects.
 
 from __future__ import annotations
 
-import asyncio
 import shlex
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping
 
 from loguru import logger
 
-from nanocat.bus.events import InboundMessage, OutboundMessage
+from nanocat.application.text_catalog import USER_TEXT
+from nanocat.bus.events import InboundMessage
 from nanocat.core.messages import ConversationRef
 
 # ---------------------------------------------------------------------------
@@ -493,6 +493,9 @@ class ApplicationControlService:
         return self._sessions.get_or_create(conversation.channel, conversation.chat_id)
 
     def _session_busy(self, session_key: str) -> bool:
+        checker = getattr(self._engine, "is_session_busy", None)
+        if callable(checker):
+            return bool(checker(session_key))
         tasks = getattr(self._engine, "_active_tasks", {}).get(session_key, [])
         return any(not task.done() for task in tasks)
 
@@ -658,67 +661,88 @@ class ApplicationControlService:
     async def _action_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_key = self._session_key(conversation)
-        old = self._active_session(conversation)
-        if self._intervention is not None:
-            await self._intervention.cancel_session(session_key)
-        old.metadata.pop("nowledge_thread_id", None)
-        new = self._sessions._new_session(conversation.channel, conversation.chat_id)
-        self._sessions.save(new)  # persist immediately so list/rename can see it
-        engine = self._engine
-        engine._pending_buf.pop(session_key, None)
-        engine._session_gen.pop(session_key, None)
-        return _ok(
-            {
-                "session_id": new.id,
-                "previous_session_id": old.id,
-                "message": "New session started.",
-            }
-        )
+        if not self._engine.try_reserve_session_operation(session_key):
+            return _err(USER_TEXT.command_idle_only, code="invalid_state")
+        try:
+            old = self._active_session(conversation)
+            if self._intervention is not None:
+                await self._intervention.cancel_session(session_key)
+            old.metadata.pop("nowledge_thread_id", None)
+            new = self._sessions._new_session(conversation.channel, conversation.chat_id)
+            self._sessions.save(new)  # persist immediately so list/rename can see it
+            engine = self._engine
+            engine._pending_buf.pop(session_key, None)
+            engine._session_gen.pop(session_key, None)
+            return _ok(
+                {
+                    "session_id": new.id,
+                    "previous_session_id": old.id,
+                    "message": "New session started.",
+                }
+            )
+        finally:
+            self._engine.release_session_operation(session_key)
 
     async def _action_session_switch(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_id = str(params.get("session_id") or "").strip()
         if not session_id:
             return _err("Missing session_id", code="invalid_argument")
-        if self._session_busy(self._session_key(conversation)):
-            return _err(
-                "A turn is still running; stop it before switching sessions.",
-                code="invalid_state",
+        session_key = self._session_key(conversation)
+        if not self._engine.try_reserve_session_operation(session_key):
+            return _err(USER_TEXT.command_idle_only, code="invalid_state")
+        try:
+            ok = self._sessions.set_active(conversation.channel, conversation.chat_id, session_id)
+            if not ok:
+                return _err(f"Session `{session_id}` not found.", code="not_found")
+            if self._intervention is not None:
+                await self._intervention.cancel_session(session_key)
+            target = self._sessions.get_session(conversation.channel, session_id)
+            return _ok(
+                {
+                    "session_id": session_id,
+                    "session_name": (target.name if target else None) or "",
+                    "events": self._session_display_events(target) if target else [],
+                    "message": f"Switched to session `{session_id}`.",
+                }
             )
-        ok = self._sessions.set_active(conversation.channel, conversation.chat_id, session_id)
-        if not ok:
-            return _err(f"Session `{session_id}` not found.", code="not_found")
-        if self._intervention is not None:
-            await self._intervention.cancel_session(self._session_key(conversation))
-        target = self._sessions.get_session(conversation.channel, session_id)
-        return _ok(
-            {
-                "session_id": session_id,
-                "session_name": (target.name if target else None) or "",
-                "events": self._session_display_events(target) if target else [],
-                "message": f"Switched to session `{session_id}`.",
-            }
-        )
+        finally:
+            self._engine.release_session_operation(session_key)
 
     async def _action_session_rename(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
+        session_key = self._session_key(conversation)
+        if not self._engine.try_reserve_session_operation(session_key):
+            return _err(USER_TEXT.command_idle_only, code="invalid_state")
         session_id = str(params.get("session_id") or "").strip()
         name = str(params.get("name") or "").strip() or None
-        if self._sessions.get_session(conversation.channel, session_id) is None:
-            return _err(f"Session `{session_id}` not found.", code="not_found")
-        self._sessions.set_name(conversation.channel, session_id, name)
-        return _ok({"session_id": session_id, "name": name or ""})
+        try:
+            if self._sessions.get_session(conversation.channel, session_id) is None:
+                return _err(f"Session `{session_id}` not found.", code="not_found")
+            self._sessions.set_name(conversation.channel, session_id, name)
+            return _ok({"session_id": session_id, "name": name or ""})
+        finally:
+            self._engine.release_session_operation(session_key)
 
     async def _action_session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_id = str(params.get("session_id") or "").strip()
         session_key = self._session_key(conversation)
         active = self._active_session(conversation)
-        if self._session_busy(session_key) and active.id == session_id:
-            return _err(
-                "This session is running a turn; stop it before deleting.",
-                code="invalid_state",
-            )
+        if not self._engine.try_reserve_session_operation(session_key):
+            return _err(USER_TEXT.command_idle_only, code="invalid_state")
+        try:
+            return await self._delete_session(conversation, session_id, session_key, active)
+        finally:
+            self._engine.release_session_operation(session_key)
+
+    async def _delete_session(
+        self,
+        conversation: ConversationRef,
+        session_id: str,
+        session_key: str,
+        active: Any,
+    ) -> dict[str, Any]:
         replacement_id = None
         if active.id == session_id:
             if self._intervention is not None:
@@ -874,33 +898,34 @@ class ApplicationControlService:
 
     async def _action_compact_run(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
+        session_key = self._session_key(conversation)
+        if not self._engine.try_reserve_session_operation(session_key):
+            return _err(USER_TEXT.command_idle_only, code="invalid_state")
         session = self._active_session(conversation)
-        if self._session_busy(self._session_key(conversation)):
-            return _err(
-                "A turn is still running; compact after it finishes.",
-                code="invalid_state",
+        try:
+            compactor = self._engine.memory_compactor
+            before = compactor.status(session)
+            changed = await compactor.maybe_compact_by_tokens(session, force=True)
+            after = compactor.status(session)
+            checkpoint = after.get("checkpoint")
+            checkpoint_data = checkpoint.to_dict() if checkpoint is not None else None
+            return _ok(
+                {
+                    "changed": bool(changed),
+                    "tokens_before": before["estimated_prompt_tokens"],
+                    "tokens_after": after["estimated_prompt_tokens"],
+                    "context_usage_percent": after["context_usage_percent"],
+                    "checkpoint": checkpoint_data,
+                    "failure_count": after["failure_count"],
+                    "message": (
+                        "Compaction completed."
+                        if changed
+                        else "Nothing to compact; original history was kept."
+                    ),
+                }
             )
-        compactor = self._engine.memory_compactor
-        before = compactor.status(session)
-        changed = await compactor.maybe_compact_by_tokens(session, force=True)
-        after = compactor.status(session)
-        checkpoint = after.get("checkpoint")
-        checkpoint_data = checkpoint.to_dict() if checkpoint is not None else None
-        return _ok(
-            {
-                "changed": bool(changed),
-                "tokens_before": before["estimated_prompt_tokens"],
-                "tokens_after": after["estimated_prompt_tokens"],
-                "context_usage_percent": after["context_usage_percent"],
-                "checkpoint": checkpoint_data,
-                "failure_count": after["failure_count"],
-                "message": (
-                    "Compaction completed."
-                    if changed
-                    else "Nothing to compact; original history was kept."
-                ),
-            }
-        )
+        finally:
+            self._engine.release_session_operation(session_key)
 
     # ------------------------------------------------------------------
     # runtime actions
@@ -908,36 +933,19 @@ class ApplicationControlService:
 
     async def _action_turn_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
-        session_key = self._session_key(conversation)
         engine = self._engine
-        if self._intervention is not None:
-            await self._intervention.cancel_session(session_key)
-        engine.turns.cancel_session(session_key, "stopped by user")
-        tasks = engine._active_tasks.pop(session_key, [])
-        cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
-        for task in tasks:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-        sub_cancelled = await engine.subagents.cancel_by_session(session_key)
-        engine._pending_buf.pop(session_key, None)
-        engine._session_gen.pop(session_key, None)
-        engine._steer_buf.pop(session_key, None)
-        engine._wake_reply_waiter(session_key)
-        engine._progressed.pop(session_key, None)
-        total = cancelled + sub_cancelled
-        message = (
-            engine.tips.stop_tasks.format(count=total) if total else engine.tips.stop_idle
+        dispatcher = getattr(engine, "command_dispatcher", None)
+        if dispatcher is None:
+            return _err("Command dispatcher is unavailable.", code="invalid_state")
+        msg = InboundMessage(
+            channel=conversation.channel,
+            sender_id=str(params.get("principal_id") or "local"),
+            principal_id=str(params.get("principal_id") or "local"),
+            chat_id=conversation.chat_id,
+            content="/stop",
         )
-        await engine.bus.publish_outbound(
-            OutboundMessage(
-                channel=conversation.channel,
-                chat_id=conversation.chat_id,
-                content=message,
-            )
-        )
-        return _ok({"cancelled": total, "message": message})
+        response = await dispatcher.execute(msg, publish=False)
+        return _ok({"message": response.content if response else ""})
 
     async def _action_runtime_restart(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
@@ -973,9 +981,12 @@ class ApplicationControlService:
             chat_id=conversation.chat_id,
             content=command,
         )
-        response = await self._engine.command_service.dispatch_intervention(msg)
-        if response is not None:
-            await self._engine.bus.publish_outbound(response)
+        dispatcher = getattr(self._engine, "command_dispatcher", None)
+        response = (
+            await dispatcher.execute(msg, publish=False)
+            if dispatcher is not None
+            else await self._engine.command_service.dispatch_intervention(msg)
+        )
         state = (response.metadata or {}).get("intervention_state") if response else None
         mode = (response.metadata or {}).get("_intervention_mode") if response else None
         return _ok(
@@ -1006,21 +1017,7 @@ class ApplicationControlService:
             content=text,
         )
 
-        intervention_response = await engine.command_service.dispatch_intervention(msg)
-        if intervention_response is not None:
-            await engine.bus.publish_outbound(intervention_response)
-            return _ok({"content": intervention_response.content, "routed": "intervention"})
-
         inspection = engine.command_router.inspect(text)
-        if inspection.result is not None:
-            return _ok(
-                {
-                    "content": engine.command_router.feedback(inspection.result),
-                    "routed": "validation",
-                    "result_ok": inspection.result.ok,
-                }
-            )
-
         command_name = inspection.spec.name if inspection.spec is not None else None
         if command_name in {"stop", "restart"}:
             return _err(
@@ -1028,24 +1025,10 @@ class ApplicationControlService:
                 code="invalid_argument",
             )
 
-        if command_name in {"cron", "memory"}:
-            session = self._active_session(conversation)
-            result = await engine.command_handlers.execute(
-                inspection,
-                principal_id=principal_id,
-                session=session,
-            )
-            return _ok(
-                {
-                    "content": engine.command_router.feedback(result),
-                    "routed": "structured",
-                    "result_ok": result.ok,
-                    "result": _jsonable(dict(result.data)),
-                }
-            )
-
-        session = self._active_session(conversation)
-        outcome = await engine.command_service.dispatch(msg, session)
-        if not outcome.handled or outcome.response is None:
+        dispatcher = getattr(engine, "command_dispatcher", None)
+        if dispatcher is None:
+            return _err("Command dispatcher is unavailable.", code="invalid_state")
+        response = await dispatcher.execute(msg, publish=False)
+        if response is None:
             return _err(f"Command `{text}` was not handled.", code="not_handled")
-        return _ok({"content": outcome.response.content, "routed": "legacy"})
+        return _ok({"content": response.content, "routed": "command"})

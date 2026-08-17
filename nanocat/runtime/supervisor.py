@@ -58,6 +58,13 @@ class RuntimeSupervisor:
             self._set_health("intervention", HealthState.STARTING)
         self.owners.register("agent", self.runtime.agent, closer=self._stop_agent)
         self._set_health("agent", HealthState.STARTING)
+        if getattr(self.runtime, "command_dispatcher", None) is not None:
+            self.owners.register(
+                "commands",
+                self.runtime.command_dispatcher,
+                closer=self.runtime.command_dispatcher.close,
+            )
+            self._set_health("commands", HealthState.STARTING)
         self.owners.register("cron", self.runtime.cron, closer=self.runtime.cron.close)
         self._set_health("cron", HealthState.STARTING)
         self.owners.register(
@@ -104,6 +111,10 @@ class RuntimeSupervisor:
                 ),
                 asyncio.create_task(self.runtime.agent.run(), name="nanocat.agent"),
             ]
+            if getattr(self.runtime, "command_dispatcher", None) is not None:
+                self._tasks.append(
+                    await self.runtime.command_dispatcher.start()
+                )
             channels_ready = await self.runtime.channels.wait_ready()
             self._set_health(
                 "channels",
@@ -111,8 +122,10 @@ class RuntimeSupervisor:
                 "" if channels_ready else "one or more channels are not ready",
             )
             self._set_health("agent", HealthState.READY)
+            if "commands" in self._health:
+                self._set_health("commands", HealthState.READY)
         except Exception:
-            for name in ("cron", "heartbeat", "channels", "agent"):
+            for name in ("cron", "heartbeat", "channels", "agent", "commands"):
                 self._set_health(name, HealthState.FAILED, "startup failed")
             await self.stop(ShutdownReason(kind="component_failure", detail="startup failed"))
             raise
@@ -129,7 +142,7 @@ class RuntimeSupervisor:
             raise
         except Exception:
             logger.exception("Runtime component task failed")
-            for name in ("channels", "agent"):
+            for name in ("channels", "agent", "commands"):
                 self._set_health(name, HealthState.FAILED, "runtime task failed")
             await self.stop(
                 ShutdownReason(kind="component_failure", detail="runtime task failed")

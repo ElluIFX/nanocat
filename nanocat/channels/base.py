@@ -9,8 +9,9 @@ from typing import Any
 
 from loguru import logger
 
+from nanocat.application.text_catalog import USER_TEXT
 from nanocat.bus.events import InboundMessage, OutboundMessage
-from nanocat.bus.queue import MessageBus
+from nanocat.bus.queue import BusFullError, MessageBus
 from nanocat.core.ports import ChannelCapabilities
 
 
@@ -159,7 +160,17 @@ class BaseChannel(ABC):
             principal_id=str(sender_id),
         )
 
-        await self.bus.publish_inbound(msg)
+        try:
+            await self.bus.publish_inbound(msg)
+        except BusFullError:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=self.name,
+                    chat_id=str(chat_id),
+                    content=USER_TEXT.command_lane_busy,
+                    metadata={"_control": True, "_command": "ingress"},
+                )
+            )
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:

@@ -26,6 +26,7 @@ class CommandExecutionPolicy(StrEnum):
     NEW_TURN = "new_turn"
     RUNTIME_CONTROL = "runtime_control"
     INTERVENTION_RESPONSE = "intervention_response"
+    IDLE_ONLY = "idle_only"
 
 
 class CommandErrorCode(StrEnum):
@@ -74,6 +75,8 @@ class CommandSpec:
     enabled: bool = True
     legacy_passthrough: bool = False
     accepts_arguments: bool = True
+    idle_only: bool = False
+    idle_exempt_subcommands: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", self.name.strip().lstrip("/").lower())
@@ -86,6 +89,11 @@ class CommandSpec:
             self,
             "subcommands",
             tuple(item.strip().lower() for item in self.subcommands),
+        )
+        object.__setattr__(
+            self,
+            "idle_exempt_subcommands",
+            tuple(item.strip().lower() for item in self.idle_exempt_subcommands),
         )
 
 

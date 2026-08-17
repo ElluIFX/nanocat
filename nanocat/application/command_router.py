@@ -118,10 +118,14 @@ class CommandRouter:
                         if name == "stop"
                         else CommandExecutionPolicy.RUNTIME_CONTROL
                         if name == "restart"
+                        else CommandExecutionPolicy.IDLE_ONLY
+                        if name in {"new", "compact"}
                         else CommandExecutionPolicy.IMMEDIATE
                     ),
                     legacy_passthrough=True,
                     accepts_arguments=name not in no_argument_commands,
+                    idle_only=name in {"new", "compact"},
+                    idle_exempt_subcommands=("status",) if name == "compact" else (),
                 )
             )
         specs.extend(

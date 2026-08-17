@@ -3,6 +3,7 @@
 from nanocat.application.agent_service import AgentService
 from nanocat.application.auto_approval import AutoApprovalResult, AutoApprovalReviewer
 from nanocat.application.channel_dispatcher import DeliveryPolicy, OutboundDispatcher
+from nanocat.application.command_dispatcher import CommandDispatcher
 from nanocat.application.command_handlers import RuntimeCommandHandlers
 from nanocat.application.command_parser import CommandParser
 from nanocat.application.command_router import CommandInspection, CommandRegistry, CommandRouter
@@ -30,6 +31,7 @@ __all__ = [
     "CommandInspection",
     "CommandParser",
     "RuntimeCommandHandlers",
+    "CommandDispatcher",
     "CommandRegistry",
     "CommandRouter",
     "CommandCallbacks",

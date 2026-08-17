@@ -12,6 +12,8 @@ class UserTextCatalog:
     new_session: str = "New session started."
     stop_tasks: str = "Stopped {count} task(s)."
     stop_idle: str = "No active task to stop."
+    command_idle_only: str = "This command is available only when the session is idle."
+    command_lane_busy: str = "The command lane is busy. Try again shortly."
     error: str = "Sorry, I encountered an error."
     background_done: str = "Background task completed."
     help: str = (
