@@ -137,6 +137,11 @@ class RuntimeSupervisor:
         try:
             await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
+            if self._stop_requested:
+                await self.shutdown_coordinator.shutdown(
+                    ShutdownReason(kind="shutdown", detail="shutdown already in progress")
+                )
+                return
             self._set_health("agent", HealthState.DRAINING, "runtime task cancelled")
             await self.stop(ShutdownReason(kind="signal", detail="runtime task cancelled"))
             raise
@@ -160,6 +165,11 @@ class RuntimeSupervisor:
 
     async def stop(self, reason: ShutdownReason | None = None) -> None:
         """Stop services once, then join or cancel their tracked tasks."""
+        if self._stop_requested:
+            await self.shutdown_coordinator.shutdown(
+                reason or ShutdownReason(kind="manual", detail="stop requested")
+            )
+            return
         self._stop_requested = True
         restart_task = self._restart_task
         if (

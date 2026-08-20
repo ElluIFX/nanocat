@@ -45,7 +45,7 @@ channel callback
 
 - 介入响应和命令属于控制面；普通 turn、tool call、cron、heartbeat、subagent 属于数据面。控制面不能被 LLM prompt 解释。
 - 以单个 `session_key` 为顺序边界；不同 session 可并发。任何新增等待、缓存、task、timer、client、stream、process 或临时文件都必须有上限、deadline、owner 和 close path。
-- `RuntimeSupervisor` 负责组件启动、健康状态、部分失败隔离和逆序关闭；`stop/close/restart` 必须幂等。不得创建第二个 outbound dispatcher 或 MCP owner。
+- `RuntimeSupervisor` 负责组件启动、健康状态、部分失败隔离和逆序关闭；`stop/close/restart` 必须幂等。重复 stop 等待同一 shutdown 完成，不能取消正在执行的 restart task。不得创建第二个 outbound dispatcher 或 MCP owner。
 - 当前兼容边界：`AgentService` 已是 runtime 对外 facade，但 `AgentLoop` 仍拥有实际 turn/tool/MCP/process/HTTP engine；后续拆分只能通过现有 facade、`TurnRequest`、`ToolExecutionContext` 和 ports 进行。
 - `CommandDispatcher` 独占 slash command 消费、命令策略、busy 检查和 control response；`AgentLoop` 只消费普通消息与 system turn。
 - `OutboundDispatcher` 独占 outbound 消费、能力过滤、有限退避重试和 request-scoped `DeliveryResult`；control outbound 使用保留容量，发送失败不得回写 inbound 或递归触发 turn。
@@ -237,6 +237,7 @@ tool_err("operation failed", hint="retry with ...", detail=detail)
 - `nanocat/application/control.py` 的 `ApplicationControlService` 是 TUI 的唯一控制入口：session new/switch/rename/delete、model select/set_effort、compact status/run、turn cancel、approval respond、runtime snapshot、logs tail 和 `command_execute` 全部结构化返回 JSON-safe dict，并通过 `CommandDispatcher` 复用命令策略；TUI 不提供 runtime restart 控件或 Action Center 动作，TUI 控件不再拼接 slash 命令，手动 slash 输入仍兼容。`build_runtime()` 负责构造并 `bind_control` 到 TUI channel。
 - 实时命令控制面本轮已完成静态接入：`MessageBus` 分离 normal/command/control outbound 队列，`CommandDispatcher` 纳入 `RuntimeSupervisor`，AgentLoop 只消费普通消息；已执行 `uv run ruff check nanocat` 与 `git diff --check`，TUI、渠道和实际 runtime 行为等待后续明确授权后验证。
 - 安全授权参数污染已修复：`ToolRegistry` 保留授权对象作为内部校验输入，不再注入 `_security_authorization`；Shell/proc 不再通过删除该字段掩盖边界错误，MCP wrapper 的远程 `arguments` 保持原始工具参数。在线 MCP 服务仍需在获得明确运行验证授权后检查。
+- `/restart` 的 shutdown race 已修复：CommandDispatcher 被关闭导致 supervisor wait 收到取消时，等待当前 shutdown 完成，外层重复 stop 复用同一 shutdown，不取消继续执行 `os.execv` 的 restart task。当前仅完成静态验证，实际重启行为仍需明确运行验证。
 - Action Center（Ctrl+K / header 按钮）由 `ACTION_SPECS` 目录驱动，模板经 `build_command_text`（shlex 引用）展开；所有命令（含 cron/memory 表单）均可鼠标执行，无需输入 slash，但不包含 restart 动作。
 - `SessionManager.delete_session()` 只删除非 active session，文件经 send2trash 进回收站（失败回退 unlink）；删除 active session 时 control 层先创建并持久化替代 session 再删除。`_new_session` 之后必须立即 `save()`，否则 list/rename 看不到它。
 - 审批卡按钮由 payload 的 `allowed_actions` 生成；决策经 `approval.respond` → `CommandService.dispatch_intervention` 单一业务路径，TUI 不接触 Broker。YOLO/AUTO 状态由 broker 返回的 mode 权威驱动。
