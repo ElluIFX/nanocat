@@ -128,7 +128,6 @@ class ExecTool(Tool):
         **kwargs: Any,
     ) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
-        kwargs.pop("_security_authorization", None)
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
 

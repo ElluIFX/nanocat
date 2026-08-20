@@ -65,7 +65,7 @@ class ToolRegistry:
             return tool_err(f"Tool '{name}' not found.")
 
         try:
-            if "_security_authorization" in params and authorization is None:
+            if "_security_authorization" in params:
                 return tool_err("reserved security authorization parameter is not accepted")
             if authorization is not None and getattr(authorization, "tool_name", name) not in {
                 "",
@@ -82,10 +82,8 @@ class ToolRegistry:
                     f"Invalid parameters for tool '{name}': " + "; ".join(errors),
                     hint=retry_hint,
                 )
-            # Tools self-report success/failure in their JSON envelope; pass through.
-            if authorization is not None:
-                params = dict(params)
-                params["_security_authorization"] = authorization
+            # Authorization is an execution concern and must never cross the tool boundary.
+            # External adapters receive only the validated tool parameters.
             async def _execute_bound() -> str:
                 self._bind_context(tool, execution_context)
                 result = await tool.execute(**params)

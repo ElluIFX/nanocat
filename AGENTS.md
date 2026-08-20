@@ -130,6 +130,7 @@ ToolExecutor
 - `ToolExecutor.execute_batch()` 先完成整批安全预检，再按输入顺序返回结果；同一 turn 内可并行，但受 runtime `maxConcurrentToolCalls` 限制。失败时显式取消未完成兄弟任务。
 - tool、MCP、subagent、message/ask/wait 不得直接发送 channel、写 session 或修改全局授权；通过 context、event sink、service port 或 application owner 完成。
 - 工具必须声明/遵守参数校验、输出类别、超时、取消域、并发类别、资源 owner 和是否需要安全 gate。副作用工具不隐式重试；部分成功必须可区分并可恢复。
+- 安全授权元数据只在 `ToolExecutor`/`ToolRegistry` 内部校验，不能写入工具参数；MCP、HTTP、进程和其他外部适配器只接收经过工具 schema 校验的业务参数。
 - 不新增依赖共享可变 `set_context` 跨 session 传播状态；兼容入口仍存在时，只能由 Registry 在调用边界绑定 turn-local context。
 
 ### JSON 返回格式
@@ -235,6 +236,7 @@ tool_err("operation failed", hint="retry with ...", detail=detail)
 - TUI 已完成一轮鼠标优先重构：`nanocat/channels/tui.py` 收缩为薄 adapter（有界 display queue=4096，满载时只丢 log 并计数；`bind_control`/`submit_control` 控制桥），全部 Textual 代码位于 `nanocat/channels/tui_app/`（app/widgets/screens/composer/approval/events/theme）。注意 `discover_channel_names()` 跳过子包，`tui` 必须保持单文件 channel 模块。
 - `nanocat/application/control.py` 的 `ApplicationControlService` 是 TUI 的唯一控制入口：session new/switch/rename/delete、model select/set_effort、compact status/run、turn cancel、approval respond、runtime snapshot、logs tail 和 `command_execute` 全部结构化返回 JSON-safe dict，并通过 `CommandDispatcher` 复用命令策略；TUI 不提供 runtime restart 控件或 Action Center 动作，TUI 控件不再拼接 slash 命令，手动 slash 输入仍兼容。`build_runtime()` 负责构造并 `bind_control` 到 TUI channel。
 - 实时命令控制面本轮已完成静态接入：`MessageBus` 分离 normal/command/control outbound 队列，`CommandDispatcher` 纳入 `RuntimeSupervisor`，AgentLoop 只消费普通消息；已执行 `uv run ruff check nanocat` 与 `git diff --check`，TUI、渠道和实际 runtime 行为等待后续明确授权后验证。
+- 安全授权参数污染已修复：`ToolRegistry` 保留授权对象作为内部校验输入，不再注入 `_security_authorization`；Shell/proc 不再通过删除该字段掩盖边界错误，MCP wrapper 的远程 `arguments` 保持原始工具参数。在线 MCP 服务仍需在获得明确运行验证授权后检查。
 - Action Center（Ctrl+K / header 按钮）由 `ACTION_SPECS` 目录驱动，模板经 `build_command_text`（shlex 引用）展开；所有命令（含 cron/memory 表单）均可鼠标执行，无需输入 slash，但不包含 restart 动作。
 - `SessionManager.delete_session()` 只删除非 active session，文件经 send2trash 进回收站（失败回退 unlink）；删除 active session 时 control 层先创建并持久化替代 session 再删除。`_new_session` 之后必须立即 `save()`，否则 list/rename 看不到它。
 - 审批卡按钮由 payload 的 `allowed_actions` 生成；决策经 `approval.respond` → `CommandService.dispatch_intervention` 单一业务路径，TUI 不接触 Broker。YOLO/AUTO 状态由 broker 返回的 mode 权威驱动。
