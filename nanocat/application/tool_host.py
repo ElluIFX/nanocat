@@ -10,7 +10,13 @@ from nanocat.bus.queue import MessageBus
 class ToolHost:
     """Own the runtime-scoped tool registry and stateful tool resources."""
 
-    def __init__(self, bus: MessageBus, config: Any, provider_resolver: Any):
+    def __init__(
+        self,
+        bus: MessageBus,
+        config: Any,
+        provider_resolver: Any,
+        vision_fallback: Any,
+    ):
         from nanocat.agent.subagent import SubagentManager
         from nanocat.agent.tools.http import HttpSessionManager
         from nanocat.agent.tools.proc import ProcManager
@@ -22,6 +28,7 @@ class ToolHost:
             bus=bus,
             tools=self.registry,
             provider_resolver=provider_resolver,
+            vision_fallback=vision_fallback,
             config=config,
         )
         self.ssh = SSHManager()

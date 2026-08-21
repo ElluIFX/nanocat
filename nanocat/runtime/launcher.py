@@ -18,7 +18,9 @@ from nanocat.application.intervention import (
     InterventionBroker,
     make_bus_presenter,
 )
+from nanocat.application.providers import RuntimeProviderResolver
 from nanocat.application.system_turns import SystemTurnGateway, SystemTurnRequest
+from nanocat.application.vision_fallback import VisionFallbackService
 from nanocat.bus.queue import MessageBus
 from nanocat.channels.manager import ChannelManager
 from nanocat.config.loader import get_config_path, load_config, set_config_path
@@ -120,6 +122,12 @@ def build_runtime(
     )
     session_manager = SessionManager(paths.sessions_dir)
     cron = CronService(paths.cron_dir / "jobs.json")
+    provider_resolver = RuntimeProviderResolver(config)
+    vision_fallback = VisionFallbackService(
+        provider_resolver,
+        config,
+        workspace=config.workspace_path,
+    )
 
     agent_engine = AgentLoop(
         bus=bus,
@@ -127,6 +135,8 @@ def build_runtime(
         session_manager=session_manager,
         cron_service=cron,
         intervention_broker=intervention,
+        provider_resolver=provider_resolver,
+        vision_fallback=vision_fallback,
     )
     agent = AgentService(agent_engine)
     system_turns = SystemTurnGateway(agent, bus)

@@ -43,7 +43,7 @@ class AgentDefaults(Base):
         None  # model for subagents (spawn / gather); None → assistant_model → model
     )
     vision_model: str | None = (
-        None  # model for ParseImageTool / adaptive image loading; None → assistant_model → model
+        None  # global vision fallback model; None → assistant_model
     )
     compaction_model: str | None = None  # independent low-cost model for session compaction
     # Saved model catalog used by /model and the local TUI.

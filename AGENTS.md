@@ -19,7 +19,7 @@
 | `nanocat/core/` | 无 SDK 的稳定类型、事件、错误、能力和 port | `ConversationRef`、`Principal`、`InboundEvent`、`OutboundEvent`、`TurnRef`、`InterventionRequest`、`CapabilityDescriptor`、`MessagePort` |
 | `nanocat/runtime/` | composition root、生命周期、资源 owner、健康和重启 | `RuntimeContext`、`RuntimeSupervisor.start/wait/run/stop`、`ShutdownCoordinator` |
 | `nanocat/bus/` | 进程内有界、带优先级的入站/出站传输 | `MessageBus.publish_*`、`consume_*`/`receive_*`、`close`、`join`、`drain` |
-| `nanocat/application/` | 控制面和应用编排，不依赖具体 SDK | `AgentService`、`TurnRequest`、`CommandRouter`、`CommandService`、`CommandDispatcher`、`ToolExecutor`、`InterventionBroker`、`OutboundDispatcher`、`SystemTurnGateway` |
+| `nanocat/application/` | 控制面和应用编排，不依赖具体 SDK | `AgentService`、`TurnRequest`、`CommandRouter`、`CommandService`、`CommandDispatcher`、`ToolExecutor`、`InterventionBroker`、`OutboundDispatcher`、`SystemTurnGateway`、`VisionFallbackService` |
 | `nanocat/agent/` | LLM 上下文、记忆、子代理和内置工具实现 | `AgentLoop` 目前仍是兼容 turn engine；新业务不得继续向其堆职责 |
 | `nanocat/security/` | 统一命令、路径、网络和工具能力策略 | `SecurityPolicy`；结果只能是 `ALLOW`、`HARD_DENY`、`REQUIRE_INTERVENTION` |
 | `nanocat/session/` | 会话模型、索引、策略和原子 JSON 持久化 | `Session`、`SessionManager` 兼容 facade；迁移不得覆盖失败源文件 |
@@ -132,6 +132,7 @@ ToolExecutor
 - 工具必须声明/遵守参数校验、输出类别、超时、取消域、并发类别、资源 owner 和是否需要安全 gate。副作用工具不隐式重试；部分成功必须可区分并可恢复。
 - 安全授权元数据只在 `ToolExecutor`/`ToolRegistry` 内部校验，不能写入工具参数；MCP、HTTP、进程和其他外部适配器只接收经过工具 schema 校验的业务参数。
 - 不新增依赖共享可变 `set_context` 跨 session 传播状态；兼容入口仍存在时，只能由 Registry 在调用边界绑定 turn-local context。
+- `load_image` 是唯一公开图片工具，只负责读取并返回原始图片块；图片能力探测和描述回退由 application 层统一处理。
 
 ### JSON 返回格式
 
@@ -162,7 +163,7 @@ tool_err("operation failed", hint="retry with ...", detail=detail)
 - transient/system turn、ephemeral block、intervention grant 和 pending request 不写入普通 session history；assistant/tool content list、image placeholder、compaction cursor 和 metadata 语义保持。
 - `Config` 由 Pydantic schema 校验 camelCase；当前 `memory` 直接承载 Nowledge 配置，session compaction 配置位于 `agents.defaults`；不保留 `memory.nowledge` 和 `autoExtractMemories`。`memoryTools` 只控制 LLM memory tool 注册，不关闭自动注入、Thread、Working Memory 或服务端蒸馏；各功能有独立开关和边界参数。loader 在规范化保存前报告 schema 外字段，动态 `channels` 配置除外。
 - `get_runtime_config()`、`get_config_path()` 是单 runtime legacy facade；新 application/adapter 构造函数显式接收 `RuntimeContext`、`RuntimePaths` 或配置快照，不新增对全局可变配置的依赖。
-- Provider 由 registry/spec 按 model 解析；resolver/cache 属于 runtime owner。DeepSeek、LiteLLM、Custom、OpenAI Codex、OAuth/local、vision/reasoning、retry/fallback 的行为属于 provider adapter，不能复制到 TurnCoordinator。`ProvidersConfig` 字段必须与 registry provider 集合一致。
+- Provider 由 registry/spec 按 model 解析；resolver/cache 属于 runtime owner。DeepSeek、LiteLLM、Custom、OpenAI Codex 和 OAuth/local adapter 负责协议格式、响应归一化及通用瞬时错误重试。图片能力以实际请求结果为准；`VisionFallbackService` 识别明确的视觉拒绝，使用全局 `visionModel` 或 `assistantModel` 提取描述，并对原模型重试一次。`ProvidersConfig` 字段必须与 registry provider 集合一致。
 - provider/client/cache 失败分类为 timeout、dependency、policy、validation、state、internal 或 cancelled；取消不能包装成模型错误。API key、base headers、cookie 和原始 provider 响应必须经过脱敏。
 - Nowledge Thread 捕获、distill、auto naming、evaluation 和 compaction 是受限后台后处理，不得无界阻塞最终回复；Nowledge 不可用时基本聊天路径仍可降级运行。
 
@@ -218,6 +219,7 @@ tool_err("operation failed", hint="retry with ...", detail=detail)
 - `tools.policy.autoApproveMode` 已接入 `AutoApprovalReviewer`：所有非硬拒绝的待审批调用并发进行 assistantModel 审查；工作区外的无害读写可以被自动批准，路径位置本身不是拒绝理由。自动批准只作用于当前 fingerprint，自动拒绝或审查失败进入单请求人工复核。自动审查显式不携带 `reasoning_effort` 或 token 上限，`HARD_DENY`、restrict 规则和 session/turn grant 保持更高优先级。
 - `/approve` 无参数等效 `/approve once`；自动复核的审批消息和 TUI 卡片只提供 `/approve` 与 `/deny`，普通审批与 AUTO/YOLO session 授权保持独立。
 - `ContextArtifactStore`、`ContextLookupTool` 和 `ContextBudget` 已接入 AgentLoop/subagent：大 tool observation 完整归档到 session 隔离目录，LLM 只收到脱敏预览并可按 artifact/行号/模式检索；provider 前执行快速 token 预算、保留完整 tool-call 对、超限时只做一次降历史重试。
+- runtime composition root 创建单个 `VisionFallbackService` 并注入 AgentLoop 与 SubagentManager；二者共享 128 项图片描述缓存和有界 HTTP client。provider 原样发送图片，明确视觉拒绝才触发描述替换与单次重试；视觉描述调用省略工具定义和 token 参数，并显式使用 `reasoning_effort=None`。`parse_image` 已移除，`load_image` 是唯一公开图片工具。离线伪 provider 已覆盖直接视觉成功、DeepSeek 风格拒绝、多图顺序与缓存、误触发保护、回退失败和损坏图片；真实 DeepSeek 多模态与全局视觉模型 API 行为仍需独立在线验证。
 - `CompactionCheckpoint` 已接入 Session JSON：压缩结果保存结构化 goal/state、source range/revision/hash、模型名和 token 前后值；压缩只在完整 turn 边界推进，revision/CAS 失败或 provider 失败均不推进 cursor，失败不丢原始 history。
 - `/compact` 是手动压缩入口，`/compact status` 同时返回上下文预算、压缩游标、checkpoint、失败次数和可压缩状态；上下文状态查询已并入 compact，不再注册独立的 `/context` 命令。非法 compact 参数在 Provider 前由 CommandRouter 拒绝；手动压缩返回完成范围、token 前后值或明确失败原因。
 - `agents.defaults.compactionEnabled` 只控制自动 token 触发；`/compact` 手动触发仍可显式执行。`/compact status` 同时显示该开关，避免把“可压缩”和“会自动压缩”混为一谈。

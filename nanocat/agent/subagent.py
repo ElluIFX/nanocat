@@ -54,12 +54,14 @@ class SubagentManager:
         tools: ToolRegistry,
         tool_executor: ToolExecutor | None = None,
         provider_resolver: RuntimeProviderResolver | None = None,
+        vision_fallback: Any | None = None,
         config: Any | None = None,
     ):
         self.bus = bus
         self._tools = tools
         self._tool_executor = tool_executor
         self._provider_resolver = provider_resolver
+        self._vision_fallback = vision_fallback
         self._config = config
         self._context_artifacts: ContextArtifactStore | None = None
         self._steer_inject: dict[str, list[InboundMessage]] | None = None
@@ -277,7 +279,10 @@ class SubagentManager:
                     )
                     break
 
-                response = await self.provider.chat_with_retry(
+                if self._vision_fallback is None:
+                    raise RuntimeError("subagent vision fallback service is unavailable")
+                response = await self._vision_fallback.chat_with_fallback(
+                    self.provider,
                     messages=messages,
                     tools=tool_defs,
                     model=self.model,
@@ -288,7 +293,8 @@ class SubagentManager:
                     reduced = context_budget.trim(messages, max(1024, budget.target_tokens // 2))
                     if reduced != messages:
                         messages = reduced
-                        response = await self.provider.chat_with_retry(
+                        response = await self._vision_fallback.chat_with_fallback(
+                            self.provider,
                             messages=messages,
                             tools=tool_defs,
                             model=self.model,

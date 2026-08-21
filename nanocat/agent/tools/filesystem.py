@@ -136,19 +136,6 @@ class ReadFileTool(_FsTool):
 class LoadImageTool(_FsTool):
     _MAX_BYTES = 12 * 1024 * 1024  # 12MB
 
-    def __init__(self, *args: Any, vision_model: str | None = None, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self._vision_model = vision_model
-
-    def _is_vision_lacking_model(self) -> bool:
-        """Return True when the active main model cannot process images natively."""
-        if self._vision_model is not None:
-            return "deepseek" in self._vision_model.lower()
-        from nanocat.config.loader import get_runtime_config
-
-        model = get_runtime_config().agents.defaults.model.lower()
-        return "deepseek" in model
-
     @property
     def name(self) -> str:
         return "load_image"
@@ -157,8 +144,7 @@ class LoadImageTool(_FsTool):
     def description(self) -> str:
         return (
             "Load content of an image file into your context, including its EXIF metadata. "
-            "Use compress=True to downscale and compress oversized images before loading. "
-            "ONLY AVAILABLE FOR VISION-CAPABLE MODEL."
+            "Use compress=True to downscale and compress oversized images before loading."
         )
 
     @property
@@ -186,12 +172,6 @@ class LoadImageTool(_FsTool):
             return _err(f"File not found: {path}")
         if not fp.is_file():
             return _err(f"Not a file: {path}")
-
-        # The active model lacks native vision: do NOT silently fall back to a
-        # vision model here — return an error so the agent explicitly routes the
-        # image through parse_image instead.
-        if self._is_vision_lacking_model():
-            return _err("Active model lacks native vision.", "Use parse_image instead.")
 
         try:
             raw = fp.read_bytes()

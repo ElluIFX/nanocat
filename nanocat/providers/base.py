@@ -74,11 +74,6 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
-    # Whether the provider's API accepts multimodal image_url content blocks.
-    # Text-only providers (e.g. DeepSeek) set this False so images are replaced
-    # with a stable text path reference before the request is built.
-    supports_vision: bool = True
-
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _TRANSIENT_ERROR_MARKERS = (
         "429",
@@ -204,43 +199,10 @@ class LLMProvider(ABC):
         pass
 
     @classmethod
-    def _is_transient_error(cls, content: str | None) -> bool:
+    def is_transient_error(cls, content: str | None) -> bool:
+        """Return whether an error response is eligible for provider retry."""
         err = (content or "").lower()
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
-
-    @staticmethod
-    def _strip_image_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-        """Replace image_url blocks with text placeholder. Returns None if no images found."""
-        found = False
-        result = []
-        for msg in messages:
-            content = msg.get("content")
-            if isinstance(content, list):
-                new_content = []
-                for b in content:
-                    if isinstance(b, dict) and b.get("type") == "image_url":
-                        path = (b.get("_meta") or {}).get("path", "")
-                        placeholder = f"[image: {path}]" if path else "[image omitted]"
-                        new_content.append({"type": "text", "text": placeholder})
-                        found = True
-                    else:
-                        new_content.append(b)
-                result.append({**msg, "content": new_content})
-            else:
-                result.append(msg)
-        return result if found else None
-
-    def _enforce_vision_policy(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """For text-only providers, proactively replace image blocks with a stable
-        ``[image: {path}]`` text reference (matching the persisted-history form, so the
-        prompt-cache prefix stays identical across turns) instead of relying on a
-        reactive error-then-retry. Vision providers pass messages through unchanged.
-        """
-        if self.supports_vision:
-            return messages
-        return self._strip_image_content(messages) or messages
 
     async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
         """Call chat() and convert unexpected exceptions to error responses."""
@@ -286,11 +248,7 @@ class LLMProvider(ABC):
             if response.finish_reason != "error":
                 return response
 
-            if not self._is_transient_error(response.content):
-                stripped = self._strip_image_content(messages)
-                if stripped is not None:
-                    logger.warning("Non-transient LLM error with image content, retrying without images")
-                    return await self._safe_chat(**{**kw, "messages": stripped})
+            if not self.is_transient_error(response.content):
                 return response
 
             logger.warning(

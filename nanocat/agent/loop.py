@@ -75,6 +75,7 @@ from nanocat.application.tool_executor import (
 )
 from nanocat.application.tool_host import ToolHost
 from nanocat.application.turns import TurnCoordinator, TurnState
+from nanocat.application.vision_fallback import VisionFallbackService
 from nanocat.bus.events import InboundMessage, OutboundMessage
 from nanocat.bus.queue import BusClosedError, MessageBus
 from nanocat.core.commands import CommandErrorCode, CommandResult
@@ -118,12 +119,19 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         cron_service: "CronService | None" = None,
         intervention_broker: Any | None = None,
+        provider_resolver: RuntimeProviderResolver | None = None,
+        vision_fallback: VisionFallbackService | None = None,
     ):
         from nanocat.config.loader import set_runtime_config
 
         self.bus = bus
         self._config = config
-        self._provider_resolver = RuntimeProviderResolver(config)
+        self._provider_resolver = provider_resolver or RuntimeProviderResolver(config)
+        self._vision_fallback = vision_fallback or VisionFallbackService(
+            self._provider_resolver,
+            config,
+            workspace=config.workspace_path,
+        )
         self._runtime_supervisor: Any | None = None
         self.command_router = CommandRouter.legacy_compatibility()
         self.intervention = intervention_broker
@@ -146,7 +154,12 @@ class AgentLoop:
         self.sessions.set_name_generator(self._generate_session_name)
         self.context_artifacts = ContextArtifactStore(self.sessions.sessions_dir)
         self.context_budget = ContextBudget(config)
-        self.tool_host = ToolHost(bus=bus, config=config, provider_resolver=self._provider_resolver)
+        self.tool_host = ToolHost(
+            bus=bus,
+            config=config,
+            provider_resolver=self._provider_resolver,
+            vision_fallback=self._vision_fallback,
+        )
         self.tools = self.tool_host.registry
         self.subagents = self.tool_host.subagents
         self.subagents.set_context_artifacts(self.context_artifacts)
@@ -396,20 +409,12 @@ class AgentLoop:
         )
 
         try:
-            from nanocat.agent.tools.vision import ParseImageTool, ScreenshotTool
+            from nanocat.agent.tools.vision import ScreenshotTool
 
             if self._config.tools.enabled_builtin_tools.image_tools:
                 self.tools.register(
                     LoadImageTool(
                         workspace=self.workspace,
-                        vision_model=self.model,
-                    )
-                )
-                self.tools.register(
-                    ParseImageTool(
-                        workspace=str(self.workspace),
-                        provider_resolver=self._provider_resolver,
-                        config=self._config,
                     )
                 )
             if self._config.tools.enabled_builtin_tools.screenshot:
@@ -958,7 +963,8 @@ class AgentLoop:
                 break
 
             provider = self._provider_resolver.resolve(turn_model)
-            response = await provider.chat_with_retry(
+            response = await self._vision_fallback.chat_with_fallback(
+                provider,
                 messages=messages,
                 tools=tool_defs,
                 model=turn_model,
@@ -974,7 +980,8 @@ class AgentLoop:
                         session_key or tool_context.session_key,
                     )
                     messages = reduced
-                    response = await provider.chat_with_retry(
+                    response = await self._vision_fallback.chat_with_fallback(
+                        provider,
                         messages=messages,
                         tools=tool_defs,
                         model=turn_model,
@@ -2002,6 +2009,7 @@ class AgentLoop:
         await self.mcp_host.close()
         await self.tool_host.close()
         await self.sessions.close()
+        await self._vision_fallback.close()
         await self._provider_resolver.close()
         if self.nowledge_client is not None:
             await self.nowledge_client.close()

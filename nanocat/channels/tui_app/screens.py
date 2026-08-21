@@ -420,7 +420,12 @@ class ModelManagerScreen(ModalScreen[None]):
 class SettingsScreen(ModalScreen[None]):
     """Model, effort, context and runtime settings drawer."""
 
-    _SLOT_LABELS = (("agent", "Agent"), ("subagent", "Subagent"), ("assistant", "Assistant"))
+    _SLOT_LABELS = (
+        ("agent", "Agent"),
+        ("subagent", "Subagent"),
+        ("assistant", "Assistant"),
+        ("vision", "Vision fallback"),
+    )
     _EFFORT_OPTIONS = (
         ("Auto", "auto"),
         ("Low", "low"),

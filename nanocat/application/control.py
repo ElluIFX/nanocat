@@ -546,11 +546,13 @@ class ApplicationControlService:
                 "agent": defaults.model,
                 "subagent": defaults.subagent_model or "",
                 "assistant": defaults.assistant_model or "",
+                "vision": defaults.vision_model or "",
             },
             "effective": {
                 "agent": self._engine.model,
                 "subagent": self._engine.subagent_model,
                 "assistant": self._engine.assistant_model,
+                "vision": defaults.vision_model or defaults.assistant_model or "",
             },
             "reasoning_effort": defaults.reasoning_effort or "auto",
             "provider": self._config.get_provider_name(self._engine.model) or "unknown",
@@ -774,14 +776,19 @@ class ApplicationControlService:
         slot = str(params.get("slot") or "").strip().lower()
         model = str(params.get("model") or "").strip()
         defaults = self._config.agents.defaults
-        if slot not in {"agent", "subagent", "assistant"}:
-            return _err("Slot must be one of agent|subagent|assistant", code="invalid_argument")
+        if slot not in {"agent", "subagent", "assistant", "vision"}:
+            return _err(
+                "Slot must be one of agent|subagent|assistant|vision",
+                code="invalid_argument",
+            )
         if model not in (defaults.model_choice or []):
             return _err(f"Model `{model}` is not in the model catalog.", code="invalid_argument")
         if slot == "agent":
             defaults.model = model
         elif slot == "subagent":
             defaults.subagent_model = model
+        elif slot == "vision":
+            defaults.vision_model = model
         else:
             defaults.assistant_model = model
         save_config(self._config)

@@ -127,7 +127,6 @@ class SecurityPolicy:
             "delete_lines",
             "file_hex",
             "load_image",
-            "parse_image",
         }
     )
     _SAFE_TOOLS = frozenset(
