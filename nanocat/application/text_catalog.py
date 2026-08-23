@@ -12,6 +12,8 @@ class UserTextCatalog:
     new_session: str = "New session started."
     stop_tasks: str = "Stopped {count} task(s)."
     stop_idle: str = "No active task to stop."
+    stop_persist_failed: str = "Stopped the task, but failed to save its terminal record."
+    turn_interrupted: str = "Turn interrupted because the runtime stopped."
     command_idle_only: str = "This command is available only when the session is idle."
     command_lane_busy: str = "The command lane is busy. Try again shortly."
     error: str = "Sorry, I encountered an error."
@@ -28,15 +30,12 @@ class UserTextCatalog:
         "- `/session` — View and switch sessions\n\n"
         "- `/logs [N]` — Show the tail of runtime logs\n\n"
         "- `/approve [once|turn]` — Approve the current sensitive operation\n\n"
-
         "- `/approve forever|cancel` — Enable or revoke session-wide YOLO approval\n\n"
         "- `/deny` — Reject the current sensitive operation\n\n"
         "- `/model effort auto|low|medium|high|xhigh|max` — Set reasoning effort"
     )
     intervention_manual: str = (
-        "⚠️ **Approval required**: `{tool}`\n\n"
-        "Reason: {reason}\n\n"
-        "Reply with {actions}."
+        "⚠️ **Approval required**: `{tool}`\n\nReason: {reason}\n\nReply with {actions}."
     )
     intervention_auto_review: str = (
         "⚠️ **Automatic review requires your decision**: `{tool}`\n\n"
@@ -57,18 +56,13 @@ class UserTextCatalog:
         "- **Assistant Model:** `{assistant_model}`\n\n"
         "- **Subagent Model:** `{subagent_model}`\n\n"
         "- **Provider:** `{provider_name}`\n\n"
-
         "- **Max tokens:** `{max_tokens}`\n\n"
-
         "- **Temperature:** `{temperature}`\n\n"
-
         "- **Reasoning effort:** `{reasoning_effort}`\n\n"
-
         "- **Available models:**\n\n{model_choice}\n\n"
         "## Usage\n\n"
         "- `/model add <provider> <model_name>`\n\n"
         "- `/model agent|subagent|assistant <N>`\n\n"
-
         "- `/model effort auto|low|medium|high|xhigh|max`\n\n"
         "- `/model delete <N>`"
     )
@@ -78,17 +72,11 @@ class UserTextCatalog:
     model_error: str = "Error updating model: {error}"
     model_choice_invalid: str = "Invalid choice number: {choice_number}"
     session_usage: str = (
-        "## Usage\n\n"
-        "- `/session list [N=10]`\n\n"
-        "- `/session view <id>`\n\n"
-        "- `/session switch <id>`"
+        "## Usage\n\n- `/session list [N=10]`\n\n- `/session view <id>`\n\n- `/session switch <id>`"
     )
     session_list_empty: str = "No named sessions yet. Keep chatting to auto-generate session names."
     session_list: str = (
-        "## Sessions\n\n{items}\n\n"
-        "## Usage\n\n"
-        "- `/session view <id>`\n\n"
-        "- `/session switch <id>`"
+        "## Sessions\n\n{items}\n\n## Usage\n\n- `/session view <id>`\n\n- `/session switch <id>`"
     )
     session_view: str = "## {name} ({id})\n\n{turns}"
     session_switched: str = "Switched to session `{session_id}` ({name})."

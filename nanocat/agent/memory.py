@@ -8,6 +8,7 @@ import json
 import re
 import uuid
 import weakref
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -16,7 +17,8 @@ from loguru import logger
 
 from nanocat.agent.nowledge_client import NowledgeClient
 from nanocat.session.checkpoint import CompactionCheckpoint, CompactionState
-from nanocat.utils.helpers import estimate_prompt_tokens_chain
+from nanocat.session.manager import SessionRevisionConflictError
+from nanocat.utils.helpers import estimate_prompt_tokens_chain, estimate_prompt_tokens_fast
 
 if TYPE_CHECKING:
     from nanocat.session.manager import Session, SessionManager
@@ -56,6 +58,66 @@ def _format_messages(messages: list[dict[str, object]]) -> str:
         if line.strip():
             lines.append(line)
     return "\n".join(lines)
+
+
+def format_runtime_transcript(messages: list[dict[str, object]]) -> str:
+    """Render a complete, line-oriented copy of runtime context messages."""
+    sections = ["# Runtime context transcript", ""]
+    for index, message in enumerate(messages, start=1):
+        role = str(message.get("role") or "unknown").upper()
+        sections.append(f"## {index}. {role}")
+        timestamp = message.get("timestamp")
+        if timestamp:
+            sections.append(f"Timestamp: {timestamp}")
+        if message.get("name"):
+            sections.append(f"Tool: {message['name']}")
+        if message.get("tool_call_id"):
+            sections.append(f"Tool call: {message['tool_call_id']}")
+        if message.get("tool_calls"):
+            sections.extend(
+                [
+                    "Tool calls:",
+                    json.dumps(message["tool_calls"], ensure_ascii=False, indent=2, default=str),
+                ]
+            )
+        content = message.get("content")
+        if content not in (None, ""):
+            sections.extend(
+                [
+                    "Content:",
+                    content
+                    if isinstance(content, str)
+                    else json.dumps(content, ensure_ascii=False, indent=2, default=str),
+                ]
+            )
+        sections.append("")
+    return "\n".join(sections)
+
+
+def _collect_context_files(value: Any) -> set[str]:
+    """Collect workspace-relative runtime paths from structured result references."""
+    if isinstance(value, dict):
+        found: set[str] = set()
+        path = value.get("path")
+        if isinstance(path, str) and path.startswith("_runtime_temp/"):
+            found.add(path)
+        for item in value.values():
+            found.update(_collect_context_files(item))
+        return found
+    if isinstance(value, list):
+        found: set[str] = set()
+        for item in value:
+            found.update(_collect_context_files(item))
+        return found
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return set()
+        if parsed == value:
+            return set()
+        return _collect_context_files(parsed)
+    return set()
 
 
 def _strip_fenced_block(text: str) -> str:
@@ -116,6 +178,7 @@ class MemoryCompactor:
         enabled: bool = True,
         provider_resolver: Any | None = None,
         config: Any | None = None,
+        runtime_files: Any | None = None,
     ):
         if config is None:
             from nanocat.config.loader import get_runtime_config
@@ -130,6 +193,7 @@ class MemoryCompactor:
         self._provider_resolver = provider_resolver
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
+        self._runtime_files = runtime_files
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._consecutive_failures: dict[str, int] = {}
 
@@ -190,8 +254,17 @@ class MemoryCompactor:
             channel=channel,
             chat_id=chat_id,
         )
+        try:
+            provider = self.provider
+        except RuntimeError:
+            provider = None
+        if provider is None:
+            return (
+                estimate_prompt_tokens_fast(probe_messages, self._get_tool_definitions()),
+                "fast",
+            )
         return estimate_prompt_tokens_chain(
-            self.provider,
+            provider,
             self.model,
             probe_messages,
             self._get_tool_definitions(),
@@ -201,6 +274,22 @@ class MemoryCompactor:
         """Estimate current prompt size for the normal session history view."""
         history = session.get_history(max_messages=0)
         return self._estimate_prompt_tokens(session, history, session.compacted_memory)
+
+    def estimate_session_prompt_tokens_fast(self, session: Session) -> tuple[int, str]:
+        """Estimate automatic compaction pressure without tokenizer initialization."""
+        channel, chat_id = self._channel_and_chat(session)
+        history = session.get_history(max_messages=0)
+        probe_messages = self._build_messages(
+            history=history,
+            compacted_memory=session.compacted_memory,
+            current_message="[token-probe]",
+            channel=channel,
+            chat_id=chat_id,
+        )
+        return (
+            estimate_prompt_tokens_fast(probe_messages, self._get_tool_definitions()),
+            "fast",
+        )
 
     def status(self, session: Session) -> dict[str, Any]:
         """Return read-only context and compaction state for control-plane commands."""
@@ -297,7 +386,7 @@ class MemoryCompactor:
             "2. New raw conversation messages that are about to be compressed.\n\n"
             "Return one JSON object with keys `summary` and `state`. `state` must contain only these arrays: "
             "constraints, decisions, completed_work, active_work, next_steps, unfinished_tasks, blockers, "
-            "files, commands, important_facts, artifact_references; it may also contain a string `goal`.\n"
+            "files, commands, important_facts, context_files; it may also contain a string `goal`.\n"
             "Preserve active goals, unresolved problems, stable preferences, important decisions, file paths, "
             "TODO state and reusable workflows. Never invent completion evidence.\n"
             f"Target length: about {target_chars} characters.\n"
@@ -322,7 +411,10 @@ class MemoryCompactor:
             reasoning_effort=None,
         )
         if response.finish_reason == "error":
-            logger.warning("Memory compaction provider error: {}", (response.content or "")[:200])
+            logger.warning(
+                "Memory compaction provider returned an error response ({} chars)",
+                len(response.content or ""),
+            )
             return None
         if response.finish_reason == "length":
             logger.warning("Memory compaction response reached output limit; using repair fallback")
@@ -380,6 +472,9 @@ class MemoryCompactor:
     ) -> bool:
         """Update the local session compacted memory at a safe turn boundary."""
         revision_before = session.revision
+        previous_compacted_memory = session.compacted_memory
+        previous_last_compacted = session.last_compacted
+        previous_checkpoint = dict(session.compaction_checkpoint)
         source_start = session.last_compacted
         source_hash = hashlib.sha256(
             json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -393,7 +488,6 @@ class MemoryCompactor:
             )
             if updated is None:
                 self._fail_or_skip(session, messages)
-                self.sessions.save(session)
                 return False
 
             if session.revision != revision_before or len(session.messages) < boundary_idx:
@@ -406,13 +500,28 @@ class MemoryCompactor:
                 return False
 
             summary, new_state = self._parse_compaction_result(updated)
-            artifact_references = sorted(
-                set(re.findall(r"art_[0-9a-f]{16}", updated))
-                | set(re.findall(r"art_[0-9a-f]{16}", _format_messages(messages)))
-            )
-            if artifact_references:
-                new_state.artifact_references.extend(
-                    item for item in artifact_references if item not in new_state.artifact_references
+            context_files = _collect_context_files(messages)
+            if self._runtime_files is not None:
+                try:
+                    snapshot = self._runtime_files.snapshot(
+                        session.key,
+                        "compaction",
+                        format_runtime_transcript(messages),
+                        source_name="session_compaction",
+                        source_id=f"{source_start}-{boundary_idx}-{source_hash[:16]}",
+                        suffix=".md",
+                    )
+                    if snapshot is not None:
+                        context_files.add(snapshot.relative_path)
+                except Exception as exc:
+                    logger.warning(
+                        "Compaction source copy failed for {}: {}",
+                        session.key,
+                        exc,
+                    )
+            if context_files:
+                new_state.context_files.extend(
+                    item for item in sorted(context_files) if item not in new_state.context_files
                 )
             previous = CompactionCheckpoint.from_dict(session.compaction_checkpoint)
             merged_state = (previous.state if previous else CompactionState()).merge(new_state)
@@ -433,14 +542,19 @@ class MemoryCompactor:
             token_after, _ = self.estimate_session_prompt_tokens(session)
             checkpoint.token_after = token_after
             session.compaction_checkpoint = checkpoint.to_dict()
-            self.sessions.save(session)
+            session.revision = revision_before + 1
+            self.sessions.save(session, expected_revision=revision_before)
             self._consecutive_failures.pop(session.key, None)
             logger.info("Memory compaction done for {} messages", len(messages))
             return True
         except Exception:
+            if session.revision == revision_before + 1:
+                session.compacted_memory = previous_compacted_memory
+                session.last_compacted = previous_last_compacted
+                session.compaction_checkpoint = previous_checkpoint
+                session.revision = revision_before
             logger.exception("Memory compaction failed")
             self._fail_or_skip(session, messages)
-            self.sessions.save(session)
             return False
 
     async def maybe_compact_by_tokens(self, session: Session, force: bool = False) -> bool:
@@ -454,7 +568,12 @@ class MemoryCompactor:
         async with lock:
             trigger_target = max(1024, int(self.context_window_tokens * self.threshold))
             stop_target = max(1024, int(trigger_target * 0.8))
-            estimated, source = self.estimate_session_prompt_tokens(session)
+            estimate = (
+                self.estimate_session_prompt_tokens
+                if force
+                else self.estimate_session_prompt_tokens_fast
+            )
+            estimated, source = estimate(session)
             if estimated <= 0:
                 return False
             if not force and estimated <= trigger_target:
@@ -501,7 +620,7 @@ class MemoryCompactor:
                     return did_compact
                 did_compact = True
 
-                estimated, source = self.estimate_session_prompt_tokens(session)
+                estimated, source = estimate(session)
                 if estimated <= 0:
                     return did_compact
             return did_compact
@@ -533,9 +652,10 @@ class NowledgeThreadManager:
         self,
         client: NowledgeClient,
         sessions: SessionManager,
+        workspace: Path,
         source: str = "nanocat",
         space_id: str | None = None,
-        artifact_store: Any | None = None,
+        runtime_files: Any | None = None,
         max_message_chars: int = 12_000,
         auto_distill_enabled: bool = True,
         distill_min_messages: int = 8,
@@ -546,7 +666,8 @@ class NowledgeThreadManager:
         self._sessions = sessions
         self._source = source
         self._space_id = space_id
-        self._artifact_store = artifact_store
+        self._runtime_files = runtime_files
+        self._workspace = workspace
         self._max_message_chars = max(512, int(max_message_chars))
         self._auto_distill_enabled = auto_distill_enabled
         self._distill_min_messages = max(1, int(distill_min_messages))
@@ -606,10 +727,10 @@ class NowledgeThreadManager:
             text = self._text(content)
             if not text:
                 continue
-            if len(text) > self._max_message_chars and role == "tool" and self._artifact_store:
-                text = self._artifact_store.capture(
+            if len(text) > self._max_message_chars and self._runtime_files:
+                text = self._runtime_files.capture(
                     session_key,
-                    str(msg.get("name") or "tool"),
+                    str(msg.get("name") or f"nowledge_{role}"),
                     str(msg.get("tool_call_id")) if msg.get("tool_call_id") else None,
                     text,
                 )
@@ -628,6 +749,25 @@ class NowledgeThreadManager:
         """Derive a thread title using the current date as the title."""
         return f"Conversation from {session.channel}_{session.chat_id}"
 
+    @staticmethod
+    def _thread_metadata_snapshot(metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: deepcopy(metadata[key])
+            for key in ("_nowledge_thread_sync", "nowledge_thread_id")
+            if key in metadata
+        }
+
+    @staticmethod
+    def _restore_thread_metadata(
+        metadata: dict[str, Any],
+        snapshot: dict[str, Any],
+    ) -> None:
+        for key in ("_nowledge_thread_sync", "nowledge_thread_id"):
+            if key in snapshot:
+                metadata[key] = deepcopy(snapshot[key])
+            else:
+                metadata.pop(key, None)
+
     async def append_turn(self, session: Session, new_messages: list[dict]) -> None:
         """Synchronize all unacknowledged session messages to Nowledge."""
         if not new_messages or not session.messages:
@@ -635,6 +775,7 @@ class NowledgeThreadManager:
 
         lock = self._get_lock(session.key)
         async with lock:
+            metadata_before = self._thread_metadata_snapshot(session.metadata)
             sync = session.metadata.setdefault("_nowledge_thread_sync", {})
             if sync.get("capture_version") != 2:
                 sync.clear()
@@ -642,10 +783,27 @@ class NowledgeThreadManager:
             acknowledged = max(0, min(int(sync.get("acked_source_index", 0)), len(session.messages)))
 
             if thread_id is None:
-                formatted = self._format_messages(session.key, session.messages)
+                source_end = len(session.messages)
+                formatted = self._format_messages(
+                    session.key,
+                    session.messages[:source_end],
+                )
                 if not formatted:
                     return
-                thread_id = str(uuid.uuid4())
+                thread_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        ":".join(
+                            (
+                                "nanocat-thread",
+                                str(self._workspace),
+                                str(self._space_id or ""),
+                                self._source,
+                                session.key,
+                            )
+                        ),
+                    )
+                )
                 title = self._extract_title(session)
                 try:
                     got_id = await self._client.create_thread(
@@ -654,28 +812,32 @@ class NowledgeThreadManager:
                         messages=formatted,
                         source=self._source,
                         space_id=self._space_id,
-                        workspace=str(self._sessions.sessions_dir.parent),
+                        workspace=str(self._workspace),
                     )
                 except Exception as exc:
                     logger.warning("Nowledge Thread creation deferred for {}: {}", session.key, exc)
-                    self._sessions.save(session)
+                    self._save_metadata(session, metadata_before)
                     return
                 if got_id != thread_id:
                     logger.error("Unmatched thread ID: got={}, expected={}", got_id, thread_id)
-                    self._sessions.save(session)
+                    self._save_metadata(session, metadata_before)
                     return
                 sync["thread_id"] = thread_id
                 sync["capture_version"] = 2
-                sync["acked_source_index"] = len(session.messages)
+                sync["acked_source_index"] = max(acknowledged, source_end)
                 session.metadata["nowledge_thread_id"] = thread_id
                 logger.info("Created Nowledge thread {} for session {}", thread_id, session.key)
             elif acknowledged < len(session.messages):
-                unsynced = self._format_messages(session.key, session.messages[acknowledged:])
+                source_end = len(session.messages)
+                unsynced = self._format_messages(
+                    session.key,
+                    session.messages[acknowledged:source_end],
+                )
                 if unsynced:
                     digest = hashlib.sha256(
                         json.dumps(unsynced, ensure_ascii=False, sort_keys=True).encode("utf-8")
                     ).hexdigest()[:16]
-                    idem_key = f"{session.key}:{acknowledged}:{len(session.messages)}:{digest}"
+                    idem_key = f"{session.key}:{acknowledged}:{source_end}:{digest}"
                     try:
                         await self._client.append_messages(
                             thread_id,
@@ -685,10 +847,10 @@ class NowledgeThreadManager:
                         )
                     except Exception as exc:
                         logger.warning("Nowledge Thread sync deferred for {}: {}", session.key, exc)
-                        self._sessions.save(session)
+                        self._save_metadata(session, metadata_before)
                         return
-                sync["acked_source_index"] = len(session.messages)
-            self._sessions.save(session)
+                sync["acked_source_index"] = max(acknowledged, source_end)
+            self._save_metadata(session, metadata_before)
 
     async def append_turn_and_distill(self, session: Session, new_messages: list[dict]) -> None:
         """Synchronize a turn and opportunistically ask Nowledge to distill mature threads."""
@@ -705,6 +867,7 @@ class NowledgeThreadManager:
         threshold = self._distill_min_messages if min_new_messages is None else max(1, min_new_messages)
         lock = self._get_lock(session.key)
         async with lock:
+            metadata_before = self._thread_metadata_snapshot(session.metadata)
             sync = session.metadata.get("_nowledge_thread_sync") or {}
             thread_id = sync.get("thread_id")
             acknowledged = int(sync.get("acked_source_index", 0) or 0)
@@ -740,8 +903,75 @@ class NowledgeThreadManager:
                     )
             except Exception as exc:
                 logger.warning("Nowledge distill deferred for {}: {}", session.key, exc)
-                self._sessions.save(session)
+                self._save_metadata(session, metadata_before)
                 return
             sync["last_distilled_source_index"] = acknowledged
             session.metadata["_nowledge_thread_sync"] = sync
-            self._sessions.save(session)
+            self._save_metadata(session, metadata_before)
+
+    @staticmethod
+    def _merge_thread_metadata(
+        current: dict[str, Any],
+        desired: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge only monotonic Thread cursors while preserving newer metadata."""
+        merged = {**deepcopy(desired), **deepcopy(current)}
+        current_sync = current.get("_nowledge_thread_sync")
+        desired_sync = desired.get("_nowledge_thread_sync")
+        if not isinstance(current_sync, dict) and not isinstance(desired_sync, dict):
+            return merged
+        current_sync = current_sync if isinstance(current_sync, dict) else {}
+        desired_sync = desired_sync if isinstance(desired_sync, dict) else {}
+        merged_sync = {**desired_sync, **current_sync}
+        for field in ("acked_source_index", "last_distilled_source_index"):
+            merged_sync[field] = max(
+                int(current_sync.get(field, 0) or 0),
+                int(desired_sync.get(field, 0) or 0),
+            )
+        current_thread = str(current_sync.get("thread_id") or "")
+        desired_thread = str(desired_sync.get("thread_id") or "")
+        thread_id = current_thread or desired_thread
+        if thread_id:
+            merged_sync["thread_id"] = thread_id
+            merged["nowledge_thread_id"] = thread_id
+        merged["_nowledge_thread_sync"] = merged_sync
+        return merged
+
+    def _save_metadata(
+        self,
+        session: Session,
+        metadata_before: dict[str, Any],
+    ) -> None:
+        """Persist Thread metadata with rollback and one monotonic CAS recovery."""
+        desired_metadata = deepcopy(session.metadata)
+        revision_before = session.revision
+        session.revision += 1
+        try:
+            self._sessions.save(session, expected_revision=revision_before)
+        except SessionRevisionConflictError:
+            session.revision = revision_before
+            try:
+                latest = self._sessions.get_session(
+                    session.channel,
+                    session.id,
+                    chat_id=session.chat_id,
+                )
+                if latest is None:
+                    raise RuntimeError(f"session {session.key} is unavailable")
+                latest.metadata = self._merge_thread_metadata(
+                    latest.metadata,
+                    desired_metadata,
+                )
+                latest_revision = latest.revision
+                latest.revision += 1
+                self._sessions.save(latest, expected_revision=latest_revision)
+            except BaseException:
+                self._restore_thread_metadata(session.metadata, metadata_before)
+                session.revision = revision_before
+                raise
+            self._restore_thread_metadata(session.metadata, latest.metadata)
+            session.revision = latest.revision
+        except BaseException:
+            self._restore_thread_metadata(session.metadata, metadata_before)
+            session.revision = revision_before
+            raise

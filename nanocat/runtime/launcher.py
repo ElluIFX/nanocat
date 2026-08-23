@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
+import signal
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
 from nanocat import __version__
 from nanocat.agent.loop import AgentLoop
+from nanocat.api.server import ApiRuntime
 from nanocat.application.agent_service import AgentService
+from nanocat.application.configuration import ConfigurationService
 from nanocat.application.intervention import (
     DeliveryTracker,
     InterventionBroker,
@@ -30,9 +36,13 @@ from nanocat.core.runtime import ShutdownReason
 from nanocat.cron.service import CronService
 from nanocat.cron.types import CronJob
 from nanocat.heartbeat.service import HeartbeatService
+from nanocat.observability.activity import ActivityJournal
+from nanocat.observability.redaction import redact_value
 from nanocat.runtime.context import ConfigSnapshot, RuntimeContext
+from nanocat.runtime.instance_lock import RuntimeInstanceLock
 from nanocat.runtime.paths import RuntimePaths
 from nanocat.runtime.supervisor import RuntimeSupervisor
+from nanocat.runtime.web_assets import ensure_web_assets
 from nanocat.session.manager import SessionManager
 from nanocat.utils.helpers import sync_workspace_templates
 
@@ -64,21 +74,25 @@ def load_runtime_config(workdir: str | None = None) -> Config:
     return load_config(get_config_path())
 
 
-def configure_logging(verbose: bool = False, local_mode: bool = False) -> int:
-    """Set up loguru sinks. INFO by default; DEBUG with ``--verbose``.
-
-    The level is exported as ``NANOCAT_LOG_LEVEL`` so the TUI pane sink (built
-    later, inside the channel) picks the same level. In gateway mode a stderr
-    sink is installed; in local (TUI) mode Textual owns the screen, so stderr is
-    left off and the TUI adds its own pane sink. A rotating file sink under
-    ``<workdir>/logs`` is installed in both modes.
-    """
+def configure_logging(verbose: bool = False) -> int:
+    """Set up stderr and rotating runtime-file logging."""
     level = "DEBUG" if verbose else "INFO"
     os.environ["NANOCAT_LOG_LEVEL"] = level
 
+    def redact_record(record: dict[str, Any]) -> None:
+        record["message"] = str(redact_value(record.get("message", "")))
+        exception = record.get("exception")
+        if exception is not None:
+            value = getattr(exception, "value", None)
+            summary = str(redact_value(str(value))) if value is not None else ""
+            exception_type = getattr(getattr(exception, "type", None), "__name__", "Exception")
+            record["message"] = f"{record['message']} [{exception_type}: {summary}]"
+            record["exception"] = None
+
+    logger.configure(patcher=redact_record)
+
     logger.remove()  # drop loguru's default (DEBUG) stderr sink
-    if not local_mode:
-        logger.add(sys.stderr, level=level, backtrace=False, diagnose=False)
+    logger.add(sys.stderr, level=level, backtrace=False, diagnose=False)
 
     logs_dir = get_config_path().parent / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -95,39 +109,116 @@ def configure_logging(verbose: bool = False, local_mode: bool = False) -> int:
     return file_sink_id
 
 
-def build_runtime(
+class _PartialBuild:
+    """Own resources until a complete RuntimeContext takes over."""
+
+    def __init__(self) -> None:
+        self._closers: list[Any] = []
+
+    def own(self, closer: Any) -> None:
+        self._closers.append(closer)
+
+    def release(self) -> None:
+        self._closers.clear()
+
+    async def close(self) -> None:
+        for closer in reversed(self._closers):
+            try:
+                result = closer()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("Partial runtime resource cleanup failed")
+        self._closers.clear()
+
+
+def _finish_partial_cleanup(partial: _PartialBuild) -> None:
+    """Finish cleanup even when construction runs inside an event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(partial.close())
+        return
+
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            asyncio.run(partial.close())
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run, name="nanocat.partial-cleanup")
+    worker.start()
+    worker.join()
+    if errors:
+        raise errors[0]
+
+
+def _compose_runtime(
     *,
     workdir: str | None = None,
     verbose: bool = False,
-    local_mode: bool = False,
+    partial: _PartialBuild,
 ) -> RuntimeContext:
-    """Construct the runtime services needed to run the gateway.
-
-    *workdir* anchors all runtime state (see :func:`load_runtime_config`). When
-    *local_mode* is set, only the ``tui`` channel is started and all network
-    channels stay disabled regardless of config.
-    """
+    """Construct the channel-service runtime and its HTTP surfaces."""
     config = load_runtime_config(workdir)  # sets the config path before paths derive
     paths = RuntimePaths.from_config_path(get_config_path(), workspace=config.workspace_path)
-    config_snapshot = ConfigSnapshot(config=config, paths=paths)
-    log_sink_id = configure_logging(verbose=verbose, local_mode=local_mode)
     sync_workspace_templates(config.workspace_path, silent=True)
+    static_dir = ensure_web_assets() if config.channels.web.enabled else None
+    log_sink_id = configure_logging(verbose=verbose)
+    partial.own(lambda: logger.remove(log_sink_id))
+
+    from nanocat.channels.registry import discover_channel_names, discover_descriptors
+
+    channel_descriptors = discover_descriptors()
+    channel_defaults = {
+        name: dict(descriptor.config_schema)
+        for name, descriptor in channel_descriptors.items()
+    }
+    for name in discover_channel_names():
+        channel_defaults.setdefault(name, {"enabled": False})
+    configuration = ConfigurationService(
+        get_config_path(),
+        effective_config=config,
+        channel_defaults=channel_defaults,
+    )
+    config_snapshot = ConfigSnapshot(config=config, paths=paths)
 
     bus = MessageBus()
+    partial.own(bus.close)
     delivery_tracker = DeliveryTracker()
     intervention = InterventionBroker(
         make_bus_presenter(bus, delivery_tracker),
         deferred_sink=bus.publish_inbound,
         delivery_tracker=delivery_tracker,
     )
+    partial.own(intervention.close)
     session_manager = SessionManager(paths.sessions_dir)
+    partial.own(session_manager.close)
+    from nanocat.agent.runtime_files import RuntimeFileStore
+
+    runtime_file_config = config.runtime_files
+    runtime_files = RuntimeFileStore(
+        paths.workspace,
+        runtime_dir=paths.runtime_dir,
+        max_file_bytes=runtime_file_config.max_file_bytes,
+        max_session_bytes=runtime_file_config.max_session_bytes,
+        max_total_bytes=runtime_file_config.max_total_bytes,
+    )
+    partial.own(runtime_files.close)
+    activity_journal = ActivityJournal(paths.activity_dir)
+    partial.own(activity_journal.close)
     cron = CronService(paths.cron_dir / "jobs.json")
+    partial.own(cron.close)
     provider_resolver = RuntimeProviderResolver(config)
+    partial.own(provider_resolver.close)
     vision_fallback = VisionFallbackService(
         provider_resolver,
         config,
         workspace=config.workspace_path,
     )
+    partial.own(vision_fallback.close)
 
     agent_engine = AgentLoop(
         bus=bus,
@@ -137,8 +228,11 @@ def build_runtime(
         intervention_broker=intervention,
         provider_resolver=provider_resolver,
         vision_fallback=vision_fallback,
+        runtime_files=runtime_files,
+        configuration=configuration,
     )
     agent = AgentService(agent_engine)
+    partial.own(agent.close)
     system_turns = SystemTurnGateway(agent, bus)
 
     from nanocat.application.command_dispatcher import CommandDispatcher
@@ -150,6 +244,8 @@ def build_runtime(
         session_manager=session_manager,
         intervention=intervention,
         supervisor=None,  # bound after the supervisor is constructed below
+        activity_journal=activity_journal,
+        configuration=configuration,
     )
     command_dispatcher = CommandDispatcher(agent_engine, bus)
     agent_engine.set_command_dispatcher(command_dispatcher)
@@ -209,14 +305,15 @@ def build_runtime(
     channels = ChannelManager(
         config,
         bus,
-        force_channel="tui" if local_mode else None,
         delivery_sink=delivery_tracker.resolve,
         delivery_guard=delivery_tracker.is_pending,
+        descriptors=channel_descriptors,
     )
-    logger.info("NanoCat v{} ready — workspace: {}", __version__, config.workspace_path)
+    partial.own(channels.stop_all)
+    logger.info("NanoCat v{} configured — workspace: {}", __version__, config.workspace_path)
 
     def pick_heartbeat_target() -> HeartbeatTarget:
-        configured_principal = config.gateway.heartbeat.principal_id
+        configured_principal = config.heartbeat.principal_id
         enabled = set(channels.enabled_channels)
         candidates: list[tuple[str, str, str, str | None]] = []
         for ch in sorted(enabled):
@@ -288,6 +385,37 @@ def build_runtime(
         provider_resolver=agent.provider_resolver,
         config=config,
     )
+    partial.own(heartbeat.close)
+
+    web_channel = channels.get_channel("web")
+    api_runtime = ApiRuntime(
+        control=control,
+        config=config,
+        configuration=configuration,
+        web_channel=web_channel,  # type: ignore[arg-type]
+        activity_journal=activity_journal,
+        static_dir=static_dir,
+        endpoint_file=paths.runtime_dir / "http-endpoints.json",
+    )
+    partial.own(api_runtime.close)
+
+    async def apply_runtime_configuration(
+        current: Config,
+        changed_paths: tuple[str, ...],
+    ) -> None:
+        await agent_engine.apply_configuration(current, changed_paths)
+        if any(path.startswith("providers.") for path in changed_paths):
+            await provider_resolver.reconfigure()
+        if any(path.startswith("channels.") for path in changed_paths):
+            channels.apply_live_config(current)
+            await channels.reconfigure(current, changed_paths)
+        if any(path.startswith("transcription.") for path in changed_paths):
+            channels.apply_transcription_config(current)
+        if any(path.startswith("heartbeat.") for path in changed_paths):
+            await heartbeat.apply_config()
+        await api_runtime.apply_configuration(current, changed_paths)
+
+    configuration.set_runtime_applier(apply_runtime_configuration)
 
     runtime = RuntimeContext(
         config=config,
@@ -298,28 +426,60 @@ def build_runtime(
         channels=channels,
         heartbeat=heartbeat,
         system_turns=system_turns,
+        runtime_files=runtime_files,
+        activity_journal=activity_journal,
+        api_runtime=api_runtime,
+        control=control,
         paths=paths,
         config_snapshot=config_snapshot,
         log_sink_id=log_sink_id,
         intervention=intervention,
         command_dispatcher=command_dispatcher,
+        configuration=configuration,
     )
-    runtime.supervisor = RuntimeSupervisor(runtime)
-    agent.set_runtime_supervisor(runtime.supervisor)
-    control.set_supervisor(runtime.supervisor)
-    tui_channel = channels.get_channel("tui")
-    bind_control = getattr(tui_channel, "bind_control", None)
-    if callable(bind_control):
-        bind_control(control)
     return runtime
 
 
-async def run_gateway_async(
+def build_runtime(
+    *,
+    workdir: str | None = None,
+    verbose: bool = False,
+) -> RuntimeContext:
+    """Construct one exclusively-owned runtime for a workdir."""
+    data_dir = Path(workdir).expanduser().resolve() if workdir else Path.cwd().resolve()
+    instance_lock = RuntimeInstanceLock(data_dir / ".nanocat.lock")
+    instance_lock.acquire()
+    partial = _PartialBuild()
+    try:
+        runtime = _compose_runtime(
+            workdir=workdir,
+            verbose=verbose,
+            partial=partial,
+        )
+        runtime.instance_lock = instance_lock
+        runtime.supervisor = RuntimeSupervisor(runtime)
+        runtime.agent.set_runtime_supervisor(runtime.supervisor)
+        runtime.control.set_supervisor(runtime.supervisor)
+    except BaseException:
+        try:
+            _finish_partial_cleanup(partial)
+        except BaseException:
+            logger.exception("Partial runtime cleanup could not be completed")
+        try:
+            instance_lock.close()
+        except BaseException:
+            logger.exception("Runtime instance lock cleanup could not be completed")
+        raise
+    partial.release()
+    return runtime
+
+
+async def run_service_async(
     *,
     workdir: str | None = None,
     verbose: bool = False,
 ) -> None:
-    """Run the gateway services until interrupted."""
+    """Run NanoCat channel and HTTP services until interrupted."""
     runtime = build_runtime(workdir=workdir, verbose=verbose)
     logger.info("Starting NanoCat runtime v{}", __version__)
     if runtime.channels.enabled_channels:
@@ -329,121 +489,79 @@ async def run_gateway_async(
 
     supervisor = runtime.supervisor or RuntimeSupervisor(runtime)
     runtime.supervisor = supervisor
+    loop = asyncio.get_running_loop()
+    loop_handlers: list[signal.Signals] = []
+    fallback_handlers: dict[signal.Signals, Any] = {}
+
+    def request_shutdown(received: signal.Signals) -> None:
+        asyncio.create_task(
+            supervisor.stop(
+                ShutdownReason(kind="signal", detail=f"received {received.name}")
+            ),
+            name="nanocat.signal-stop",
+        )
+
+    for received in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(received, request_shutdown, received)
+            loop_handlers.append(received)
+        except (NotImplementedError, RuntimeError):
+            try:
+                previous = signal.getsignal(received)
+
+                def fallback_handler(
+                    _signum: int,
+                    _frame: Any,
+                    received_signal: signal.Signals = received,
+                ) -> None:
+                    loop.call_soon_threadsafe(request_shutdown, received_signal)
+
+                signal.signal(received, fallback_handler)
+                fallback_handlers[received] = previous
+            except (OSError, ValueError):
+                logger.debug("Signal handler unavailable for {}", received.name)
     try:
         await supervisor.run()
-    finally:
-        await supervisor.stop(ShutdownReason(kind="signal", detail="gateway exited"))
-
-
-async def _shutdown_runtime(runtime: RuntimeContext) -> None:
-    """Tear down runtime services through the single supervisor owner."""
-    supervisor = runtime.supervisor or RuntimeSupervisor(runtime)
-    runtime.supervisor = supervisor
-    await supervisor.stop(ShutdownReason(kind="manual", detail="local TUI closed"))
-
-
-def run_local_tui(
-    *,
-    workdir: str | None = None,
-    verbose: bool = False,
-) -> None:
-    """Run the local TUI: runtime on a background loop, Textual UI on main thread.
-
-    Decoupling the loops keeps the agent's synchronous work from starving the
-    UI compositor (which otherwise freezes the screen until a turn completes).
-    """
-    import threading
-
-    runtime = build_runtime(workdir=workdir, verbose=verbose, local_mode=True)
-    tui = runtime.channels.get_channel("tui")
-    if tui is None or not hasattr(tui, "run_ui"):
-        raise SystemExit("Error: TUI channel unavailable (is 'textual' installed?)")
-
-    # Preload the local session transcript so it renders on startup.
-    try:
-        session = runtime.session_manager.get_or_create("tui", "local")
-        history = session.get_history()
-        if history:
-            logger.info("Restoring {} prior message(s)…", len(history))
-        tui.preload_history(history)  # type: ignore[attr-defined]
-    except Exception as e:
-        logger.warning("Could not preload TUI session history: {}", e)
-
-    loop = asyncio.new_event_loop()
-    started = threading.Event()
-
-    async def _serve() -> None:
-        supervisor = runtime.supervisor or RuntimeSupervisor(runtime)
-        runtime.supervisor = supervisor
-        await supervisor.run()
-
-    def _runtime_thread() -> None:
-        asyncio.set_event_loop(loop)
-        loop.create_task(_serve())
-        started.set()
-        loop.run_forever()
-        loop.close()
-
-    worker = threading.Thread(target=_runtime_thread, name="nanocat-runtime", daemon=True)
-    worker.start()
-    started.wait()
-    tui.bind_runtime_loop(loop)  # type: ignore[attr-defined]
-
-    logger.info("Starting NanoCat runtime v{} (local TUI)", __version__)
-
-    try:
-        tui.run_ui()  # type: ignore[attr-defined]  # blocks until the user quits
-    except KeyboardInterrupt:
-        pass
     finally:
         try:
-            asyncio.run_coroutine_threadsafe(_shutdown_runtime(runtime), loop).result(timeout=10)
-        except Exception as e:
-            logger.warning("Local TUI shutdown error: {}", e)
-        loop.call_soon_threadsafe(loop.stop)
-        worker.join(timeout=5)
+            await supervisor.stop(ShutdownReason(kind="signal", detail="service exited"))
+        finally:
+            for received in loop_handlers:
+                loop.remove_signal_handler(received)
+            for received, previous in fallback_handlers.items():
+                try:
+                    signal.signal(received, previous)
+                except (OSError, ValueError):
+                    pass
 
 
-def run_gateway(
+def run_service(
     *,
     workdir: str | None = None,
     verbose: bool = False,
-    local_mode: bool = False,
 ) -> None:
-    """Synchronous wrapper for gateway runtime."""
-    if local_mode:
-        run_local_tui(workdir=workdir, verbose=verbose)
-        return
+    """Synchronous channel-service entrypoint."""
     try:
-        asyncio.run(run_gateway_async(workdir=workdir, verbose=verbose))
+        asyncio.run(run_service_async(workdir=workdir, verbose=verbose))
     except KeyboardInterrupt:
         logger.info("Shutting down runtime")
 
 
 def main() -> None:
-    """Module/script entrypoint. A start mode (``gateway`` or ``tui``) is required."""
+    """Start NanoCat in channel-service mode."""
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(
         prog="nanocat",
-        description="NanoCat — ultra-lightweight personal AI assistant.",
+        description="NanoCat — personal AI agent service.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "modes:\n"
-            "  gateway    Run the network channels (Telegram, Slack, …) defined in config.\n"
-            "  tui        Local split-screen terminal UI; all network channels disabled.\n\n"
             "The working directory (-w, default: current directory) anchors all\n"
-            "runtime state: config.json, workspace/, sessions/, cron/ and logs/.\n\n"
+            "runtime state: config.json, workspace/, sessions/, activity/, cron/ and logs/.\n\n"
             "examples:\n"
-            "  nanocat gateway\n"
-            "  nanocat tui -w ~/.nanocat"
+            "  nanocat\n"
+            "  nanocat -w ~/.nanocat"
         ),
-    )
-    parser.add_argument(
-        "mode",
-        choices=["gateway", "tui"],
-        help="Start mode: 'gateway' (network channels) or 'tui' (local terminal UI).",
     )
     parser.add_argument(
         "-w",
@@ -453,11 +571,6 @@ def main() -> None:
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging.")
 
-    # Zero args: show full help instead of an argparse usage error.
-    if len(sys.argv) == 1:
-        parser.print_help()
-        return
-
     args = parser.parse_args()
 
     if args.workdir is None:
@@ -465,8 +578,7 @@ def main() -> None:
         if Path.cwd().resolve() == repo_root:
             args.workdir = str(repo_root / "data")
 
-    run_gateway(
+    run_service(
         workdir=args.workdir,
         verbose=args.verbose,
-        local_mode=args.mode == "tui",
     )

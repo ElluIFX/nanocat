@@ -343,18 +343,39 @@ Keep MEMORY.md concise — it is loaded on every turn."""
         if not media:
             return text
 
-        images = []
+        content_blocks: list[dict[str, Any]] = []
         for path in media:
             p = Path(path)
             if not p.is_file():
                 continue
-            raw = p.read_bytes()
-            # Detect real MIME type from magic bytes; fallback to filename guess
-            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+            guessed_mime = mimetypes.guess_type(path)[0]
+            raw: bytes | None = None
+            if guessed_mime and not guessed_mime.startswith("image/"):
+                mime = guessed_mime
+            else:
+                raw = p.read_bytes()
+                mime = detect_image_mime(raw) or guessed_mime
             if not mime or not mime.startswith("image/"):
+                resolved = p.resolve()
+                try:
+                    readable_path = resolved.relative_to(self.workspace.resolve()).as_posix()
+                except ValueError:
+                    readable_path = str(resolved)
+                content_blocks.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Attached file available at `{readable_path}`. "
+                            "Use read_file or grep_file to inspect it as needed."
+                        ),
+                        "_meta": {"attachment_path": readable_path},
+                    }
+                )
                 continue
+            if raw is None:
+                raw = p.read_bytes()
             b64 = base64.b64encode(raw).decode()
-            images.append(
+            content_blocks.append(
                 {
                     "type": "image_url",
                     "image_url": {"url": f"data:{mime};base64,{b64}"},
@@ -362,9 +383,9 @@ Keep MEMORY.md concise — it is loaded on every turn."""
                 }
             )
 
-        if not images:
+        if not content_blocks:
             return text
-        return images + [{"type": "text", "text": text}]
+        return content_blocks + [{"type": "text", "text": text}]
 
     def add_tool_result(
         self,

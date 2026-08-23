@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -45,8 +46,20 @@ class _PendingIntervention:
     deferred: list[Any] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class _DeferredDelivery:
+    message: Any
+    completion: asyncio.Future[None]
+    released: bool = False
+    claimed: bool = False
+    force_failure: bool = False
+    phase: str = "queued"
+    operation: asyncio.Task[None] | None = None
+
+
 RequestUser = Callable[[InterventionRequest], Awaitable[DeliveryResult | bool | None]]
 DeferredSink = Callable[[Any], Awaitable[None]]
+DeferredFailure = Callable[[Any], Awaitable[None]]
 
 
 class DeliveryTracker:
@@ -266,6 +279,8 @@ def make_bus_presenter(
 class InterventionBroker:
     """Own pending intervention state for exactly one runtime instance."""
 
+    _MAX_DEFERRED_MESSAGES = 4096
+
     def __init__(
         self,
         request_user: RequestUser,
@@ -278,6 +293,8 @@ class InterventionBroker:
             raise ValueError("default intervention timeout must be positive")
         self._request_user = request_user
         self._deferred_sink = deferred_sink
+        self._deferred_release: Callable[[Any], None] | None = None
+        self._deferred_failure: DeferredFailure | None = None
         self._delivery_tracker = delivery_tracker
         self._default_timeout_seconds = default_timeout_seconds
         self._pending: dict[str, _PendingIntervention] = {}
@@ -285,6 +302,8 @@ class InterventionBroker:
         self._session_grants: set[tuple[ConversationRef, str, str]] = set()
         self._defer_scopes: dict[ConversationRef, int] = {}
         self._deferred_hold: dict[ConversationRef, list[Any]] = {}
+        self._deferred_delivery_backlog: deque[_DeferredDelivery] = deque()
+        self._deferred_delivery_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -292,6 +311,14 @@ class InterventionBroker:
     def closed(self) -> bool:
         """Return whether the broker has been closed."""
         return self._closed
+
+    def set_deferred_release(self, callback: Callable[[Any], None]) -> None:
+        """Bind the runtime admission release used by deferred messages."""
+        self._deferred_release = callback
+
+    def set_deferred_failure(self, callback: DeferredFailure) -> None:
+        """Bind terminal handling for a deferred message that cannot be replayed."""
+        self._deferred_failure = callback
 
     @property
     def default_timeout_seconds(self) -> float:
@@ -417,7 +444,7 @@ class InterventionBroker:
                 if self._defer_scopes.get(request.conversation, 0):
                     self._deferred_hold.setdefault(request.conversation, []).extend(deferred)
                     deferred = []
-            await self._deliver_deferred(deferred)
+                self._queue_deferred_locked(deferred)
 
     async def resolve(
         self,
@@ -539,6 +566,11 @@ class InterventionBroker:
 
     def defer(self, conversation: ConversationRef, message: Any) -> bool:
         """Defer ordinary input while intervention or a grouped approval is active."""
+        deferred_count = len(self._deferred_delivery_backlog) + sum(
+            len(pending.deferred) for pending in self._pending.values()
+        ) + sum(len(messages) for messages in self._deferred_hold.values())
+        if deferred_count >= self._MAX_DEFERRED_MESSAGES:
+            return False
         for pending in self._pending.values():
             if pending.request.conversation == conversation:
                 pending.deferred.append(message)
@@ -547,6 +579,51 @@ class InterventionBroker:
             self._deferred_hold.setdefault(conversation, []).append(message)
             return True
         return False
+
+    def extract_deferred_turn(self, turn_id: str) -> list[Any]:
+        """Remove deferred messages owned by one exact turn."""
+        extracted: list[Any] = []
+
+        def matches(message: Any) -> bool:
+            value = getattr(message, "turn_id", None)
+            if value:
+                return str(value) == turn_id
+            metadata = getattr(message, "metadata", None)
+            return isinstance(metadata, dict) and str(metadata.get("turn_id") or "") == turn_id
+
+        for pending in self._pending.values():
+            retained = []
+            for message in pending.deferred:
+                (extracted if matches(message) else retained).append(message)
+            pending.deferred = retained
+        for conversation, messages in tuple(self._deferred_hold.items()):
+            retained = []
+            for message in messages:
+                (extracted if matches(message) else retained).append(message)
+            if retained:
+                self._deferred_hold[conversation] = retained
+            else:
+                self._deferred_hold.pop(conversation, None)
+        extracted.extend(self._extract_deferred_delivery(matches))
+        return extracted
+
+    def extract_deferred_session(self, session_key: str) -> list[Any]:
+        """Remove every deferred message owned by one session."""
+        extracted: list[Any] = []
+        for pending in self._pending.values():
+            if pending.request.session_key == session_key:
+                extracted.extend(pending.deferred)
+                pending.deferred.clear()
+        for conversation, messages in tuple(self._deferred_hold.items()):
+            if conversation.session_key == session_key:
+                extracted.extend(messages)
+                self._deferred_hold.pop(conversation, None)
+        extracted.extend(
+            self._extract_deferred_delivery(
+                lambda message: getattr(message, "session_key", None) == session_key
+            )
+        )
+        return extracted
 
     async def begin_defer_scope(self, conversation: ConversationRef) -> None:
         """Keep ordinary input deferred across a multi-call approval batch."""
@@ -563,17 +640,180 @@ class InterventionBroker:
             else:
                 self._defer_scopes[conversation] = depth - 1
                 deferred = []
-        await self._deliver_deferred(deferred)
+            self._queue_deferred_locked(deferred)
 
     async def _deliver_deferred(self, messages: list[Any]) -> None:
-        if not self._deferred_sink:
+        """Transfer deferred messages to the broker-owned delivery worker."""
+        self._queue_deferred_locked(messages)
+
+    async def settle_deferred_turn(self, turn_id: str) -> list[Any]:
+        """Settle active sink handoffs before exact turn cancellation drains ingress."""
+
+        def matches(message: Any) -> bool:
+            value = getattr(message, "turn_id", None)
+            if value:
+                return str(value) == turn_id
+            metadata = getattr(message, "metadata", None)
+            return isinstance(metadata, dict) and str(metadata.get("turn_id") or "") == turn_id
+
+        return await self._settle_deferred_delivery(matches)
+
+    async def settle_deferred_session(self, session_key: str) -> list[Any]:
+        """Settle active sink handoffs before session cancellation drains ingress."""
+        return await self._settle_deferred_delivery(
+            lambda message: getattr(message, "session_key", None) == session_key
+        )
+
+    async def _settle_deferred_delivery(
+        self,
+        predicate: Callable[[Any], bool],
+    ) -> list[Any]:
+        """Claim unsent messages while allowing committed sink operations to settle."""
+        extracted: list[Any] = []
+        while True:
+            extracted.extend(self._extract_deferred_delivery(predicate))
+            operations = tuple(
+                delivery.operation
+                for delivery in self._deferred_delivery_backlog
+                if predicate(delivery.message)
+                and delivery.phase == "sink"
+                and delivery.operation is not None
+                and not delivery.operation.done()
+            )
+            failure_completions = tuple(
+                delivery.completion
+                for delivery in self._deferred_delivery_backlog
+                if predicate(delivery.message) and delivery.phase == "failure"
+            )
+            if not operations and not failure_completions:
+                extracted.extend(self._extract_deferred_delivery(predicate))
+                return extracted
+            await asyncio.gather(
+                *(asyncio.shield(operation) for operation in operations),
+                *(asyncio.shield(completion) for completion in failure_completions),
+                return_exceptions=True,
+            )
+
+    def _queue_deferred_locked(self, messages: list[Any]) -> tuple[_DeferredDelivery, ...]:
+        if not messages:
+            return ()
+        if len(self._deferred_delivery_backlog) + len(messages) > self._MAX_DEFERRED_MESSAGES:
+            raise InterventionError("deferred delivery capacity exceeded")
+        loop = asyncio.get_running_loop()
+        deliveries = tuple(
+            _DeferredDelivery(message=message, completion=loop.create_future())
+            for message in messages
+        )
+        self._deferred_delivery_backlog.extend(deliveries)
+        self._ensure_deferred_delivery_worker()
+        return deliveries
+
+    async def _wait_deferred(
+        self,
+        deliveries: tuple[_DeferredDelivery, ...],
+    ) -> None:
+        if deliveries:
+            await asyncio.gather(
+                *(asyncio.shield(delivery.completion) for delivery in deliveries)
+            )
+
+    def _ensure_deferred_delivery_worker(self) -> None:
+        current = self._deferred_delivery_task
+        if current is not None and not current.done():
             return
-        for message in messages:
+        task = asyncio.create_task(
+            self._run_deferred_delivery(),
+            name="nanocat.intervention-deferred-delivery",
+        )
+        self._deferred_delivery_task = task
+
+        def settled(completed: asyncio.Task[None]) -> None:
+            if self._deferred_delivery_task is completed:
+                self._deferred_delivery_task = None
             try:
-                await self._deferred_sink(message)
-            except Exception:
-                # A failed replay must not replace the result of the owning turn.
+                completed.result()
+            except BaseException:
+                pass
+            if self._deferred_delivery_backlog:
+                self._ensure_deferred_delivery_worker()
+
+        task.add_done_callback(settled)
+
+    def _ack_deferred_delivery(self, delivery: _DeferredDelivery) -> None:
+        try:
+            self._deferred_delivery_backlog.remove(delivery)
+        except ValueError:
+            pass
+        if not delivery.completion.done():
+            delivery.completion.set_result(None)
+
+    async def _run_deferred_delivery(self) -> None:
+        retry_delay = 0.05
+        while self._deferred_delivery_backlog:
+            delivery = self._deferred_delivery_backlog[0]
+            if delivery.claimed:
+                self._ack_deferred_delivery(delivery)
                 continue
+            if not delivery.released and self._deferred_release is not None:
+                self._deferred_release(delivery.message)
+                delivery.released = True
+            callback = (
+                self._deferred_failure
+                if self._closed or delivery.force_failure or self._deferred_sink is None
+                else self._deferred_sink
+            )
+            if callback is None:
+                self._ack_deferred_delivery(delivery)
+                continue
+            delivery.phase = "failure" if callback is self._deferred_failure else "sink"
+            operation = asyncio.create_task(callback(delivery.message))
+            delivery.operation = operation
+            try:
+                await operation
+            except asyncio.CancelledError:
+                if delivery.claimed:
+                    self._ack_deferred_delivery(delivery)
+                    continue
+                if asyncio.current_task().cancelling():
+                    raise
+                delivery.force_failure = True
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 1.0)
+                continue
+            except Exception:
+                if delivery.phase == "sink":
+                    delivery.force_failure = True
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 1.0)
+                continue
+            finally:
+                delivery.operation = None
+            retry_delay = 0.05
+            self._ack_deferred_delivery(delivery)
+
+    def _extract_deferred_delivery(
+        self,
+        predicate: Callable[[Any], bool],
+    ) -> list[Any]:
+        extracted: list[Any] = []
+        for delivery in tuple(self._deferred_delivery_backlog):
+            if not predicate(delivery.message) or delivery.phase == "failure":
+                continue
+            operation = delivery.operation
+            if operation is not None and not operation.done():
+                continue
+            if (
+                delivery.phase == "sink"
+                and operation is not None
+                and operation.done()
+                and not operation.cancelled()
+                and operation.exception() is None
+            ):
+                continue
+            delivery.claimed = True
+            self._ack_deferred_delivery(delivery)
+            extracted.append(delivery.message)
+        return extracted
 
     async def cancel_turn(self, turn_id: str) -> None:
         self._turn_grants = {
@@ -608,11 +848,36 @@ class InterventionBroker:
 
     async def close(self) -> None:
         """Cancel all pending requests and prevent new intervention waits."""
-        self._closed = True
-        if self._delivery_tracker is not None:
-            self._delivery_tracker.close()
-        self._turn_grants.clear()
-        self._session_grants.clear()
-        self._defer_scopes.clear()
-        self._deferred_hold.clear()
-        await self._resolve_cancel(lambda _request: True)
+        async with self._lock:
+            self._closed = True
+            if self._delivery_tracker is not None:
+                self._delivery_tracker.close()
+            self._turn_grants.clear()
+            self._session_grants.clear()
+            self._defer_scopes.clear()
+            for delivery in self._deferred_delivery_backlog:
+                if delivery.phase != "sink":
+                    continue
+                delivery.force_failure = True
+                if delivery.operation is not None and not delivery.operation.done():
+                    delivery.operation.cancel()
+            deferred = [
+                message for messages in self._deferred_hold.values() for message in messages
+            ]
+            self._deferred_hold.clear()
+            for pending in self._pending.values():
+                deferred.extend(pending.deferred)
+                pending.deferred.clear()
+                if not pending.future.done():
+                    pending.future.set_result(
+                        InterventionResult(
+                            request_id=pending.request.request_id,
+                            action=InterventionAction.CANCEL,
+                            state=InterventionState.CANCELLED,
+                        )
+                    )
+            deliveries = self._queue_deferred_locked(deferred)
+        await self._wait_deferred(deliveries)
+        worker = self._deferred_delivery_task
+        if worker is not None:
+            await asyncio.shield(worker)

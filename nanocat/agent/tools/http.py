@@ -5,8 +5,8 @@ Beyond one-shot requests it supports:
 - in-memory cookie sessions (`session`/`session_id`) — a persistent httpx client
   kept in memory only, never written to disk;
 - multipart file upload (`files`: field -> local path);
-- fake-stream (`stream`): return a temp-file path immediately while the response
-  body streams into it in the background (pair with proc/read_file to watch it).
+- fake-stream (`stream`): return a workspace runtime-file path immediately while
+  the response body streams into it in the background (pair with read_file).
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import tempfile
 import uuid
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -29,7 +29,8 @@ _RESP_HEADER_KEYS = ("content-type", "content-length", "location", "server", "se
 class HttpSessionManager:
     """In-memory HTTP sessions (persistent cookie jars) + active fake-stream tasks.
 
-    Nothing is persisted to disk; sessions and streams are dropped on shutdown.
+    Cookie sessions stay in memory. Active stream tasks are cancelled on shutdown;
+    completed runtime files remain owned by the injected runtime file store.
     """
 
     def __init__(self, proxy: str | None = None) -> None:
@@ -74,9 +75,18 @@ class HttpRequestTool(Tool):
         self,
         manager: HttpSessionManager,
         proxy: str | None = None,
+        runtime_file_store: Any | None = None,
     ):
         self._mgr = manager
         self._proxy = proxy
+        self._runtime_file_store = runtime_file_store
+        self._storage_scope: ContextVar[str | None] = ContextVar(
+            "http_request_storage_scope", default=None
+        )
+
+    def set_storage_scope(self, storage_scope: str) -> None:
+        """Bind the runtime-file scope for the current tool execution context."""
+        self._storage_scope.set(storage_scope)
 
     @property
     def name(self) -> str:
@@ -88,7 +98,8 @@ class HttpRequestTool(Tool):
             "Make an HTTP request (method/headers/json) → JSON {status, headers, body}. "
             "For APIs/webhooks, not article text (use web_fetch). Options: session=true (+ "
             "reuse via session_id) keeps cookies across calls; files={field:path} uploads; "
-            "stream=true returns a temp-file path immediately and writes the body into it."
+            "stream=true returns a workspace runtime-file path immediately and writes the "
+            "body into it."
         )
 
     @property
@@ -117,8 +128,8 @@ class HttpRequestTool(Tool):
                 },
                 "stream": {
                     "type": "boolean",
-                    "description": "Return a temp-file path at once and stream the body into it "
-                    "in the background (read the file to watch it fill)",
+                    "description": "Return a workspace runtime-file path at once and stream "
+                    "the body into it in the background",
                 },
             },
             "required": ["url"],
@@ -208,26 +219,82 @@ class HttpRequestTool(Tool):
         use_session: bool,
         session_id: str | None,
     ) -> str:
-        fd, path = tempfile.mkstemp(suffix=".stream", prefix="nanocat_http_")
-        os.close(fd)
-        if use_session:
-            client, sid = self._mgr.session(session_id)
-            owns = False
-        else:
-            client, sid, owns = self._mgr.new_client(), None, True
+        if self._runtime_file_store is None:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "HTTP streaming storage is unavailable",
+                    "hint": "Retry without stream=true.",
+                }
+            )
+        storage_scope = self._storage_scope.get()
+        if not storage_scope:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "HTTP streaming has no runtime storage scope",
+                    "hint": "Retry without stream=true.",
+                }
+            )
+        try:
+            allocation = self._runtime_file_store.allocate(
+                storage_scope,
+                "http",
+                suffix=".stream",
+            )
+        except Exception as e:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "cannot allocate HTTP stream file",
+                    "detail": exc_message(e),
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            if use_session:
+                client, sid = self._mgr.session(session_id)
+                owns = False
+            else:
+                client, sid, owns = self._mgr.new_client(), None, True
+        except Exception as e:
+            self._runtime_file_store.discard(allocation)
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "cannot initialize HTTP stream client",
+                    "detail": exc_message(e),
+                },
+                ensure_ascii=False,
+            )
 
         stream_id = uuid.uuid4().hex[:8]
+        max_bytes = max(0, int(self._runtime_file_store.max_file_bytes))
         task = asyncio.create_task(
-            self._stream_to_file(client, owns, method, url, headers, json_body, body, timeout, path)
+            self._stream_to_file(
+                client,
+                owns,
+                method,
+                url,
+                headers,
+                json_body,
+                body,
+                timeout,
+                allocation,
+                max_bytes,
+                stream_id,
+            )
         )
         self._mgr.track_stream(stream_id, task)
         result = {
             "ok": True,
             "streaming": True,
             "stream_id": stream_id,
-            "streaming_to": path,
+            "path": allocation.relative_path,
+            "max_bytes": max_bytes,
             "status": "downloading",
-            "hint": "read this file as it fills; it stops growing when the download completes",
+            "hint": "Use read_file on this path; it stops growing when the download completes",
         }
         if sid:
             result["session_id"] = sid
@@ -243,9 +310,12 @@ class HttpRequestTool(Tool):
         json_body: dict | None,
         body: str | None,
         timeout: float,
-        path: str,
+        allocation: Any,
+        max_bytes: int,
+        stream_id: str,
     ) -> None:
         content = body if json_body is None else None
+        completed = False
         try:
             async with client.stream(
                 method.upper(),
@@ -255,20 +325,60 @@ class HttpRequestTool(Tool):
                 content=content,
                 timeout=timeout,
             ) as resp:
-                with open(path, "wb") as f:
+                with open(allocation.absolute_path, "wb") as f:
+                    written = 0
                     async for chunk in resp.aiter_bytes():
-                        f.write(chunk)
+                        remaining = max_bytes - written
+                        if remaining <= 0:
+                            self._write_truncated_marker(f, max_bytes)
+                            break
+                        f.write(chunk[:remaining])
+                        written += min(len(chunk), remaining)
+                        if len(chunk) > remaining:
+                            self._write_truncated_marker(f, max_bytes)
+                            break
+            completed = True
         except asyncio.CancelledError:
+            self._runtime_file_store.discard(allocation)
             raise
         except Exception as e:
             try:
-                with open(path, "ab") as f:
-                    f.write(f"\n[stream error: {e}]".encode())
+                self._append_error_marker(allocation.absolute_path, e, max_bytes)
+                completed = True
             except Exception:
-                pass
+                self._runtime_file_store.discard(allocation)
         finally:
+            if completed:
+                try:
+                    self._runtime_file_store.finalize(
+                        allocation,
+                        source_name=self.name,
+                        source_id=stream_id,
+                    )
+                except Exception:
+                    self._runtime_file_store.discard(allocation)
             if owns:
                 try:
                     await client.aclose()
                 except Exception:
                     pass
+
+    @staticmethod
+    def _write_truncated_marker(handle: Any, max_bytes: int) -> None:
+        marker = b"\n[stream truncated at runtime file limit]\n"
+        if max_bytes < len(marker):
+            return
+        handle.seek(max_bytes - len(marker))
+        handle.write(marker)
+
+    @staticmethod
+    def _append_error_marker(path: Any, error: Exception, max_bytes: int) -> None:
+        marker = f"\n[stream error: {exc_message(error)}]".encode("utf-8")
+        with open(path, "r+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            current = handle.tell()
+            if current + len(marker) <= max_bytes:
+                handle.write(marker)
+            elif max_bytes >= len(marker):
+                handle.seek(max_bytes - len(marker))
+                handle.write(marker)

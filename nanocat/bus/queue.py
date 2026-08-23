@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import time
 from dataclasses import dataclass, replace
-from typing import Generic, TypeVar
+from itertools import count
+from typing import Callable, Generic, TypeVar
 
 from nanocat.bus.events import InboundMessage, OutboundMessage
 
@@ -76,20 +78,21 @@ class _PriorityQueue(Generic[MessageT]):
         """Mark one dequeued item as processed."""
         self._queue.task_done()
 
-    def drop_worst(self, incoming_priority: int) -> bool:
-        """Drop one lower-priority item to admit a control event, if possible."""
+    def drop_worst(self, incoming_priority: int) -> MessageT | None:
+        """Drop and return one lower-priority item, if possible."""
         items = self._queue._queue  # noqa: SLF001 - bounded local heap owner
         if not items:
-            return False
+            return None
         worst_index = max(range(len(items)), key=lambda index: (items[index][0], items[index][1]))
         worst_priority = items[worst_index][0]
         if worst_priority <= incoming_priority:
-            return False
+            return None
+        dropped = items[worst_index][2]
         items[worst_index] = items[-1]
         items.pop()
         heapq.heapify(items)
         self._queue.task_done()
-        return True
+        return dropped
 
     def drain(self) -> int:
         count = 0
@@ -100,6 +103,24 @@ class _PriorityQueue(Generic[MessageT]):
                 return count
             self._queue.task_done()
             count += 1
+
+    def drain_matching(self, predicate: Callable[[MessageT], bool]) -> list[MessageT]:
+        """Remove matching queued messages while preserving the remaining heap."""
+        kept: list[tuple[int, int, MessageT]] = []
+        removed: list[tuple[int, int, MessageT]] = []
+        for item in self._queue._queue:  # noqa: SLF001 - bounded local queue owner
+            (removed if predicate(item[2]) else kept).append(item)
+        if not removed:
+            return []
+        self._queue._queue[:] = kept  # noqa: SLF001 - bounded local queue owner
+        heapq.heapify(self._queue._queue)  # noqa: SLF001 - bounded local queue owner
+        for _ in removed:
+            self._queue.task_done()
+            self._queue._wakeup_next(  # noqa: SLF001 - release one blocked producer
+                self._queue._putters  # noqa: SLF001 - owned queue internals
+            )
+        removed.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in removed]
 
 
 class MessageBus:
@@ -132,12 +153,19 @@ class MessageBus:
         self._commands_empty.set()
         self._control_outbound_empty.set()
         self._pending_inbound: dict[str, int] = {}
+        self._pending_commands: dict[str, int] = {}
+        self._ingress_sequence = count(time.time_ns())
         self._outbound_empty.set()
 
     @property
     def closed(self) -> bool:
         """Return whether this bus has begun closing."""
         return self._closed.is_set()
+
+    @property
+    def outbound_empty(self) -> bool:
+        """Return whether both normal and reserved outbound queues are empty."""
+        return self.outbound.empty() and self.control_outbound.empty()
 
     @staticmethod
     def _priority(message: InboundMessage | OutboundMessage) -> int:
@@ -146,6 +174,11 @@ class MessageBus:
             return MessageBus._CONTROL_PRIORITY
         if metadata.get("_intervention"):
             return MessageBus._CONTROL_PRIORITY
+        if isinstance(message, OutboundMessage):
+            # Ordinary outbound records form one observable turn ledger.  Giving
+            # progress a lower dequeue priority lets a terminal response overtake
+            # already-enqueued thinking, reopening a completed turn in clients.
+            return message.priority if message.priority is not None else MessageBus._DEFAULT_PRIORITY
         if metadata.get("_progress"):
             return MessageBus._PROGRESS_PRIORITY
         return message.priority if message.priority is not None else MessageBus._DEFAULT_PRIORITY
@@ -155,34 +188,44 @@ class MessageBus:
         queue: _PriorityQueue[MessageT],
         message: MessageT,
         empty_event: asyncio.Event,
-    ) -> None:
+    ) -> MessageT | None:
         if self.closed:
             raise BusClosedError("message bus is closed")
 
         priority = self._priority(message)  # type: ignore[arg-type]
         if priority <= self._CONTROL_PRIORITY:
+            dropped: MessageT | None = None
             try:
                 queue.put_nowait(priority, message)
             except asyncio.QueueFull:
-                if not queue.drop_worst(priority):
+                dropped = queue.drop_worst(priority)
+                if dropped is None:
                     raise BusFullError("control event cannot be admitted") from None
                 queue.put_nowait(priority, message)
             empty_event.clear()
-            return
+            return dropped
 
         put_task = asyncio.create_task(queue.put(priority, message))
         close_task = asyncio.create_task(self._closed.wait())
-        done, _ = await asyncio.wait(
-            (put_task, close_task), return_when=asyncio.FIRST_COMPLETED
-        )
-        if put_task in done:
-            close_task.cancel()
-            await asyncio.gather(close_task, return_exceptions=True)
-            empty_event.clear()
-            return
-        put_task.cancel()
-        await asyncio.gather(put_task, return_exceptions=True)
-        raise BusClosedError("message bus closed while publishing")
+        try:
+            done, _ = await asyncio.wait(
+                (put_task, close_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if put_task in done:
+                empty_event.clear()
+                return None
+            raise BusClosedError("message bus closed while publishing")
+        except asyncio.CancelledError:
+            if put_task.done() and not put_task.cancelled() and put_task.exception() is None:
+                empty_event.clear()
+                return None
+            raise
+        finally:
+            for task in (put_task, close_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(put_task, close_task, return_exceptions=True)
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish an inbound message with bounded backpressure."""
@@ -191,16 +234,29 @@ class MessageBus:
             return
         if MessageBus.is_escaped_text(msg.content):
             msg = replace(msg, content=MessageBus.normalize_escaped_text(msg.content))
+        if msg.ingress_ordinal <= 0:
+            msg.ingress_ordinal = next(self._ingress_sequence)
         self._pending_inbound[msg.session_key] = self._pending_inbound.get(msg.session_key, 0) + 1
         try:
-            await self._publish(self.inbound, msg, self._inbound_empty)
-        except Exception:
+            dropped = await self._publish(self.inbound, msg, self._inbound_empty)
+            if isinstance(dropped, InboundMessage):
+                self._decrement_pending(dropped.session_key)
+        except BaseException:
             self._decrement_pending(msg.session_key)
             raise
 
     async def publish_command(self, msg: InboundMessage) -> None:
         """Publish a slash command to the reserved command lane."""
-        await self._publish(self.commands, msg, self._commands_empty)
+        self._pending_commands[msg.session_key] = (
+            self._pending_commands.get(msg.session_key, 0) + 1
+        )
+        try:
+            dropped = await self._publish(self.commands, msg, self._commands_empty)
+            if isinstance(dropped, InboundMessage):
+                self._decrement_pending_command(dropped.session_key)
+        except BaseException:
+            self._decrement_pending_command(msg.session_key)
+            raise
 
     @staticmethod
     def is_command_candidate(content: str) -> bool:
@@ -226,7 +282,9 @@ class MessageBus:
 
     async def consume_command(self) -> InboundMessage:
         """Consume the next slash command or receive BusClosedError on drain."""
-        return await self._consume(self.commands, self._commands_empty)
+        message = await self._consume(self.commands, self._commands_empty)
+        self._decrement_pending_command(message.session_key)
+        return message
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish an outbound message with bounded backpressure."""
@@ -257,9 +315,7 @@ class MessageBus:
 
         get_task = asyncio.create_task(queue.get())
         close_task = asyncio.create_task(self._closed.wait())
-        done, _ = await asyncio.wait(
-            (get_task, close_task), return_when=asyncio.FIRST_COMPLETED
-        )
+        done, _ = await asyncio.wait((get_task, close_task), return_when=asyncio.FIRST_COMPLETED)
         if get_task in done:
             close_task.cancel()
             await asyncio.gather(close_task, return_exceptions=True)
@@ -316,6 +372,39 @@ class MessageBus:
         """Return the number of normal messages waiting for one session."""
         return self._pending_inbound.get(session_key, 0)
 
+    def _decrement_pending_command(self, session_key: str) -> None:
+        count = self._pending_commands.get(session_key, 0)
+        if count <= 1:
+            self._pending_commands.pop(session_key, None)
+        else:
+            self._pending_commands[session_key] = count - 1
+
+    def pending_commands(self, session_key: str) -> int:
+        """Return the number of slash commands waiting for one session."""
+        return self._pending_commands.get(session_key, 0)
+
+    def drain_inbound(self, session_key: str | None = None) -> list[InboundMessage]:
+        """Remove queued normal inputs for persistence during stop or shutdown."""
+        messages = self.inbound.drain_matching(
+            lambda message: session_key is None or message.session_key == session_key
+        )
+        for message in messages:
+            self._decrement_pending(message.session_key)
+        if self.inbound.empty():
+            self._inbound_empty.set()
+        return messages
+
+    def drain_inbound_turn(self, turn_id: str) -> list[InboundMessage]:
+        """Remove queued normal inputs owned by one admitted turn."""
+        messages = self.inbound.drain_matching(
+            lambda message: str(message.metadata.get("turn_id") or "") == turn_id
+        )
+        for message in messages:
+            self._decrement_pending(message.session_key)
+        if self.inbound.empty():
+            self._inbound_empty.set()
+        return messages
+
     async def receive_inbound(self) -> InboundMessage:
         """Compatibility name for the future MessagePort contract."""
         return await self.consume_inbound()
@@ -350,4 +439,5 @@ class MessageBus:
         self._outbound_empty.set()
         self._control_outbound_empty.set()
         self._pending_inbound.clear()
+        self._pending_commands.clear()
         return removed

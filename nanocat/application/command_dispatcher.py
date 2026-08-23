@@ -30,6 +30,8 @@ class CommandDispatcher:
         self._max_active = max(8, max_turns * 4)
         self._task: asyncio.Task[Any] | None = None
         self._active: set[asyncio.Task[Any]] = set()
+        self._active_sessions: dict[str, int] = {}
+        self._task_sessions: dict[asyncio.Task[Any], str] = {}
         self._closing = False
 
     async def start(self) -> asyncio.Task[Any]:
@@ -38,6 +40,10 @@ class CommandDispatcher:
             self._closing = False
             self._task = asyncio.create_task(self.run(), name="nanocat.command-dispatcher")
         return self._task
+
+    def apply_concurrency_limit(self, max_concurrent_turns: int) -> None:
+        """Apply command admission capacity for subsequently accepted commands."""
+        self._max_active = max(8, max(1, max_concurrent_turns) * 4)
 
     async def close(self) -> None:
         """Stop command ingress and reclaim all command tasks."""
@@ -54,6 +60,8 @@ class CommandDispatcher:
         if active:
             await asyncio.gather(*active, return_exceptions=True)
         self._active.clear()
+        self._active_sessions.clear()
+        self._task_sessions.clear()
 
     async def run(self) -> None:
         """Consume commands until the bus closes or the runtime stops."""
@@ -74,7 +82,7 @@ class CommandDispatcher:
                 self._schedule(msg)
                 continue
             if self._is_fast_command(msg):
-                await self.execute(msg)
+                await self._execute_tracked(msg)
                 continue
             if len(self._active) >= self._max_active:
                 await self._publish(self._busy_response(msg))
@@ -82,12 +90,55 @@ class CommandDispatcher:
             self._schedule(msg)
 
     def _schedule(self, msg: InboundMessage) -> None:
+        self._increment_session(msg.session_key)
+
+        async def run_tracked() -> None:
+            task = asyncio.current_task()
+            if task is not None:
+                self._task_sessions[task] = msg.session_key
+            try:
+                await self.execute(msg)
+            finally:
+                if task is not None:
+                    self._task_sessions.pop(task, None)
+                self._decrement_session(msg.session_key)
+
         task = asyncio.create_task(
-            self.execute(msg),
+            run_tracked(),
             name=f"nanocat.command.{self._command_name(msg)}",
         )
         self._active.add(task)
         task.add_done_callback(self._forget_task)
+
+    async def _execute_tracked(self, msg: InboundMessage) -> None:
+        task = asyncio.current_task()
+        self._increment_session(msg.session_key)
+        if task is not None:
+            self._task_sessions[task] = msg.session_key
+        try:
+            await self.execute(msg)
+        finally:
+            if task is not None:
+                self._task_sessions.pop(task, None)
+            self._decrement_session(msg.session_key)
+
+    def _increment_session(self, session_key: str) -> None:
+        self._active_sessions[session_key] = self._active_sessions.get(session_key, 0) + 1
+
+    def _decrement_session(self, session_key: str) -> None:
+        count = self._active_sessions.get(session_key, 0)
+        if count <= 1:
+            self._active_sessions.pop(session_key, None)
+        else:
+            self._active_sessions[session_key] = count - 1
+
+    def is_session_busy(self, session_key: str) -> bool:
+        """Return whether another command currently owns this session route."""
+        count = self._active_sessions.get(session_key, 0)
+        current = asyncio.current_task()
+        if current is not None and self._task_sessions.get(current) == session_key:
+            count -= 1
+        return count > 0
 
     async def execute(
         self,
@@ -101,7 +152,7 @@ class CommandDispatcher:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Command failed: {}", msg.content)
+            logger.exception("Command failed ({} chars)", len(msg.content))
             response = self._result_response(
                 msg,
                 CommandResult(
@@ -142,14 +193,11 @@ class CommandDispatcher:
 
         command_name = spec.name
         if command_name == "stop":
-            if self._agent.intervention is not None:
-                await self._agent.intervention.cancel_session(msg.session_key)
-            self._agent.turns.cancel_session(msg.session_key, "stopped by user")
             return self._control_response(msg, await self._agent._handle_stop(msg))
         if command_name == "restart":
-            if self._agent.intervention is not None:
-                await self._agent.intervention.cancel_session(msg.session_key)
-            self._agent.turns.cancel_session(msg.session_key, "restart requested")
+            stopped = await self._agent._handle_stop(msg)
+            if stopped.metadata.get("persistence_failed") is True:
+                return self._control_response(msg, stopped)
             return self._control_response(msg, await self._agent._handle_restart(msg))
 
         idle_required = self._requires_idle(inspection)
@@ -160,7 +208,11 @@ class CommandDispatcher:
                 return self._idle_response(msg)
 
         try:
-            session = self._agent.sessions.get_or_create(msg.channel, msg.chat_id)
+            session = (
+                None
+                if command_name in {"help", "logs", "model"}
+                else self._agent.sessions.get_or_create(msg.channel, msg.chat_id)
+            )
             outcome = await service.dispatch(msg, session)
             if outcome.response is not None:
                 return self._control_response(msg, outcome.response)

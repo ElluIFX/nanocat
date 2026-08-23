@@ -73,18 +73,18 @@ class HeartbeatService:
     @property
     def interval_s(self) -> int:
         if self._config is not None:
-            return self._config.gateway.heartbeat.interval_s
+            return self._config.heartbeat.interval_s
         from nanocat.config.loader import get_runtime_config
 
-        return get_runtime_config().gateway.heartbeat.interval_s
+        return get_runtime_config().heartbeat.interval_s
 
     @property
     def enabled(self) -> bool:
         if self._config is not None:
-            return self._config.gateway.heartbeat.enabled
+            return self._config.heartbeat.enabled
         from nanocat.config.loader import get_runtime_config
 
-        return get_runtime_config().gateway.heartbeat.enabled
+        return get_runtime_config().heartbeat.enabled
 
     @property
     def model(self) -> str:
@@ -169,6 +169,12 @@ class HeartbeatService:
         self.stop()
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+
+    async def apply_config(self) -> None:
+        """Restart the timer lane so enablement and interval changes take effect."""
+        await self.close()
+        if self.enabled:
+            await self.start()
 
     async def _run_loop(self) -> None:
         """Main heartbeat loop."""

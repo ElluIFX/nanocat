@@ -6,13 +6,16 @@ x-common-config: &common-config
     - ./data:/app/data
 
 services:
-  nanocat-gateway:
-    container_name: nanocat-gateway
+  nanocat:
+    container_name: nanocat
     <<: *common-config
-    command: ["gateway", "-w", "/app/data"]
+    command: ["-w", "/app/data"]
+    environment:
+      NANOCAT_WEB_HOST: 0.0.0.0
+      NANOCAT_WEB_PORT: 18790
     restart: unless-stopped
     ports:
-      - 18790:18790
+      - 127.0.0.1:18790:18790
     deploy:
       resources:
         limits:
@@ -21,11 +24,3 @@ services:
         reservations:
           cpus: '0.25'
           memory: 256M
-
-  nanocat-cli:
-    <<: *common-config
-    profiles:
-      - cli
-    command: ["tui", "-w", "/app/data"]
-    stdin_open: true
-    tty: true

@@ -32,6 +32,7 @@ class InboundMessage:
     request_id: str | None = None
     turn_id: str | None = None
     principal_id: str | None = None
+    ingress_ordinal: int = 0
 
     @property
     def session_key(self) -> str:

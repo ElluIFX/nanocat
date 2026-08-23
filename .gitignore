@@ -4,6 +4,11 @@
 .env
 *.pyc
 dist/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
 build/
 *.egg-info/
 *.egg
@@ -22,7 +27,5 @@ poetry.lock
 botpy.log
 nano.*.save
 .DS_Store
-uv.lock
-
 AGENTS.md
 CLAUDE.md

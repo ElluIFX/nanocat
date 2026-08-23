@@ -219,7 +219,7 @@ class DiscordChannel(BaseChannel):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                logger.warning("Invalid JSON from Discord gateway: {}", raw[:100])
+                logger.warning("Invalid JSON from Discord gateway ({} chars)", len(raw))
                 continue
 
             op = data.get("op")

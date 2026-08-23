@@ -488,7 +488,7 @@ class TelegramChannel(BaseChannel):
             if media_type in ("voice", "audio"):
                 transcription = await self.transcribe_audio(file_path)
                 if transcription:
-                    logger.info("Transcribed {}: {}...", media_type, transcription[:50])
+                    logger.info("Transcribed {} ({} chars)", media_type, len(transcription))
                     return [path_str], [f"[transcription: {transcription}]"]
                 return [path_str], [f"[{media_type}: {path_str}]"]
             return [path_str], [f"[{media_type}: {path_str}]"]
@@ -638,7 +638,7 @@ class TelegramChannel(BaseChannel):
                 content_parts.insert(0, tag)
         content = "\n".join(content_parts) if content_parts else "[empty message]"
 
-        logger.debug("Telegram message from {}: {}...", sender_id, content[:50])
+        logger.debug("Telegram message from {} ({} chars)", sender_id, len(content))
 
         str_chat_id = str(chat_id)
         metadata = self._build_message_metadata(message, user)

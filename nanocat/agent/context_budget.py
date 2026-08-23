@@ -16,6 +16,12 @@ class BudgetSnapshot:
     over_budget: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TrimResult:
+    messages: list[dict[str, Any]]
+    omitted: list[dict[str, Any]]
+
+
 class ContextBudget:
     def __init__(self, config: Any):
         self._config = config
@@ -48,10 +54,12 @@ class ContextBudget:
             "<SESSION-CHECKPOINT>" in content or "<COMPACTED-MEMORY>" in content
         )
 
-    def trim(self, messages: list[dict[str, Any]], target_tokens: int) -> list[dict[str, Any]]:
-        """Keep system/checkpoint context and the newest complete user groups."""
+    def trim_with_omitted(
+        self, messages: list[dict[str, Any]], target_tokens: int
+    ) -> TrimResult:
+        """Keep recent complete user groups and report the omitted history."""
         if len(messages) <= 2:
-            return messages
+            return TrimResult(messages, [])
 
         prefix: list[dict[str, Any]] = []
         start = 0
@@ -75,7 +83,7 @@ class ContextBudget:
         if current:
             groups.append(current)
         if not groups:
-            return messages
+            return TrimResult(messages, [])
 
         budget_chars = max(4096, target_tokens * 4)
         selected: list[list[dict[str, Any]]] = []
@@ -90,8 +98,15 @@ class ContextBudget:
 
         result = [*prefix, *(message for group in selected for message in group)]
         if result == messages:
-            return result
-        return self._legalize(result)
+            return TrimResult(result, [])
+        selected_count = len(selected)
+        omitted_groups = groups[: len(groups) - selected_count]
+        omitted = [message for group in omitted_groups for message in group]
+        return TrimResult(self._legalize(result), omitted)
+
+    def trim(self, messages: list[dict[str, Any]], target_tokens: int) -> list[dict[str, Any]]:
+        """Keep system/checkpoint context and the newest complete user groups."""
+        return self.trim_with_omitted(messages, target_tokens).messages
 
     @staticmethod
     def _legalize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

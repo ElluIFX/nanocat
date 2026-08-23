@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -40,6 +40,7 @@ class BaseChannel(ABC):
         self.config = config
         self.bus = bus
         self.__running: bool = False
+        self._accepting_ingress: bool = True
         self._transcription_provider: Any = None
         self._owned_tasks: set[asyncio.Task[Any]] = set()
 
@@ -126,7 +127,7 @@ class BaseChannel(ABC):
         media: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         session_key: str | None = None,
-    ) -> None:
+    ) -> Literal["accepted", "access_denied", "busy", "shutting_down"]:
         """
         Handle an incoming message from the chat platform.
 
@@ -140,6 +141,8 @@ class BaseChannel(ABC):
             metadata: Optional channel-specific metadata.
             session_key: Optional session key override (e.g. thread-scoped sessions).
         """
+        if not self._accepting_ingress:
+            return "shutting_down"
         if not self.is_allowed(sender_id):
             logger.warning(
                 "Access denied for sender {} on channel {}. "
@@ -147,16 +150,19 @@ class BaseChannel(ABC):
                 sender_id,
                 self.name,
             )
-            return
+            return "access_denied"
 
+        normalized_metadata = metadata or {}
         msg = InboundMessage(
             channel=self.name,
             sender_id=str(sender_id),
             chat_id=str(chat_id),
             content=content,
             media=media or [],
-            metadata=metadata or {},
+            metadata=normalized_metadata,
             session_key_override=session_key,
+            request_id=str(normalized_metadata.get("request_id") or "") or None,
+            turn_id=str(normalized_metadata.get("turn_id") or "") or None,
             principal_id=str(sender_id),
         )
 
@@ -171,6 +177,16 @@ class BaseChannel(ABC):
                     metadata={"_control": True, "_command": "ingress"},
                 )
             )
+            return "busy"
+        return "accepted"
+
+    def begin_shutdown(self) -> None:
+        """Stop admitting new inbound events while outbound delivery remains live."""
+        self._accepting_ingress = False
+
+    def resume_ingress(self) -> None:
+        """Enable inbound admission during the channel startup handshake."""
+        self._accepting_ingress = True
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:

@@ -29,6 +29,14 @@ class ToolRegistry:
         """Register a tool."""
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        """Remove one runtime-owned tool if it is currently registered."""
+        self._tools.pop(name, None)
+
+    def names(self) -> tuple[str, ...]:
+        """Return registered names for runtime owner reconciliation."""
+        return tuple(self._tools)
+
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""
         return self._tools.get(name)
@@ -104,24 +112,27 @@ class ToolRegistry:
     @staticmethod
     def _bind_context(tool: Tool, context: ToolExecutionContext | None) -> None:
         """Bind legacy routing fields only while the registry owns this call."""
-        if context is None or not hasattr(tool, "set_context"):
+        if context is None:
             return
 
-        channel = context.conversation.channel
-        chat_id = context.conversation.chat_id
-        if tool.name == "subagent_spawn":
-            tool.set_context(channel, chat_id, context.principal_id)  # type: ignore[attr-defined]
-        elif tool.name == "message":
-            tool.set_context(channel, chat_id, context.message_id)  # type: ignore[attr-defined]
-        elif tool.name == "todo":
-            tool.set_context(channel, chat_id, context.session)  # type: ignore[attr-defined]
-        elif tool.name == "cron":
-            tool.set_context(channel, chat_id, context.principal_id)  # type: ignore[attr-defined]
-        else:
-            tool.set_context(channel, chat_id)  # type: ignore[attr-defined]
+        if hasattr(tool, "set_context"):
+            channel = context.conversation.channel
+            chat_id = context.conversation.chat_id
+            if tool.name in {"subagent_spawn", "subagent_gather"}:
+                tool.set_context(channel, chat_id, context.principal_id)  # type: ignore[attr-defined]
+            elif tool.name == "message":
+                tool.set_context(channel, chat_id, context.message_id)  # type: ignore[attr-defined]
+            elif tool.name == "todo":
+                tool.set_context(channel, chat_id, context.session)  # type: ignore[attr-defined]
+            elif tool.name == "cron":
+                tool.set_context(channel, chat_id, context.principal_id)  # type: ignore[attr-defined]
+            else:
+                tool.set_context(channel, chat_id)  # type: ignore[attr-defined]
 
         if hasattr(tool, "set_session_key"):
             tool.set_session_key(context.session_key)  # type: ignore[attr-defined]
+        if hasattr(tool, "set_storage_scope"):
+            tool.set_storage_scope(context.storage_scope)  # type: ignore[attr-defined]
 
     def filtered(self, exclude: frozenset[str] | set[str]) -> ToolRegistry:
         """Return a new registry with the same tool instances except those in *exclude*."""

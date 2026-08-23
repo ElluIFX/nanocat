@@ -47,10 +47,12 @@ dependencies = [
     "telegramify-markdown[mermaid]>=1.1.1",
     "jieba>=0.42.1,<1.0.0",
     "send2trash>=1.8.0,<2.0.0",
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn>=0.34.0,<1.0.0",
+    "python-multipart>=0.0.20,<1.0.0",
 ]
 
 [project.optional-dependencies]
-tui = ["textual>=8.0.0,<9.0.0"]
 wecom = ["wecom-aibot-sdk-python>=0.1.5"]
 langsmith = ["langsmith>=0.1.0"]
 dev = [
@@ -70,9 +72,13 @@ allow-direct-references = true
 [tool.hatch.build]
 include = [
     "nanocat/**/*.py",
+    "nanocat/web/static/**/*",
     "nanocat/templates/**/*.md",
     "nanocat/templates/skills/**/*",
 ]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["nanocat"]
@@ -81,7 +87,15 @@ packages = ["nanocat"]
 "nanocat" = "nanocat"
 
 [tool.hatch.build.targets.sdist]
-include = ["nanocat/", "README.md", "LICENSE"]
+include = ["nanocat/", "frontend/", "hatch_build.py", "README.md", "LICENSE"]
+exclude = [
+    "frontend/node_modules/",
+    "frontend/dist/",
+    "frontend/coverage/",
+    "frontend/playwright-report/",
+    "frontend/test-results/",
+    "frontend/.nanocat-build.lock",
+]
 
 [tool.ruff]
 line-length = 100

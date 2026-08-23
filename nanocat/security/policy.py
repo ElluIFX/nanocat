@@ -53,7 +53,7 @@ def _fingerprint(tool_name: str, params: dict[str, Any], capability: str) -> str
 
 
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(authorization|cookie|password|passwd|secret|token|api[-_ ]?key|credential)",
+    r"(?i)(authorization|cookie|password|passwd|secret|token|api[-_ ]?key|credential|identity)",
 )
 _SENSITIVE_INLINE_RE = re.compile(
     r"(?i)(authorization|cookie|password|passwd|secret|token|api[-_ ]?key|credential)"
@@ -136,7 +136,6 @@ class SecurityPolicy:
             "message",
             "cron",
             "todo",
-            "context_lookup",
             "proc_list",
             "proc_read",
             "read_working_memory",
@@ -207,10 +206,43 @@ class SecurityPolicy:
                 params,
             )
         elif tool_name in {"ssh_open", "ssh_send", "ssh_close"}:
+            identity = params.get("identity")
+            if tool_name == "ssh_open" and isinstance(identity, str) and identity.strip():
+                path_decision = self._check_path(
+                    tool_name,
+                    identity,
+                    "ssh.identity",
+                    params,
+                )
+                if path_decision is not None:
+                    return path_decision
             decision = self._require(
                 f"ssh.{tool_name.removeprefix('ssh_')}",
                 f"Allow remote SSH operation {tool_name}",
                 "remote access or session mutation requires explicit user approval",
+                tool_name,
+                params,
+            )
+        elif tool_name in {"ssh_upload", "ssh_download"}:
+            for path_field, path_capability in (
+                ("local_path", f"ssh.{tool_name.removeprefix('ssh_')}"),
+                ("identity", "ssh.identity"),
+            ):
+                local_path = params.get(path_field)
+                if not isinstance(local_path, str) or not local_path.strip():
+                    continue
+                path_decision = self._check_path(
+                    tool_name,
+                    local_path,
+                    path_capability,
+                    params,
+                )
+                if path_decision is not None:
+                    return path_decision
+            decision = self._require(
+                f"ssh.{tool_name.removeprefix('ssh_')}",
+                f"Allow SSH file transfer {tool_name}",
+                "remote file transfer requires explicit user approval",
                 tool_name,
                 params,
             )

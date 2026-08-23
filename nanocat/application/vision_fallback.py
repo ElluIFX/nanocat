@@ -77,7 +77,7 @@ class VisionModelError(VisionFallbackError):
 
 
 class VisionFallbackService:
-    """Retry image requests through textual descriptions after explicit rejection."""
+    """Retry image requests through text descriptions after explicit rejection."""
 
     def __init__(
         self,

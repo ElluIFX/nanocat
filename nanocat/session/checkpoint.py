@@ -16,7 +16,7 @@ _STATE_FIELDS = (
     "files",
     "commands",
     "important_facts",
-    "artifact_references",
+    "context_files",
 )
 
 
@@ -39,7 +39,7 @@ class CompactionState:
     files: list[str] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
     important_facts: list[str] = field(default_factory=list)
-    artifact_references: list[str] = field(default_factory=list)
+    context_files: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: Any) -> "CompactionState":
@@ -90,7 +90,7 @@ class CompactionState:
             ("Files", "files"),
             ("Commands", "commands"),
             ("Important facts", "important_facts"),
-            ("Artifact references", "artifact_references"),
+            ("Context files", "context_files"),
         ):
             values = getattr(self, field_name)
             if values:

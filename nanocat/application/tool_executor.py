@@ -35,6 +35,7 @@ class ToolExecutionContext:
 
     turn_id: str
     session_key: str
+    storage_scope: str
     conversation: ConversationRef
     principal_id: str
     state_hook: Callable[[TurnState], None] | None = None
@@ -71,6 +72,17 @@ class ToolExecutor:
         self._auto_reviewer = auto_reviewer
         self._max_concurrent_calls = max_concurrent_calls
         self._call_slots = asyncio.Semaphore(max_concurrent_calls)
+
+    def apply_concurrency_limit(self, max_concurrent_calls: int) -> None:
+        """Use a new admission semaphore for calls started after this update."""
+        if max_concurrent_calls <= 0:
+            raise ValueError("max_concurrent_calls must be positive")
+        self._max_concurrent_calls = max_concurrent_calls
+        self._call_slots = asyncio.Semaphore(max_concurrent_calls)
+
+    def apply_auto_reviewer(self, reviewer: AutoApprovalReviewer | None) -> None:
+        """Replace the optional reviewer used for calls admitted after this update."""
+        self._auto_reviewer = reviewer
 
     def with_registry(self, registry: ToolRegistry) -> "ToolExecutor":
         """Create a facade with the same policy and a restricted tool catalog."""

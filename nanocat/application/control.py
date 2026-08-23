@@ -1,8 +1,8 @@
 """Structured application control service for rich channel adapters.
 
-The TUI (and future rich adapters) call this service instead of injecting
+HTTP and rich channel adapters call this service instead of injecting
 slash-command text into the message bus. Every operation here reuses the same
-business path as the textual command pipeline — ``CommandService`` /
+business path as the text command pipeline — ``CommandService`` /
 ``CommandRouter`` / ``RuntimeCommandHandlers`` / ``AgentLoop`` compatibility
 callbacks — so there is exactly one implementation of each behavior.
 
@@ -14,19 +14,26 @@ objects.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import shlex
+from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping
 
 from loguru import logger
 
+from nanocat.application.configuration import ConfigurationValidationError
 from nanocat.application.text_catalog import USER_TEXT
 from nanocat.bus.events import InboundMessage
 from nanocat.core.messages import ConversationRef
+from nanocat.observability.redaction import redact_value
+from nanocat.providers.registry import PROVIDERS
+from nanocat.session.manager import SessionRevisionConflictError
 
 # ---------------------------------------------------------------------------
-# Action catalog consumed by rich adapters (e.g. the TUI Action Center).
-# Each entry describes one mouse-driven operation. ``command`` is a slash
+# Action catalog consumed by rich adapters.
+# Each entry describes one adapter-facing operation. ``command`` is a slash
 # template executed through the normal command pipeline; ``control`` names a
 # structured ApplicationControlService action instead.
 # ---------------------------------------------------------------------------
@@ -445,16 +452,67 @@ class ApplicationControlService:
         session_manager: Any,
         intervention: Any | None,
         supervisor: Any | None,
+        activity_journal: Any | None = None,
+        configuration: Any | None = None,
     ) -> None:
         self._engine = engine
         self._config = config
         self._sessions = session_manager
         self._intervention = intervention
         self._supervisor = supervisor
+        self._activity_journal = activity_journal
+        self._configuration = configuration or getattr(engine, "configuration", None)
+        self._routing_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        self._routing_owners: dict[str, tuple[asyncio.Task[Any], int]] = {}
 
     def set_supervisor(self, supervisor: Any) -> None:
         """Bind the runtime supervisor once the composition root creates it."""
         self._supervisor = supervisor
+
+    def set_activity_journal(self, activity_journal: Any) -> None:
+        """Bind the persistent activity owner after runtime composition."""
+        self._activity_journal = activity_journal
+
+    @asynccontextmanager
+    async def routing_guard(self, session_key: str):
+        """Serialize route admission with destructive session mutations."""
+        entry = self._routing_locks.get(session_key)
+        lock, users = entry if entry is not None else (asyncio.Lock(), 0)
+        self._routing_locks[session_key] = (lock, users + 1)
+        task = asyncio.current_task()
+        try:
+            owner = self._routing_owners.get(session_key)
+            if task is not None and owner is not None and owner[0] is task:
+                self._routing_owners[session_key] = (task, owner[1] + 1)
+                try:
+                    yield
+                finally:
+                    current_owner = self._routing_owners.get(session_key)
+                    if current_owner is not None and current_owner[0] is task:
+                        if current_owner[1] <= 1:
+                            self._routing_owners.pop(session_key, None)
+                        else:
+                            self._routing_owners[session_key] = (
+                                task,
+                                current_owner[1] - 1,
+                            )
+            else:
+                async with lock:
+                    if task is not None:
+                        self._routing_owners[session_key] = (task, 1)
+                    try:
+                        yield
+                    finally:
+                        current_owner = self._routing_owners.get(session_key)
+                        if current_owner is not None and current_owner[0] is task:
+                            self._routing_owners.pop(session_key, None)
+        finally:
+            current = self._routing_locks.get(session_key)
+            if current is not None and current[0] is lock:
+                if current[1] <= 1:
+                    self._routing_locks.pop(session_key, None)
+                else:
+                    self._routing_locks[session_key] = (lock, current[1] - 1)
 
     # ------------------------------------------------------------------
     # dispatch
@@ -473,7 +531,7 @@ class ApplicationControlService:
 
     @staticmethod
     def action_catalog() -> list[dict[str, Any]]:
-        """Return the adapter-facing action catalog (Action Center entries)."""
+        """Return the compatibility action catalog for rich adapters."""
         return _jsonable(list(ACTION_SPECS))
 
     # ------------------------------------------------------------------
@@ -482,8 +540,9 @@ class ApplicationControlService:
 
     def _conversation(self, params: Mapping[str, Any]) -> ConversationRef:
         return ConversationRef(
-            channel=str(params.get("channel") or "tui"),
+            channel=str(params.get("channel") or "web"),
             chat_id=str(params.get("chat_id") or "local"),
+            session_key=str(params.get("session_key") or ""),
         )
 
     def _session_key(self, conversation: ConversationRef) -> str:
@@ -501,13 +560,35 @@ class ApplicationControlService:
 
     def _session_display_events(self, session: Any) -> list[dict[str, Any]]:
         """Flatten session history into adapter-ready display events."""
-        from nanocat.channels.tui_app.events import (
-            flatten_content,
-            parse_subagent_result,
-        )
+        def flatten_content(content: Any) -> str:
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(str(block.get("text") or ""))
+                    elif isinstance(block, dict) and block.get("type") == "image_url":
+                        parts.append("[image]")
+                    elif isinstance(block, str):
+                        parts.append(block)
+                return "\n".join(part for part in parts if part)
+            return str(content) if content else ""
+
+        def parse_subagent_result(text: str) -> dict[str, Any] | None:
+            stripped = text.lstrip()
+            if not stripped.startswith("{") or "subagent_id" not in stripped:
+                return None
+            try:
+                value = json.loads(stripped)
+            except (TypeError, ValueError):
+                return None
+            if isinstance(value, dict) and "subagent_id" in value and "result" in value:
+                return value
+            return None
 
         events: list[dict[str, Any]] = []
-        for msg in session.get_history():
+        for index, msg in enumerate(session.get_history()):
             role = msg.get("role")
             if role not in ("user", "assistant"):
                 continue
@@ -517,16 +598,32 @@ class ApplicationControlService:
             if role == "user":
                 sub = parse_subagent_result(text)
                 if sub is not None:
-                    events.append({"kind": "subagent", "payload": _jsonable(sub)})
+                    events.append(
+                        {"kind": "subagent", "index": index, "payload": _jsonable(sub)}
+                    )
                 else:
-                    events.append({"kind": "user", "text": text})
+                    events.append({"kind": "user", "index": index, "text": text})
             elif msg.get("tool_calls"):
-                events.append({"kind": "progress", "text": text})
+                events.append(
+                    {
+                        "kind": "progress",
+                        "index": index,
+                        "text": text,
+                        "tool_calls": _jsonable(msg.get("tool_calls")),
+                    }
+                )
             else:
-                events.append({"kind": "bot", "text": text})
+                events.append({"kind": "bot", "index": index, "text": text})
         return events
 
-    def _session_brief(self, item: Mapping[str, Any], active_id: str | None) -> dict[str, Any]:
+    def _session_brief(
+        self, item: Mapping[str, Any], active_id: str | set[str] | None
+    ) -> dict[str, Any]:
+        is_active = (
+            item.get("id") in active_id
+            if isinstance(active_id, set)
+            else item.get("id") == active_id
+        )
         return {
             "id": str(item.get("id") or ""),
             "name": item.get("name") or "",
@@ -535,24 +632,65 @@ class ApplicationControlService:
             "created_at": str(item.get("created_at") or ""),
             "message_count": int(item.get("message_count") or 0),
             "turn_count": int(item.get("turn_count") or 0),
-            "active": item.get("id") == active_id,
+            "active": is_active,
         }
 
     def _model_state(self) -> dict[str, Any]:
         defaults = self._config.agents.defaults
+        choices = list(defaults.model_choice or [])
+        providers = []
+        for position, spec in enumerate(PROVIDERS):
+            provider_config = getattr(self._config.providers, spec.name)
+            configured = bool(
+                provider_config.api_key
+                or provider_config.api_base
+                or spec.is_oauth
+            )
+            providers.append(
+                {
+                    "name": spec.name,
+                    "label": spec.label,
+                    "configured": configured,
+                    "is_gateway": spec.is_gateway,
+                    "is_local": spec.is_local,
+                    "is_oauth": spec.is_oauth,
+                    "default_api_base": spec.default_api_base or "",
+                    "registry_order": position,
+                }
+            )
+        providers.sort(key=lambda item: (not item["configured"], item["registry_order"]))
+        catalog = []
+        references: dict[str, list[str]] = {}
+        for model in choices:
+            provider, _, model_name = model.partition("/")
+            refs = self._slot_references(model)
+            references[model] = refs
+            catalog.append(
+                {
+                    "id": model,
+                    "provider": provider if model_name else "",
+                    "model": model_name or provider,
+                    "references": refs,
+                }
+            )
         return {
-            "choices": list(defaults.model_choice or []),
+            "choices": choices,
+            "catalog": catalog,
+            "providers": providers,
+            "references": references,
             "slots": {
                 "agent": defaults.model,
                 "subagent": defaults.subagent_model or "",
                 "assistant": defaults.assistant_model or "",
                 "vision": defaults.vision_model or "",
+                "compaction": defaults.compaction_model or "",
             },
             "effective": {
                 "agent": self._engine.model,
                 "subagent": self._engine.subagent_model,
                 "assistant": self._engine.assistant_model,
                 "vision": defaults.vision_model or defaults.assistant_model or "",
+                "compaction": defaults.compaction_model or defaults.assistant_model or "",
             },
             "reasoning_effort": defaults.reasoning_effort or "auto",
             "provider": self._config.get_provider_name(self._engine.model) or "unknown",
@@ -564,7 +702,21 @@ class ApplicationControlService:
 
     async def _action_runtime_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
-        session = self._active_session(conversation)
+        items = self._sessions.list_sessions(
+            conversation.channel,
+            min_turns=0,
+            limit=int(params.get("limit") or 30),
+            chat_id=conversation.chat_id if params.get("chat_id") else None,
+        )
+        session = None
+        if params.get("chat_id"):
+            session = self._active_session(conversation)
+        elif items:
+            session = self._sessions.get_session(
+                conversation.channel, str(items[0].get("id") or "")
+            )
+            if session is not None:
+                conversation = ConversationRef(conversation.channel, session.chat_id)
         session_key = self._session_key(conversation)
         principal_id = str(params.get("principal_id") or "local")
         yolo = False
@@ -572,29 +724,47 @@ class ApplicationControlService:
         if self._intervention is not None:
             yolo = self._intervention.has_session_grant(conversation, principal_id, "tool:*")
             pending = 1 if self._intervention.current_pending(conversation, principal_id) else 0
-        compact = self._engine.memory_compactor.status(session)
-        active_id = session.id
-        items = self._sessions.list_sessions(
-            conversation.channel, min_turns=0, limit=int(params.get("limit") or 30)
+        checkpoint = (
+            session.compaction_checkpoint
+            if session is not None and isinstance(session.compaction_checkpoint, dict)
+            else {}
         )
+        compact = {
+            "estimated_prompt_tokens": int(
+                checkpoint.get("token_after") or checkpoint.get("token_before") or 0
+            ),
+            "context_window_tokens": self._config.agents.defaults.context_window_tokens,
+            "context_usage_percent": 0,
+            "compaction_available": False,
+        }
+        if compact["context_window_tokens"] and compact["estimated_prompt_tokens"]:
+            compact["context_usage_percent"] = (
+                compact["estimated_prompt_tokens"]
+                / compact["context_window_tokens"]
+                * 100
+            )
+        active_id = session.id if session is not None else None
         return _ok(
             {
                 "identity": {
                     "channel": conversation.channel,
                     "chat_id": conversation.chat_id,
-                    "session_id": session.id,
-                    "session_name": session.name or "",
-                    "session_key": session.key,
+                    "session_id": session.id if session is not None else "",
+                    "session_name": (session.name or "") if session is not None else "",
+                    "session_key": session.key if session is not None else "",
                     "principal_id": principal_id,
                 },
                 "busy": self._session_busy(session_key),
                 "approval": {"yolo": yolo, "pending": pending},
                 "models": self._model_state(),
                 "compact": {
-                    "estimated_prompt_tokens": compact["estimated_prompt_tokens"],
-                    "context_window_tokens": compact["context_window_tokens"],
-                    "context_usage_percent": compact["context_usage_percent"],
-                    "compaction_available": compact["compaction_available"],
+                    "estimated_prompt_tokens": compact.get("estimated_prompt_tokens", 0),
+                    "context_window_tokens": compact.get(
+                        "context_window_tokens",
+                        self._config.agents.defaults.context_window_tokens,
+                    ),
+                    "context_usage_percent": compact.get("context_usage_percent", 0),
+                    "compaction_available": compact.get("compaction_available", False),
                 },
                 "sessions": [self._session_brief(item, active_id) for item in items],
                 "catalog": self.action_catalog(),
@@ -603,16 +773,34 @@ class ApplicationControlService:
 
     async def _action_sessions_list(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
-        session = self._active_session(conversation)
+        active_id: str | set[str] | None
+        if params.get("chat_id"):
+            active_id = self._active_session(conversation).id
+        else:
+            metadata = self._sessions._read_metadata(conversation.channel)
+            active_id = {
+                str(item.get("active") or "")
+                for item in metadata.get("chats", {}).values()
+                if isinstance(item, Mapping) and item.get("active")
+            }
         limit = int(params.get("limit") or 50)
         min_turns = int(params.get("min_turns") or 0)
-        items = self._sessions.list_sessions(conversation.channel, min_turns=min_turns, limit=limit)
-        return _ok({"sessions": [self._session_brief(i, session.id) for i in items]})
+        items = self._sessions.list_sessions(
+            conversation.channel,
+            min_turns=min_turns,
+            limit=limit,
+            chat_id=conversation.chat_id if params.get("chat_id") else None,
+        )
+        return _ok({"sessions": [self._session_brief(i, active_id) for i in items]})
 
     async def _action_sessions_get(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_id = str(params.get("session_id") or "").strip()
-        target = self._sessions.get_session(conversation.channel, session_id)
+        target = self._sessions.get_session(
+            conversation.channel,
+            session_id,
+            chat_id=conversation.chat_id if params.get("chat_id") else None,
+        )
         if target is None:
             return _err(f"Session `{session_id}` not found.", code="not_found")
         preview = self._engine._format_session_turns(target)
@@ -621,13 +809,18 @@ class ApplicationControlService:
     async def _action_sessions_history(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_id = str(params.get("session_id") or "").strip()
-        target = self._sessions.get_session(conversation.channel, session_id)
+        target = self._sessions.get_session(
+            conversation.channel,
+            session_id,
+            chat_id=conversation.chat_id if params.get("chat_id") else None,
+        )
         if target is None:
             return _err(f"Session `{session_id}` not found.", code="not_found")
         return _ok(
             {
                 "session_id": target.id,
                 "session_name": target.name or "",
+                "revision": int(getattr(target, "revision", 0)),
                 "events": self._session_display_events(target),
             }
         )
@@ -635,16 +828,52 @@ class ApplicationControlService:
     async def _action_models_state(self, params: dict[str, Any]) -> dict[str, Any]:
         return _ok({"models": self._model_state()})
 
+    async def _action_commands_catalog(self, params: dict[str, Any]) -> dict[str, Any]:
+        specs = self._engine.command_router.registry.specs()
+        return _ok(
+            {
+                "commands": [
+                    {
+                        "name": spec.name,
+                        "aliases": list(spec.aliases),
+                        "group": spec.group,
+                        "summary": spec.summary,
+                        "usage": spec.usage,
+                        "examples": list(spec.examples),
+                        "subcommands": list(spec.subcommands),
+                        "permission": spec.permission,
+                        "execution_policy": str(spec.execution_policy),
+                        "enabled": spec.enabled,
+                        "accepts_arguments": spec.accepts_arguments,
+                        "idle_only": spec.idle_only,
+                    }
+                    for spec in specs
+                ]
+            }
+        )
+
     async def _action_compact_status(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
-        session = self._active_session(conversation)
-        status = dict(self._engine.memory_compactor.status(session))
-        checkpoint = status.get("checkpoint")
-        if checkpoint is not None and hasattr(checkpoint, "to_dict"):
-            status["checkpoint"] = checkpoint.to_dict()
-        else:
-            status["checkpoint"] = _jsonable(checkpoint)
-        return _ok({"compact": status})
+        async with self.routing_guard(self._session_key(conversation)):
+            session_id = str(params.get("session_id") or "").strip()
+            session = (
+                self._sessions.get_session(
+                    conversation.channel,
+                    session_id,
+                    chat_id=conversation.chat_id,
+                )
+                if session_id
+                else self._active_session(conversation)
+            )
+            if session is None:
+                return _err(f"Session `{session_id}` not found.", code="not_found")
+            status = dict(self._engine.memory_compactor.status(session))
+            checkpoint = status.get("checkpoint")
+            if checkpoint is not None and hasattr(checkpoint, "to_dict"):
+                status["checkpoint"] = checkpoint.to_dict()
+            else:
+                status["checkpoint"] = _jsonable(checkpoint)
+            return _ok({"compact": status})
 
     async def _action_logs_tail(self, params: dict[str, Any]) -> dict[str, Any]:
         count = max(1, min(int(params.get("count") or 12), 200))
@@ -652,38 +881,112 @@ class ApplicationControlService:
         return _ok(
             {
                 "busy": bool(self._engine._any_session_busy()),
-                "lines": lines[-count:],
+                "lines": [str(redact_value(line)) for line in lines[-count:]],
             }
         )
+
+    async def _action_approvals_pending(self, params: dict[str, Any]) -> dict[str, Any]:
+        conversation = self._conversation(params) if params.get("chat_id") else None
+        channel = str(params.get("channel") or "web")
+        principal_id = str(params.get("principal_id") or "web:local")
+        if self._intervention is None:
+            return _ok({"approvals": []})
+        approvals = []
+        action_names = {
+            "approve_once": "once",
+            "approve_turn": "turn",
+            "approve_forever": "forever",
+            "reject": "deny",
+        }
+        session_ids = {
+            str(item.get("chat_id") or ""): str(item.get("id") or "")
+            for item in self._sessions.list_sessions(channel, min_turns=0, limit=1000)
+        }
+        for request in self._intervention.pending_requests():
+            if request.conversation.channel != channel or request.principal_id != principal_id:
+                continue
+            if conversation is not None and request.conversation != conversation:
+                continue
+            approvals.append(
+                {
+                    "request_id": request.request_id,
+                    "session_id": session_ids.get(request.conversation.chat_id, ""),
+                    "kind": str(request.kind),
+                    "turn_id": request.turn_id,
+                    "session_key": request.session_key,
+                    "capability": request.capability,
+                    "summary": request.summary,
+                    "allowed_actions": [
+                        action_names.get(str(action), str(action))
+                        for action in request.allowed_actions
+                    ],
+                    "expires_at": request.expires_at.isoformat(),
+                    "tool_name": request.tool_name,
+                    "tool_params": request.tool_params,
+                    "flow": str(request.flow),
+                    "review_decision": request.review_decision,
+                    "review_reason": request.review_reason,
+                }
+            )
+        return _ok({"approvals": approvals})
 
     # ------------------------------------------------------------------
     # session actions
     # ------------------------------------------------------------------
 
+    async def _action_session_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create the first session for an independent conversation scope."""
+        conversation = self._conversation(params)
+        session_key = self._session_key(conversation)
+        async with self.routing_guard(session_key):
+            if not self._engine.try_reserve_session_operation(session_key):
+                return _err(USER_TEXT.command_idle_only, code="invalid_state")
+            try:
+                metadata = self._sessions._read_metadata(conversation.channel)
+                if conversation.chat_id in metadata.get("chats", {}):
+                    return _err("Conversation scope already exists.", code="conflict")
+                name = str(params.get("name") or "").strip() or None
+                session = self._sessions._new_session(
+                    conversation.channel,
+                    conversation.chat_id,
+                    name=name,
+                )
+                return _ok(
+                    {
+                        "session_id": session.id,
+                        "chat_id": conversation.chat_id,
+                        "name": name or "",
+                        "message": "Session created.",
+                    }
+                )
+            finally:
+                self._engine.release_session_operation(session_key)
+
     async def _action_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_key = self._session_key(conversation)
-        if not self._engine.try_reserve_session_operation(session_key):
-            return _err(USER_TEXT.command_idle_only, code="invalid_state")
-        try:
-            old = self._active_session(conversation)
-            if self._intervention is not None:
-                await self._intervention.cancel_session(session_key)
-            old.metadata.pop("nowledge_thread_id", None)
-            new = self._sessions._new_session(conversation.channel, conversation.chat_id)
-            self._sessions.save(new)  # persist immediately so list/rename can see it
-            engine = self._engine
-            engine._pending_buf.pop(session_key, None)
-            engine._session_gen.pop(session_key, None)
-            return _ok(
-                {
-                    "session_id": new.id,
-                    "previous_session_id": old.id,
-                    "message": "New session started.",
-                }
-            )
-        finally:
-            self._engine.release_session_operation(session_key)
+        async with self.routing_guard(session_key):
+            if not self._engine.try_reserve_session_operation(session_key):
+                return _err(USER_TEXT.command_idle_only, code="invalid_state")
+            try:
+                old = self._active_session(conversation)
+                if self._intervention is not None:
+                    await self._intervention.cancel_session(session_key)
+                old.metadata.pop("nowledge_thread_id", None)
+                engine = self._engine
+                engine._nowledge_working_memory_loaded.pop(old.key, None)
+                new = self._sessions._new_session(conversation.channel, conversation.chat_id)
+                engine._pending_buf.pop(session_key, None)
+                engine._session_gen.pop(session_key, None)
+                return _ok(
+                    {
+                        "session_id": new.id,
+                        "previous_session_id": old.id,
+                        "message": "New session started.",
+                    }
+                )
+            finally:
+                self._engine.release_session_operation(session_key)
 
     async def _action_session_switch(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
@@ -691,52 +994,103 @@ class ApplicationControlService:
         if not session_id:
             return _err("Missing session_id", code="invalid_argument")
         session_key = self._session_key(conversation)
-        if not self._engine.try_reserve_session_operation(session_key):
-            return _err(USER_TEXT.command_idle_only, code="invalid_state")
-        try:
-            ok = self._sessions.set_active(conversation.channel, conversation.chat_id, session_id)
-            if not ok:
-                return _err(f"Session `{session_id}` not found.", code="not_found")
-            if self._intervention is not None:
-                await self._intervention.cancel_session(session_key)
-            target = self._sessions.get_session(conversation.channel, session_id)
-            return _ok(
-                {
-                    "session_id": session_id,
-                    "session_name": (target.name if target else None) or "",
-                    "events": self._session_display_events(target) if target else [],
-                    "message": f"Switched to session `{session_id}`.",
-                }
-            )
-        finally:
-            self._engine.release_session_operation(session_key)
+        async with self.routing_guard(session_key):
+            if not self._engine.try_reserve_session_operation(session_key):
+                return _err(USER_TEXT.command_idle_only, code="invalid_state")
+            try:
+                ok = self._sessions.set_active(
+                    conversation.channel,
+                    conversation.chat_id,
+                    session_id,
+                )
+                if not ok:
+                    return _err(f"Session `{session_id}` not found.", code="not_found")
+                if self._intervention is not None:
+                    await self._intervention.cancel_session(session_key)
+                target = self._sessions.get_session(conversation.channel, session_id)
+                return _ok(
+                    {
+                        "session_id": session_id,
+                        "session_name": (target.name if target else None) or "",
+                        "events": self._session_display_events(target) if target else [],
+                        "message": f"Switched to session `{session_id}`.",
+                    }
+                )
+            finally:
+                self._engine.release_session_operation(session_key)
 
     async def _action_session_rename(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_key = self._session_key(conversation)
-        if not self._engine.try_reserve_session_operation(session_key):
-            return _err(USER_TEXT.command_idle_only, code="invalid_state")
         session_id = str(params.get("session_id") or "").strip()
         name = str(params.get("name") or "").strip() or None
-        try:
-            if self._sessions.get_session(conversation.channel, session_id) is None:
-                return _err(f"Session `{session_id}` not found.", code="not_found")
-            self._sessions.set_name(conversation.channel, session_id, name)
-            return _ok({"session_id": session_id, "name": name or ""})
-        finally:
-            self._engine.release_session_operation(session_key)
+        expected_revision = params.get("expected_revision")
+        expected_name = params.get("expected_name")
+        async with self.routing_guard(session_key):
+            if not self._engine.try_reserve_session_operation(session_key):
+                return _err(USER_TEXT.command_idle_only, code="invalid_state")
+            try:
+                target = self._sessions.get_session(
+                    conversation.channel,
+                    session_id,
+                    chat_id=conversation.chat_id,
+                )
+                if target is None:
+                    return _err(f"Session `{session_id}` not found.", code="not_found")
+                if expected_revision is not None and (
+                    target.revision != int(expected_revision)
+                    or target.name != expected_name
+                ):
+                    return _err(
+                        "The session changed after it was loaded.",
+                        code="session_conflict",
+                    )
+                self._sessions.set_name(conversation.channel, session_id, name)
+                return _ok({"session_id": session_id, "name": name or ""})
+            finally:
+                self._engine.release_session_operation(session_key)
 
     async def _action_session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_id = str(params.get("session_id") or "").strip()
         session_key = self._session_key(conversation)
-        active = self._active_session(conversation)
-        if not self._engine.try_reserve_session_operation(session_key):
-            return _err(USER_TEXT.command_idle_only, code="invalid_state")
-        try:
-            return await self._delete_session(conversation, session_id, session_key, active)
-        finally:
-            self._engine.release_session_operation(session_key)
+        async with self.routing_guard(session_key):
+            target = self._sessions.get_session(conversation.channel, session_id)
+            if target is None or target.chat_id != conversation.chat_id:
+                return _err(f"Session `{session_id}` not found.", code="not_found")
+            active = self._active_session(conversation)
+            if not self._engine.try_reserve_session_operation(session_key):
+                return _err(USER_TEXT.command_idle_only, code="invalid_state")
+            try:
+                expected_revision = params.get("expected_revision")
+                expected_name = params.get("expected_name")
+                target = self._sessions.get_session(
+                    conversation.channel,
+                    session_id,
+                    chat_id=conversation.chat_id,
+                )
+                if target is None:
+                    return _err(f"Session `{session_id}` not found.", code="not_found")
+                if expected_revision is not None and (
+                    target.revision != int(expected_revision)
+                    or target.name != expected_name
+                ):
+                    return _err(
+                        "The session changed after it was loaded.",
+                        code="session_conflict",
+                    )
+                return await self._delete_session(
+                    conversation,
+                    session_id,
+                    session_key,
+                    active,
+                    create_replacement=bool(params.get("create_replacement", True)),
+                    expected_revision=(
+                        int(expected_revision) if expected_revision is not None else None
+                    ),
+                )
+            finally:
+                self._engine.release_session_operation(session_key)
 
     async def _delete_session(
         self,
@@ -744,19 +1098,82 @@ class ApplicationControlService:
         session_id: str,
         session_key: str,
         active: Any,
+        *,
+        create_replacement: bool,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
+        target_session = self._sessions.get_session(conversation.channel, session_id)
         replacement_id = None
-        if active.id == session_id:
+        if active.id == session_id and create_replacement:
             if self._intervention is not None:
                 await self._intervention.cancel_session(session_key)
-            active.metadata.pop("nowledge_thread_id", None)
-            replacement = self._sessions._new_session(conversation.channel, conversation.chat_id)
-            self._sessions.save(replacement)
-            replacement_id = replacement.id
-            self._engine._pending_buf.pop(session_key, None)
-            self._engine._session_gen.pop(session_key, None)
-        if not self._sessions.delete_session(conversation.channel, session_id):
+        if active.id == session_id and not create_replacement and self._intervention is not None:
+            await self._intervention.cancel_session(session_key)
+        try:
+            if active.id == session_id and create_replacement:
+                replacement = self._sessions.delete_active_and_replace(
+                    conversation.channel,
+                    session_id,
+                    expected_revision=expected_revision,
+                )
+                deleted = replacement is not None
+                replacement_id = replacement.id if replacement is not None else None
+            else:
+                deleted = self._sessions.delete_session(
+                    conversation.channel,
+                    session_id,
+                    allow_active=active.id == session_id,
+                    expected_revision=expected_revision,
+                )
+        except SessionRevisionConflictError:
+            return _err(
+                "The session changed after it was loaded.",
+                code="session_conflict",
+            )
+        if not deleted:
             return _err(f"Session `{session_id}` could not be deleted.", code="delete_failed")
+        if target_session is not None:
+            self._engine._nowledge_working_memory_loaded.pop(
+                target_session.key, None
+            )
+            if active.id == session_id:
+                self._engine._pending_buf.pop(session_key, None)
+                self._engine._session_gen.pop(session_key, None)
+            try:
+                await self._engine.cancel_background_for_session(target_session.key)
+            except Exception as exc:
+                logger.warning(
+                    "Background cleanup failed for deleted session {}: {}",
+                    target_session.key,
+                    exc,
+                )
+            try:
+                cleaned = self._engine.runtime_files.cleanup_scope(target_session.key)
+                if not cleaned:
+                    logger.warning(
+                        "Runtime file cleanup incomplete for deleted session {}",
+                        target_session.key,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Runtime file cleanup failed for deleted session {}: {}",
+                    target_session.key,
+                    exc,
+                )
+            if self._activity_journal is not None:
+                try:
+                    cleaned = self._activity_journal.cleanup_scope(target_session.key)
+                    if not cleaned:
+                        logger.warning(
+                            "Activity cleanup incomplete for deleted session {}",
+                            target_session.key,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Activity cleanup failed for deleted session {}: {}",
+                        target_session.key,
+                        exc,
+                    )
         return _ok(
             {
                 "deleted": session_id,
@@ -771,32 +1188,34 @@ class ApplicationControlService:
     # ------------------------------------------------------------------
 
     async def _action_model_select(self, params: dict[str, Any]) -> dict[str, Any]:
-        from nanocat.config.loader import save_config
-
         slot = str(params.get("slot") or "").strip().lower()
         model = str(params.get("model") or "").strip()
         defaults = self._config.agents.defaults
-        if slot not in {"agent", "subagent", "assistant", "vision"}:
+        if slot not in {"agent", "subagent", "assistant", "vision", "compaction"}:
             return _err(
-                "Slot must be one of agent|subagent|assistant|vision",
+                "Slot must be one of agent|subagent|assistant|vision|compaction",
                 code="invalid_argument",
             )
         if model not in (defaults.model_choice or []):
             return _err(f"Model `{model}` is not in the model catalog.", code="invalid_argument")
-        if slot == "agent":
-            defaults.model = model
-        elif slot == "subagent":
-            defaults.subagent_model = model
-        elif slot == "vision":
-            defaults.vision_model = model
-        else:
-            defaults.assistant_model = model
-        save_config(self._config)
+        paths = {
+            "agent": "agents.defaults.model",
+            "subagent": "agents.defaults.subagentModel",
+            "assistant": "agents.defaults.assistantModel",
+            "vision": "agents.defaults.visionModel",
+            "compaction": "agents.defaults.compactionModel",
+        }
+        def select(current: Any) -> Mapping[str, Any]:
+            if model not in (current.agents.defaults.model_choice or []):
+                raise ConfigurationValidationError(
+                    f"Model `{model}` is not in the model catalog."
+                )
+            return {paths[slot]: model}
+
+        await self._configuration.mutate_runtime(select)
         return _ok({"models": self._model_state(), "message": f"{slot.title()} model → `{model}`"})
 
     async def _action_model_set_effort(self, params: dict[str, Any]) -> dict[str, Any]:
-        from nanocat.config.loader import save_config
-
         requested = str(params.get("value") or "").strip().casefold()
         clear = requested in {"auto", "none", "off"}
         if not clear and requested not in {"low", "medium", "high", "xhigh", "max"}:
@@ -805,9 +1224,12 @@ class ApplicationControlService:
                 code="invalid_argument",
             )
         effort = None if clear else requested
-        self._config.agents.defaults.reasoning_effort = effort
-        save_config(self._config)
-        self._engine.provider_resolver.update_reasoning_effort(effort)
+        await self._configuration.update_runtime(
+            {"agents.defaults.reasoningEffort": effort},
+            on_applied=lambda current: self._engine.provider_resolver.update_reasoning_effort(
+                current.agents.defaults.reasoning_effort
+            ),
+        )
         return _ok(
             {
                 "models": self._model_state(),
@@ -836,23 +1258,24 @@ class ApplicationControlService:
         return refs
 
     async def _action_model_add(self, params: dict[str, Any]) -> dict[str, Any]:
-        from nanocat.config.loader import save_config
-
         provider = str(params.get("provider") or "").strip()
         model = str(params.get("model") or "").strip()
         if not provider or not model:
             return _err("Provider and model name are both required.", code="invalid_argument")
+        if provider not in {spec.name for spec in PROVIDERS}:
+            return _err(f"Unknown provider `{provider}`.", code="invalid_argument")
         full = f"{provider}/{model}"
-        choices = self._config.agents.defaults.model_choice
-        if full not in choices:
-            choices.append(full)
-            save_config(self._config)
+        def add(current: Any) -> Mapping[str, Any]:
+            choices = list(current.agents.defaults.model_choice)
+            if full in choices:
+                return {}
+            return {"agents.defaults.modelChoice": [*choices, full]}
+
+        await self._configuration.mutate_runtime(add)
         return _ok({"models": self._model_state(), "message": f"Added `{full}`."})
 
     async def _action_model_update(self, params: dict[str, Any]) -> dict[str, Any]:
         """Edit one catalog entry in place; slot references follow the rename."""
-        from nanocat.config.loader import save_config
-
         old = str(params.get("old_model") or "").strip()
         provider = str(params.get("provider") or "").strip()
         model = str(params.get("model") or "").strip()
@@ -861,28 +1284,50 @@ class ApplicationControlService:
             return _err(f"Model `{old}` is not in the catalog.", code="not_found")
         if not provider or not model:
             return _err("Provider and model name are both required.", code="invalid_argument")
+        if provider not in {spec.name for spec in PROVIDERS}:
+            return _err(f"Unknown provider `{provider}`.", code="invalid_argument")
         new = f"{provider}/{model}"
         if new != old and new in choices:
             return _err(f"Model `{new}` already exists.", code="conflict")
-        defaults = self._config.agents.defaults
-        for slot in self._slot_references(old):
-            if slot == "agent":
-                defaults.model = new
-            elif slot == "subagent":
-                defaults.subagent_model = new
-            elif slot == "assistant":
-                defaults.assistant_model = new
-            elif slot == "vision":
-                defaults.vision_model = new
-            elif slot == "compaction":
-                defaults.compaction_model = new
-        choices[choices.index(old)] = new
-        save_config(self._config)
+        slot_paths = {
+            "agent": "agents.defaults.model",
+            "subagent": "agents.defaults.subagentModel",
+            "assistant": "agents.defaults.assistantModel",
+            "vision": "agents.defaults.visionModel",
+            "compaction": "agents.defaults.compactionModel",
+        }
+        def rename(current: Any) -> Mapping[str, Any]:
+            current_choices = list(current.agents.defaults.model_choice)
+            if old not in current_choices:
+                raise ConfigurationValidationError(
+                    f"Model `{old}` is not in the catalog."
+                )
+            if new != old and new in current_choices:
+                raise ConfigurationValidationError(f"Model `{new}` already exists.")
+            current_defaults = current.agents.defaults
+            refs = []
+            if current_defaults.model == old:
+                refs.append("agent")
+            if current_defaults.subagent_model == old:
+                refs.append("subagent")
+            if current_defaults.assistant_model == old:
+                refs.append("assistant")
+            if current_defaults.vision_model == old:
+                refs.append("vision")
+            if current_defaults.compaction_model == old:
+                refs.append("compaction")
+            values: dict[str, Any] = {
+                "agents.defaults.modelChoice": [
+                    new if item == old else item for item in current_choices
+                ]
+            }
+            values.update({slot_paths[slot]: new for slot in refs})
+            return values
+
+        await self._configuration.mutate_runtime(rename)
         return _ok({"models": self._model_state(), "message": f"Updated `{old}` → `{new}`."})
 
     async def _action_model_remove(self, params: dict[str, Any]) -> dict[str, Any]:
-        from nanocat.config.loader import save_config
-
         model = str(params.get("model") or "").strip()
         choices = self._config.agents.defaults.model_choice
         if model not in choices:
@@ -895,8 +1340,33 @@ class ApplicationControlService:
                 f"`{model}` is assigned to: {', '.join(refs)}. Reassign those slots first.",
                 code="invalid_state",
             )
-        choices.remove(model)
-        save_config(self._config)
+        def remove(current: Any) -> Mapping[str, Any]:
+            current_choices = list(current.agents.defaults.model_choice)
+            if model not in current_choices:
+                raise ConfigurationValidationError(
+                    f"Model `{model}` is not in the catalog."
+                )
+            if len(current_choices) <= 1:
+                raise ConfigurationValidationError("Can't remove the last model choice.")
+            current_defaults = current.agents.defaults
+            assigned = {
+                current_defaults.model,
+                current_defaults.subagent_model,
+                current_defaults.assistant_model,
+                current_defaults.vision_model,
+                current_defaults.compaction_model,
+            }
+            if model in assigned:
+                raise ConfigurationValidationError(
+                    f"Model `{model}` is assigned to an active slot."
+                )
+            return {
+                "agents.defaults.modelChoice": [
+                    choice for choice in current_choices if choice != model
+                ]
+            }
+
+        await self._configuration.mutate_runtime(remove)
         return _ok({"models": self._model_state(), "message": f"Removed `{model}`."})
 
     # ------------------------------------------------------------------
@@ -906,33 +1376,34 @@ class ApplicationControlService:
     async def _action_compact_run(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
         session_key = self._session_key(conversation)
-        if not self._engine.try_reserve_session_operation(session_key):
-            return _err(USER_TEXT.command_idle_only, code="invalid_state")
-        session = self._active_session(conversation)
-        try:
-            compactor = self._engine.memory_compactor
-            before = compactor.status(session)
-            changed = await compactor.maybe_compact_by_tokens(session, force=True)
-            after = compactor.status(session)
-            checkpoint = after.get("checkpoint")
-            checkpoint_data = checkpoint.to_dict() if checkpoint is not None else None
-            return _ok(
-                {
-                    "changed": bool(changed),
-                    "tokens_before": before["estimated_prompt_tokens"],
-                    "tokens_after": after["estimated_prompt_tokens"],
-                    "context_usage_percent": after["context_usage_percent"],
-                    "checkpoint": checkpoint_data,
-                    "failure_count": after["failure_count"],
-                    "message": (
-                        "Compaction completed."
-                        if changed
-                        else "Nothing to compact; original history was kept."
-                    ),
-                }
-            )
-        finally:
-            self._engine.release_session_operation(session_key)
+        async with self.routing_guard(session_key):
+            if not self._engine.try_reserve_session_operation(session_key):
+                return _err(USER_TEXT.command_idle_only, code="invalid_state")
+            session = self._active_session(conversation)
+            try:
+                compactor = self._engine.memory_compactor
+                before = compactor.status(session)
+                changed = await compactor.maybe_compact_by_tokens(session, force=True)
+                after = compactor.status(session)
+                checkpoint = after.get("checkpoint")
+                checkpoint_data = checkpoint.to_dict() if checkpoint is not None else None
+                return _ok(
+                    {
+                        "changed": bool(changed),
+                        "tokens_before": before["estimated_prompt_tokens"],
+                        "tokens_after": after["estimated_prompt_tokens"],
+                        "context_usage_percent": after["context_usage_percent"],
+                        "checkpoint": checkpoint_data,
+                        "failure_count": after["failure_count"],
+                        "message": (
+                            "Compaction completed."
+                            if changed
+                            else "Nothing to compact; original history was kept."
+                        ),
+                    }
+                )
+            finally:
+                self._engine.release_session_operation(session_key)
 
     # ------------------------------------------------------------------
     # runtime actions
@@ -940,27 +1411,52 @@ class ApplicationControlService:
 
     async def _action_turn_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
-        engine = self._engine
-        dispatcher = getattr(engine, "command_dispatcher", None)
-        if dispatcher is None:
-            return _err("Command dispatcher is unavailable.", code="invalid_state")
-        msg = InboundMessage(
+        async with self.routing_guard(self._session_key(conversation)):
+            engine = self._engine
+            dispatcher = getattr(engine, "command_dispatcher", None)
+            if dispatcher is None:
+                return _err("Command dispatcher is unavailable.", code="invalid_state")
+            msg = InboundMessage(
+                channel=conversation.channel,
+                sender_id=str(params.get("principal_id") or "local"),
+                principal_id=str(params.get("principal_id") or "local"),
+                chat_id=conversation.chat_id,
+                content="/stop",
+            )
+            response = await dispatcher.execute(msg, publish=False)
+            if response and response.metadata.get("persistence_failed") is True:
+                return _err(response.content, code="persistence_failed")
+            return _ok({"message": response.content if response else ""})
+
+    async def _action_turn_cancel_exact(self, params: dict[str, Any]) -> dict[str, Any]:
+        turn_id = str(params.get("turn_id") or "").strip()
+        if not turn_id:
+            return _err("Missing turn_id", code="invalid_argument")
+        cancelled = self._engine.begin_cancel_turn(turn_id)
+        if not cancelled:
+            return _err("The turn is missing or already terminal.", code="conflict")
+        return _ok(
+            {
+                "turn_id": turn_id,
+                "accepted": True,
+                "message": f"Turn `{turn_id}` cancellation accepted.",
+            }
+        )
+
+    async def _action_runtime_restart(self, params: dict[str, Any]) -> dict[str, Any]:
+        conversation = self._conversation(params)
+        if self._supervisor is None:
+            return _err("Runtime supervisor is unavailable.", code="invalid_state")
+        stop_message = InboundMessage(
             channel=conversation.channel,
             sender_id=str(params.get("principal_id") or "local"),
             principal_id=str(params.get("principal_id") or "local"),
             chat_id=conversation.chat_id,
             content="/stop",
         )
-        response = await dispatcher.execute(msg, publish=False)
-        return _ok({"message": response.content if response else ""})
-
-    async def _action_runtime_restart(self, params: dict[str, Any]) -> dict[str, Any]:
-        conversation = self._conversation(params)
-        if self._supervisor is None:
-            return _err("Runtime supervisor is unavailable.", code="invalid_state")
-        if self._intervention is not None:
-            await self._intervention.cancel_session(self._session_key(conversation))
-        self._engine.turns.cancel_session(self._session_key(conversation), "restart requested")
+        stopped = await self._engine._handle_stop(stop_message)
+        if stopped.metadata.get("persistence_failed") is True:
+            return _err(stopped.content, code="persistence_failed")
         await self._supervisor.request_restart(conversation.channel, conversation.chat_id)
         return _ok({"accepted": True, "message": "Restarting NanoCat, will be back soon..."})
 
@@ -970,72 +1466,86 @@ class ApplicationControlService:
 
     async def _action_approval_respond(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
-        principal_id = str(params.get("principal_id") or "local")
-        action = str(params.get("approval_action") or "").strip().lower()
-        command = {
-            "once": "/approve once",
-            "turn": "/approve turn",
-            "forever": "/approve forever",
-            "cancel": "/approve cancel",
-            "deny": "/deny",
-        }.get(action)
-        if command is None:
-            return _err(f"Unknown approval action: {action}", code="invalid_argument")
-        msg = InboundMessage(
-            channel=conversation.channel,
-            sender_id=principal_id,
-            principal_id=principal_id,
-            chat_id=conversation.chat_id,
-            content=command,
-        )
-        dispatcher = getattr(self._engine, "command_dispatcher", None)
-        response = (
-            await dispatcher.execute(msg, publish=False)
-            if dispatcher is not None
-            else await self._engine.command_service.dispatch_intervention(msg)
-        )
-        state = (response.metadata or {}).get("intervention_state") if response else None
-        mode = (response.metadata or {}).get("_intervention_mode") if response else None
-        return _ok(
-            {
-                "state": state or "unknown",
-                "mode": mode or "",
-                "message": response.content if response else "",
-            }
-        )
+        async with self.routing_guard(self._session_key(conversation)):
+            principal_id = str(params.get("principal_id") or "web:local")
+            request_id = str(params.get("request_id") or "").strip()
+            if not request_id:
+                return _err("Missing request_id", code="invalid_argument")
+            pending = (
+                self._intervention.current_pending(conversation, principal_id)
+                if self._intervention is not None
+                else None
+            )
+            if pending is None:
+                return _err("No pending approval request.", code="not_found")
+            if pending.request_id != request_id:
+                return _err("The approval request is no longer current.", code="conflict")
+            action = str(params.get("approval_action") or "").strip().lower()
+            command = {
+                "once": "/approve once",
+                "turn": "/approve turn",
+                "forever": "/approve forever",
+                "cancel": "/approve cancel",
+                "deny": "/deny",
+            }.get(action)
+            if command is None:
+                return _err(f"Unknown approval action: {action}", code="invalid_argument")
+            msg = InboundMessage(
+                channel=conversation.channel,
+                sender_id=principal_id,
+                principal_id=principal_id,
+                chat_id=conversation.chat_id,
+                content=command,
+            )
+            dispatcher = getattr(self._engine, "command_dispatcher", None)
+            response = (
+                await dispatcher.execute(msg, publish=False)
+                if dispatcher is not None
+                else await self._engine.command_service.dispatch_intervention(msg)
+            )
+            state = (response.metadata or {}).get("intervention_state") if response else None
+            mode = (response.metadata or {}).get("_intervention_mode") if response else None
+            return _ok(
+                {
+                    "state": state or "unknown",
+                    "mode": mode or "",
+                    "message": response.content if response else "",
+                }
+            )
 
     # ------------------------------------------------------------------
-    # generic command execution (Action Center slash templates)
+    # generic command execution
     # ------------------------------------------------------------------
 
     async def _action_command_execute(self, params: dict[str, Any]) -> dict[str, Any]:
         conversation = self._conversation(params)
-        principal_id = str(params.get("principal_id") or "local")
-        text = str(params.get("text") or "").strip()
-        if not text.startswith("/"):
-            return _err("Command text must start with '/'.", code="invalid_argument")
+        async with self.routing_guard(self._session_key(conversation)):
+            principal_id = str(params.get("principal_id") or "local")
+            text = str(params.get("text") or "").strip()
+            if not text.startswith("/"):
+                return _err("Command text must start with '/'.", code="invalid_argument")
 
-        engine = self._engine
-        msg = InboundMessage(
-            channel=conversation.channel,
-            sender_id=principal_id,
-            principal_id=principal_id,
-            chat_id=conversation.chat_id,
-            content=text,
-        )
-
-        inspection = engine.command_router.inspect(text)
-        command_name = inspection.spec.name if inspection.spec is not None else None
-        if command_name in {"stop", "restart"}:
-            return _err(
-                f"`/{command_name}` must be executed through its structured control action.",
-                code="invalid_argument",
+            engine = self._engine
+            msg = InboundMessage(
+                channel=conversation.channel,
+                sender_id=principal_id,
+                principal_id=principal_id,
+                chat_id=conversation.chat_id,
+                content=text,
             )
 
-        dispatcher = getattr(engine, "command_dispatcher", None)
-        if dispatcher is None:
-            return _err("Command dispatcher is unavailable.", code="invalid_state")
-        response = await dispatcher.execute(msg, publish=False)
-        if response is None:
-            return _err(f"Command `{text}` was not handled.", code="not_handled")
-        return _ok({"content": response.content, "routed": "command"})
+            inspection = engine.command_router.inspect(text)
+            command_name = inspection.spec.name if inspection.spec is not None else None
+            if command_name in {"stop", "restart"}:
+                return _err(
+                    f"`/{command_name}` must be executed through its structured control action.",
+                    code="invalid_argument",
+                )
+
+            dispatcher = getattr(engine, "command_dispatcher", None)
+            if dispatcher is None:
+                return _err("Command dispatcher is unavailable.", code="invalid_state")
+            response = await dispatcher.execute(msg, publish=False)
+            if response is None:
+                return _err(f"Command `{text}` was not handled.", code="not_handled")
+            return _ok({"content": response.content, "routed": "command"})

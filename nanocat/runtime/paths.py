@@ -16,7 +16,9 @@ class RuntimePaths:
     sessions_dir: Path
     cron_dir: Path
     logs_dir: Path
+    activity_dir: Path
     media_dir: Path
+    runtime_dir: Path
     restart_notification: Path
 
     @classmethod
@@ -33,6 +35,8 @@ class RuntimePaths:
             sessions_dir=data_dir / "sessions",
             cron_dir=data_dir / "cron",
             logs_dir=data_dir / "logs",
+            activity_dir=data_dir / "activity",
             media_dir=workspace / "media",
+            runtime_dir=workspace / "_runtime_temp",
             restart_notification=data_dir / ".pending_restart_notify.json",
         )

@@ -46,10 +46,10 @@ class WhisperTranscriptionProvider:
 
                     if not response.is_success:
                         logger.error(
-                            "Whisper transcription error: {} {}\n{}",
+                            "Whisper transcription request failed: {} {} ({} response bytes)",
                             response.status_code,
                             response.reason_phrase,
-                            response.text,
+                            len(response.content),
                         )
                         return ""
 

@@ -23,6 +23,7 @@ class AgentService:
         self._engine = engine
         self._inflight: set[asyncio.Task[Any]] = set()
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     @property
     def engine(self) -> Any:
@@ -37,8 +38,8 @@ class AgentService:
         """Request cancellation of the ingress loop and active turns."""
         self._engine.stop()
 
-    async def close(self) -> None:
-        """Close application-owned turns and engine resources."""
+    async def _close_owned(self) -> None:
+        """Run application shutdown under one persistent lifecycle owner."""
         self._closed = True
         self.stop()
         current = asyncio.current_task()
@@ -49,9 +50,31 @@ class AgentService:
             await asyncio.gather(*inflight, return_exceptions=True)
         await self._engine.close_mcp()
 
+    async def close(self) -> None:
+        """Close application-owned turns and engine resources exactly once."""
+        owner = self._close_task
+        if owner is None:
+            self._closed = True
+            owner = asyncio.create_task(
+                self._close_owned(),
+                name="nanocat.agent-close-owner",
+            )
+            self._close_task = owner
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(owner)
+                break
+            except asyncio.CancelledError:
+                if owner.done():
+                    owner.result()
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
     async def close_mcp(self) -> None:
         """Compatibility lifecycle name used by the current supervisor."""
-        await self._engine.close_mcp()
+        await self.close()
 
     async def process_direct(
         self,

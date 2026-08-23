@@ -53,6 +53,22 @@ class OutboundDispatcher:
             retry_delay_s=max(0.0, float(getattr(config.channels, "outbound_retry_delay_s", 0.25))),
         )
         self._task: asyncio.Task[Any] | None = None
+        self._inflight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    def apply_config(self, config: Any) -> None:
+        """Replace bounded retry settings for subsequent delivery attempts."""
+        self._policy = DeliveryPolicy(
+            max_attempts=max(
+                1,
+                int(getattr(config.channels, "outbound_max_attempts", 3)),
+            ),
+            retry_delay_s=max(
+                0.0,
+                float(getattr(config.channels, "outbound_retry_delay_s", 0.25)),
+            ),
+        )
 
     async def start(self) -> asyncio.Task[Any]:
         """Start one dispatcher task and return its compatibility task handle."""
@@ -69,6 +85,25 @@ class OutboundDispatcher:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+    async def drain(self, timeout: float = 5.0) -> bool:
+        """Wait for queued and in-flight deliveries without stopping adapters."""
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+        while True:
+            if self._bus.outbound_empty and self._inflight == 0:
+                self._idle.set()
+                return True
+            self._idle.clear()
+            if self._bus.outbound_empty and self._inflight == 0:
+                self._idle.set()
+                return True
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(self._idle.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return False
+
     async def run(self) -> None:
         """Route outbound messages until cancellation or bus closure."""
         logger.info("Outbound dispatcher started")
@@ -83,12 +118,18 @@ class OutboundDispatcher:
             except Exception as exc:
                 logger.error("Outbound dispatcher failed to consume message: {}", exc)
                 continue
+            self._idle.clear()
+            self._inflight += 1
             try:
                 await self._dispatch_one(msg)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.error("Outbound dispatcher failed to deliver message: {}", exc)
+            finally:
+                self._inflight -= 1
+                if self._inflight == 0 and self._bus.outbound_empty:
+                    self._idle.set()
 
     async def _dispatch_one(self, msg: OutboundMessage) -> None:
         """Apply delivery policy and send one already-normalized message."""
@@ -124,7 +165,12 @@ class OutboundDispatcher:
             logger.warning("Unknown channel: {}", msg.channel)
             self._report_delivery(msg, DeliveryResult(delivered=False, detail="unknown channel"))
             return
-        if msg.request_id and self._delivery_guard and not self._delivery_guard(msg.request_id):
+        if (
+            msg.metadata.get("_intervention")
+            and msg.request_id
+            and self._delivery_guard
+            and not self._delivery_guard(msg.request_id)
+        ):
             self._report_delivery(
                 msg,
                 DeliveryResult(delivered=False, detail="delivery request is no longer active"),
@@ -141,7 +187,12 @@ class OutboundDispatcher:
     async def _send_with_retry(self, channel: Any, msg: OutboundMessage) -> bool:
         """Send with bounded exponential backoff and a single terminal failure."""
         for attempt in range(1, self._policy.max_attempts + 1):
-            if msg.request_id and self._delivery_guard and not self._delivery_guard(msg.request_id):
+            if (
+                msg.metadata.get("_intervention")
+                and msg.request_id
+                and self._delivery_guard
+                and not self._delivery_guard(msg.request_id)
+            ):
                 self._report_delivery(
                     msg,
                     DeliveryResult(delivered=False, detail="delivery request is no longer active"),

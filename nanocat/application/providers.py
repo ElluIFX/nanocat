@@ -29,13 +29,8 @@ class RuntimeProviderResolver:
     def clear(self) -> None:
         self._providers.clear()
 
-    def update_reasoning_effort(self, value: str | None) -> None:
-        """Apply a new reasoning effort to providers already owned by this runtime."""
-        for provider in self._providers.values():
-            provider.generation = replace(provider.generation, reasoning_effort=value)
-
-    async def close(self) -> None:
-        """Close adapters that expose an async lifecycle hook."""
+    async def reconfigure(self) -> None:
+        """Close cached adapters so subsequent turns use the current provider config."""
         providers = list(self._providers.values())
         self._providers.clear()
         for provider in providers:
@@ -45,3 +40,12 @@ class RuntimeProviderResolver:
             result = close()
             if hasattr(result, "__await__"):
                 await result
+
+    def update_reasoning_effort(self, value: str | None) -> None:
+        """Apply a new reasoning effort to providers already owned by this runtime."""
+        for provider in self._providers.values():
+            provider.generation = replace(provider.generation, reasoning_effort=value)
+
+    async def close(self) -> None:
+        """Close adapters that expose an async lifecycle hook."""
+        await self.reconfigure()

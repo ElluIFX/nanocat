@@ -1,0 +1,35 @@
+{
+  "name": "nanocat-web",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.7.0",
+    "dompurify": "^3.3.1",
+    "lucide-preact": "^0.468.0",
+    "marked": "^15.0.7",
+    "preact": "^10.25.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.0",
+    "@preact/preset-vite": "^2.10.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/preact": "^3.2.4",
+    "@types/node": "^22.13.4",
+    "jsdom": "^26.0.0",
+    "typescript": "~5.7.3",
+    "vite": "^6.1.0",
+    "vitest": "^3.0.5"
+  }
+}

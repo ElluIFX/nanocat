@@ -51,6 +51,7 @@ class ComponentOwnerRegistry:
             raise ValueError("close_timeout must be positive")
         self.close_timeout = close_timeout
         self._components: dict[str, OwnedComponent] = {}
+        self._continuations: set[asyncio.Task[None]] = set()
 
     def register(
         self,
@@ -77,21 +78,92 @@ class ComponentOwnerRegistry:
         return self._components[name]
 
     async def close_all(self) -> ShutdownReport:
-        """Close all components in reverse order and retain failed owners for retry."""
+        """Close all components in reverse order and report any failed owners."""
         errors: list[str] = []
         timed_out: list[str] = []
         failed: list[str] = []
         reason = ShutdownReason(kind="manual", detail="component registry close")
-        for name in reversed(tuple(self._components)):
+        close_order = list(reversed(tuple(self._components)))
+        for index, name in enumerate(close_order):
             component = self._components[name]
             if component.closed:
                 continue
+            close_task = asyncio.create_task(
+                _invoke(component.closer),
+                name=f"nanocat.close.{name}",
+            )
             try:
-                await asyncio.wait_for(_invoke(component.closer), self.close_timeout)
-            except asyncio.TimeoutError:
+                done, _ = await asyncio.wait((close_task,), timeout=self.close_timeout)
+                if not done:
+                    if component.critical:
+                        remaining = tuple(close_order[index + 1 :])
+
+                        async def finish_critical_close(
+                            owner: asyncio.Task[None] = close_task,
+                            owned: OwnedComponent = component,
+                        ) -> None:
+                            cancelled = False
+                            while True:
+                                try:
+                                    await asyncio.shield(owner)
+                                    break
+                                except asyncio.CancelledError:
+                                    if owner.done():
+                                        try:
+                                            owner.result()
+                                        except asyncio.CancelledError:
+                                            logger.error(
+                                                "Detached critical close was cancelled for {}",
+                                                owned.name,
+                                            )
+                                        break
+                                    cancelled = True
+                                except Exception:
+                                    logger.exception(
+                                        "Detached critical close failed for {}",
+                                        owned.name,
+                                    )
+                                    break
+                            owned.closed = True
+                            await self.close_all()
+                            if cancelled:
+                                raise asyncio.CancelledError
+
+                        continuation = asyncio.create_task(
+                            finish_critical_close(),
+                            name=f"nanocat.close-continuation.{name}",
+                        )
+                        self._continuations.add(continuation)
+                        continuation.add_done_callback(self._continuations.discard)
+                        for blocked_name in remaining:
+                            if blocked_name not in failed:
+                                failed.append(blocked_name)
+                                errors.append(
+                                    f"{blocked_name}: close deferred behind {name}"
+                                )
+                        raise TimeoutError
+
+                    close_task.cancel()
+
+                    def consume(task: asyncio.Task[None], component_name: str = name) -> None:
+                        if task.cancelled():
+                            return
+                        if error := task.exception():
+                            logger.error(
+                                "Detached close task failed for {} ({})",
+                                component_name,
+                                type(error).__name__,
+                            )
+
+                    close_task.add_done_callback(consume)
+                    raise TimeoutError
+                await close_task
+            except TimeoutError:
                 timed_out.append(name)
                 failed.append(name)
                 logger.error("Timed out closing runtime component {}", name)
+                if component.critical:
+                    break
             except asyncio.CancelledError:
                 errors.append(f"{name}: close cancelled")
                 failed.append(name)
@@ -111,7 +183,7 @@ class ComponentOwnerRegistry:
 
 
 class ShutdownCoordinator:
-    """Idempotent coordinator used by gateway, TUI and failure paths."""
+    """Idempotent coordinator used by service and failure paths."""
 
     def __init__(self, owners: ComponentOwnerRegistry):
         self.owners = owners
@@ -119,6 +191,7 @@ class ShutdownCoordinator:
         self._complete = asyncio.Event()
         self._stopping = False
         self._report: ShutdownReport | None = None
+        self._shutdown_task: asyncio.Task[ShutdownReport] | None = None
 
     @property
     def report(self) -> ShutdownReport | None:
@@ -130,33 +203,41 @@ class ShutdownCoordinator:
         async with self._lock:
             if self._report is not None:
                 return self._report
-            if self._stopping:
-                wait_for = self._complete
-            else:
+            if self._shutdown_task is None:
                 self._stopping = True
-                wait_for = None
-
-        if wait_for is not None:
-            await wait_for.wait()
-            return self._report or ShutdownReport(reason=reason)
-
-        close_task = asyncio.create_task(self.owners.close_all(), name="nanocat.shutdown")
+                self._shutdown_task = asyncio.create_task(
+                    self._run_shutdown(reason),
+                    name="nanocat.shutdown",
+                )
+            shutdown_task = self._shutdown_task
         cancelled = False
-        try:
-            base_report = await asyncio.shield(close_task)
-        except asyncio.CancelledError:
-            cancelled = True
-            base_report = await asyncio.shield(close_task)
-        finally:
-            if close_task.done() and not close_task.cancelled() and close_task.exception() is not None:
-                raise close_task.exception()
-        self._report = ShutdownReport(
-            reason=reason,
-            errors=base_report.errors,
-            timed_out=base_report.timed_out,
-            failed=base_report.failed,
-        )
-        self._complete.set()
+        while True:
+            try:
+                report = await asyncio.shield(shutdown_task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
         if cancelled:
             raise asyncio.CancelledError
-        return self._report
+        return report
+
+    async def _run_shutdown(self, reason: ShutdownReason) -> ShutdownReport:
+        """Own shutdown completion independently from any requesting task."""
+        try:
+            base_report = await self.owners.close_all()
+            report = ShutdownReport(
+                reason=reason,
+                errors=base_report.errors,
+                timed_out=base_report.timed_out,
+                failed=base_report.failed,
+            )
+        except Exception as exc:
+            logger.exception("Runtime shutdown coordinator failed")
+            report = ShutdownReport(
+                reason=reason,
+                errors=(f"shutdown coordinator: {type(exc).__name__}",),
+                failed=("shutdown_coordinator",),
+            )
+        self._report = report
+        self._complete.set()
+        return report

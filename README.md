@@ -12,28 +12,30 @@ NanoCat 是一个面向个人部署的 AI 助手，支持多渠道对话、模�
 
 ## 特性
 
-- 多渠道：TUI、Telegram、Discord、Slack、飞书、钉钉、QQ、企业微信、Mochat 和 Email
+- 多渠道：Web、Telegram、Discord、Slack、飞书、钉钉、QQ、企业微信、Mochat 和 Email
 - 多模型：OpenAI-compatible、OpenAI Codex、Anthropic、DeepSeek、OpenRouter 等
 - 工具调用：文件、终端、进程、SSH、网络、图片、定时任务、子代理和 MCP
 - 长期记忆：Nowledge 记忆后端、自动检索、Working Memory、Thread 和记忆管理命令
 - 上下文管理：Token 预算、工具结果归档、会话压缩和压缩状态查询
 - 安全控制：敏感操作可在执行前请求用户批准，支持单次、当前轮和会话级授权
-- TUI：实时对话、工具调用进度、审批交互、模型和思考强度控制
+- Web：响应式会话工作区、实时轨迹、工具事件、审批、模型和思考强度控制
 
 ## 安装
 
 需要 Python 3.11 或更高版本，并推荐使用 [uv](https://docs.astral.sh/uv/)：
 
+源码安装和 sdist 构建还需要 Node.js 20+ 与 npm；预构建 wheel 以及最终 Docker 运行镜像仅需要 Python 运行时。
+
 ```bash
 git clone https://github.com/ElluIFX/nanocat.git
 cd nanocat
-uv sync --extra tui
+uv sync
 ```
 
 也可以使用 pip：
 
 ```bash
-pip install -e ".[tui]"
+pip install -e .
 ```
 
 ## 配置
@@ -77,22 +79,18 @@ pip install -e ".[tui]"
 
 ## 启动
 
-启动本地 TUI：
+启动 NanoCat 渠道服务与 Web：
 
 ```bash
-uv run nanocat tui -w ./data
+uv run nanocat -w ./data
 ```
 
-启动配置中启用的渠道：
-
-```bash
-uv run nanocat gateway -w ./data
-```
+Web 默认监听 `http://127.0.0.1:18790`。`channels.web.password` 为空时直接进入工作区，终端会输出安全告警。
 
 运行：
 
 ```text
-nanocat [gateway|tui] [-w WORKDIR] [-v]
+nanocat [-w WORKDIR] [-v]
 ```
 
 ## 常用命令
@@ -116,7 +114,7 @@ nanocat [gateway|tui] [-w WORKDIR] [-v]
 ## 开发
 
 ```bash
-uv sync --extra dev --extra tui
+uv sync --extra dev
 uv run ruff check nanocat
 ```
 

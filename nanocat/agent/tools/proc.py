@@ -7,7 +7,7 @@ with ``proc_read``, and stop it with ``proc_stop``. Built on the shared
 
 It runs the child over pipes (no PTY), which is fine for dev servers, REPLs,
 tail -f, watchers and training runs. A local program sees a pipe, not a tty, so
-full-screen TUIs (vim/htop) won't truly fullscreen — use the ssh tool for those.
+full-screen terminal apps (vim/htop) need the ssh tool for faithful rendering.
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ class ProcStartTool(Tool):
             "it keeps running so you can send input with proc_send, read its rendered "
             "screen/output with proc_read, and stop it with proc_stop — for dev servers, "
             "REPLs, tail -f, watchers, training runs. (Runs over a pipe, not a real tty, "
-            "so full-screen TUIs like vim won't fullscreen; use ssh for those.)"
+            "so full-screen terminal apps like vim need ssh for faithful rendering.)"
         )
 
     @property

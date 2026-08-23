@@ -31,10 +31,20 @@ class ToolHost:
             vision_fallback=vision_fallback,
             config=config,
         )
-        self.ssh = SSHManager()
+        self.ssh = SSHManager(workspace=config.workspace_path)
         self.processes = ProcManager()
         self.http_sessions = HttpSessionManager(proxy=config.tools.web.proxy)
+        self._retired_http_sessions: list[Any] = []
         self._closed = False
+
+    def replace_http_sessions(self, proxy: str | None) -> Any:
+        """Install a fresh cookie-session owner while retaining in-flight clients."""
+        from nanocat.agent.tools.http import HttpSessionManager
+
+        previous = self.http_sessions
+        self.http_sessions = HttpSessionManager(proxy=proxy)
+        self._retired_http_sessions.append(previous)
+        return self.http_sessions
 
     async def close(self) -> None:
         """Close all stateful resources created for this runtime's tools."""
@@ -45,3 +55,6 @@ class ToolHost:
         await self.ssh.close_all()
         await self.processes.close_all()
         await self.http_sessions.close_all()
+        for manager in self._retired_http_sessions:
+            await manager.close_all()
+        self._retired_http_sessions.clear()

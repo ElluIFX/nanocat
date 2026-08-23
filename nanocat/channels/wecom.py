@@ -138,7 +138,7 @@ class WecomChannel(BaseChannel):
     async def _on_disconnected(self, frame: Any) -> None:
         """Handle WebSocket disconnected event."""
         reason = frame.body if hasattr(frame, 'body') else str(frame)
-        logger.warning("WeCom WebSocket disconnected: {}", reason)
+        logger.warning("WeCom WebSocket disconnected ({} chars)", len(str(reason)))
 
     async def _on_error(self, frame: Any) -> None:
         """Handle error event."""

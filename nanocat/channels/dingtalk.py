@@ -123,7 +123,12 @@ class NanoCatDingTalkHandler(CallbackHandler):
                 or message.data.get("openConversationId")
             )
 
-            logger.info("Received DingTalk message from {} ({}): {}", sender_name, sender_id, content)
+            logger.info(
+                "Received DingTalk message from {} ({}, {} chars)",
+                sender_name,
+                sender_id,
+                len(content),
+            )
 
             # Forward to NanoCat via _on_message (non-blocking).
             # Store reference to prevent GC before task completes.
@@ -365,19 +370,31 @@ class DingTalkChannel(BaseChannel):
 
         try:
             resp = await self._http.post(url, files=files)
-            text = resp.text
             result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
             if resp.status_code >= 400:
-                logger.error("DingTalk media upload failed status={} type={} body={}", resp.status_code, media_type, text[:500])
+                logger.error(
+                    "DingTalk media upload failed status={} type={} response_bytes={}",
+                    resp.status_code,
+                    media_type,
+                    len(resp.content),
+                )
                 return None
             errcode = result.get("errcode", 0)
             if errcode != 0:
-                logger.error("DingTalk media upload api error type={} errcode={} body={}", media_type, errcode, text[:500])
+                logger.error(
+                    "DingTalk media upload api error type={} errcode={} response_bytes={}",
+                    media_type,
+                    errcode,
+                    len(resp.content),
+                )
                 return None
             sub = result.get("result") or {}
             media_id = result.get("media_id") or result.get("mediaId") or sub.get("media_id") or sub.get("mediaId")
             if not media_id:
-                logger.error("DingTalk media upload missing media_id body={}", text[:500])
+                logger.error(
+                    "DingTalk media upload missing media_id ({} response bytes)",
+                    len(resp.content),
+                )
                 return None
             return str(media_id)
         except Exception as e:
@@ -417,9 +434,13 @@ class DingTalkChannel(BaseChannel):
 
         try:
             resp = await self._http.post(url, json=payload, headers=headers)
-            body = resp.text
             if resp.status_code != 200:
-                logger.error("DingTalk send failed msgKey={} status={} body={}", msg_key, resp.status_code, body[:500])
+                logger.error(
+                    "DingTalk send failed msgKey={} status={} response_bytes={}",
+                    msg_key,
+                    resp.status_code,
+                    len(resp.content),
+                )
                 return False
             try:
                 result = resp.json()
@@ -427,7 +448,12 @@ class DingTalkChannel(BaseChannel):
                 result = {}
             errcode = result.get("errcode")
             if errcode not in (None, 0):
-                logger.error("DingTalk send api error msgKey={} errcode={} body={}", msg_key, errcode, body[:500])
+                logger.error(
+                    "DingTalk send api error msgKey={} errcode={} response_bytes={}",
+                    msg_key,
+                    errcode,
+                    len(resp.content),
+                )
                 return False
             logger.debug("DingTalk message sent to {} with msgKey={}", chat_id, msg_key)
             return True
@@ -538,7 +564,7 @@ class DingTalkChannel(BaseChannel):
         permission checks before publishing to the bus.
         """
         try:
-            logger.info("DingTalk inbound: {} from {}", content, sender_name)
+            logger.info("DingTalk inbound from {} ({} chars)", sender_name, len(content))
             is_group = conversation_type == "2" and conversation_id
             chat_id = f"group:{conversation_id}" if is_group else sender_id
             await self._handle_message(
@@ -575,13 +601,17 @@ class DingTalkChannel(BaseChannel):
             payload = {"downloadCode": download_code, "robotCode": self.config.client_id}
             resp = await self._http.post(api_url, json=payload, headers=headers)
             if resp.status_code != 200:
-                logger.error("DingTalk get download URL failed: status={}, body={}", resp.status_code, resp.text)
+                logger.error(
+                    "DingTalk get download URL failed: status={}, response_bytes={}",
+                    resp.status_code,
+                    len(resp.content),
+                )
                 return None
 
             result = resp.json()
             download_url = result.get("downloadUrl")
             if not download_url:
-                logger.error("DingTalk download URL not found in response: {}", result)
+                logger.error("DingTalk download URL not found in response")
                 return None
 
             # Step 2: Download the file content

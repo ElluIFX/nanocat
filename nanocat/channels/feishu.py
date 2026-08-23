@@ -347,7 +347,7 @@ class FeishuChannel(BaseChannel):
                     try:
                         self._ws_client.start()
                     except Exception as e:
-                        logger.warning("Feishu WebSocket error: {}", e)
+                        logger.warning("Feishu WebSocket error ({})", type(e).__name__)
                     if self._running and not self._ws_stop.is_set():
                         self._ws_stop.wait(5)
             finally:
@@ -431,11 +431,11 @@ class FeishuChannel(BaseChannel):
             response = self._client.im.v1.message_reaction.create(request)
 
             if not response.success():
-                logger.warning("Failed to add reaction: code={}, msg={}", response.code, response.msg)
+                logger.warning("Failed to add reaction: code={}", response.code)
             else:
                 logger.debug("Added {} reaction to message {}", emoji_type, message_id)
         except Exception as e:
-            logger.warning("Error adding reaction: {}", e)
+            logger.warning("Error adding reaction ({})", type(e).__name__)
 
     async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> None:
         """
@@ -719,10 +719,10 @@ class FeishuChannel(BaseChannel):
                     logger.debug("Uploaded image {}: {}", os.path.basename(file_path), image_key)
                     return image_key
                 else:
-                    logger.error("Failed to upload image: code={}, msg={}", response.code, response.msg)
+                    logger.error("Failed to upload image: code={}", response.code)
                     return None
         except Exception as e:
-            logger.error("Error uploading image {}: {}", file_path, e)
+            logger.error("Error uploading image ({})", type(e).__name__)
             return None
 
     def _upload_file_sync(self, file_path: str) -> str | None:
@@ -747,10 +747,10 @@ class FeishuChannel(BaseChannel):
                     logger.debug("Uploaded file {}: {}", file_name, file_key)
                     return file_key
                 else:
-                    logger.error("Failed to upload file: code={}, msg={}", response.code, response.msg)
+                    logger.error("Failed to upload file: code={}", response.code)
                     return None
         except Exception as e:
-            logger.error("Error uploading file {}: {}", file_path, e)
+            logger.error("Error uploading file ({})", type(e).__name__)
             return None
 
     def _download_image_sync(self, message_id: str, image_key: str) -> tuple[bytes | None, str | None]:
@@ -770,10 +770,10 @@ class FeishuChannel(BaseChannel):
                     file_data = file_data.read()
                 return file_data, response.file_name
             else:
-                logger.error("Failed to download image: code={}, msg={}", response.code, response.msg)
+                logger.error("Failed to download image: code={}", response.code)
                 return None, None
         except Exception as e:
-            logger.error("Error downloading image {}: {}", image_key, e)
+            logger.error("Error downloading image ({})", type(e).__name__)
             return None, None
 
     def _download_file_sync(
@@ -802,7 +802,7 @@ class FeishuChannel(BaseChannel):
                     file_data = file_data.read()
                 return file_data, response.file_name
             else:
-                logger.error("Failed to download {}: code={}, msg={}", resource_type, response.code, response.msg)
+                logger.error("Failed to download {}: code={}", resource_type, response.code)
                 return None, None
         except Exception:
             logger.exception("Error downloading {} {}", resource_type, file_key)
@@ -866,8 +866,8 @@ class FeishuChannel(BaseChannel):
             response = self._client.im.v1.message.get(request)
             if not response.success():
                 logger.debug(
-                    "Feishu: could not fetch parent message {}: code={}, msg={}",
-                    message_id, response.code, response.msg,
+                    "Feishu: could not fetch parent message: code={}",
+                    response.code,
                 )
                 return None
             items = getattr(response.data, "items", None)
@@ -896,7 +896,7 @@ class FeishuChannel(BaseChannel):
                 text = text[: self._REPLY_CONTEXT_MAX_LEN] + "..."
             return f"[Reply to: {text}]"
         except Exception as e:
-            logger.debug("Feishu: error fetching parent message {}: {}", message_id, e)
+            logger.debug("Feishu: error fetching parent message ({})", type(e).__name__)
             return None
 
     def _reply_message_sync(self, parent_message_id: str, msg_type: str, content: str) -> bool:
@@ -914,14 +914,14 @@ class FeishuChannel(BaseChannel):
             response = self._client.im.v1.message.reply(request)
             if not response.success():
                 logger.error(
-                    "Failed to reply to Feishu message {}: code={}, msg={}, log_id={}",
-                    parent_message_id, response.code, response.msg, response.get_log_id()
+                    "Failed to reply to Feishu message: code={}, log_id={}",
+                    response.code, response.get_log_id()
                 )
                 return False
             logger.debug("Feishu reply sent to message {}", parent_message_id)
             return True
         except Exception as e:
-            logger.error("Error replying to Feishu message {}: {}", parent_message_id, e)
+            logger.error("Error replying to Feishu message ({})", type(e).__name__)
             return False
 
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
@@ -940,14 +940,14 @@ class FeishuChannel(BaseChannel):
             response = self._client.im.v1.message.create(request)
             if not response.success():
                 logger.error(
-                    "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
-                    msg_type, response.code, response.msg, response.get_log_id()
+                    "Failed to send Feishu {} message: code={}, log_id={}",
+                    msg_type, response.code, response.get_log_id()
                 )
                 return False
             logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
             return True
         except Exception as e:
-            logger.error("Error sending Feishu {} message: {}", msg_type, e)
+            logger.error("Error sending Feishu {} message ({})", msg_type, type(e).__name__)
             return False
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -1045,7 +1045,7 @@ class FeishuChannel(BaseChannel):
                         )
 
         except Exception as e:
-            logger.error("Error sending Feishu message: {}", e)
+            logger.error("Error sending Feishu message ({})", type(e).__name__)
 
     def _on_message_sync(self, data: Any) -> None:
         """
@@ -1171,7 +1171,7 @@ class FeishuChannel(BaseChannel):
             )
 
         except Exception as e:
-            logger.error("Error processing Feishu message: {}", e)
+            logger.error("Error processing Feishu message ({})", type(e).__name__)
 
     def _on_reaction_created(self, data: Any) -> None:
         """Ignore reaction events so they do not generate SDK noise."""

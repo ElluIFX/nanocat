@@ -20,6 +20,7 @@ class MCPHost:
         self._ready: asyncio.Event | None = None
         self._connected = False
         self._lock = asyncio.Lock()
+        self._registered_tools: set[str] = set()
 
     @property
     def connected(self) -> bool:
@@ -51,7 +52,9 @@ class MCPHost:
         failure: BaseException | None = None
         try:
             await stack.__aenter__()
+            before = set(self._registry.names())
             await connect_mcp_servers(self._servers, self._registry, stack)
+            self._registered_tools = set(self._registry.names()) - before
             self._connected = True
             logger.info("MCP ready — {} server(s) connected", len(self._servers))
             ready.set()
@@ -71,6 +74,17 @@ class MCPHost:
                     type(failure).__name__,
                     failure,
                 )
+
+    async def reconfigure(self, servers: dict[str, Any]) -> None:
+        """Replace MCP transports and their registered tools as one owner operation."""
+        was_connected = self._connected or self._task is not None
+        await self.close()
+        for name in self._registered_tools:
+            self._registry.unregister(name)
+        self._registered_tools.clear()
+        self._servers = servers
+        if was_connected and servers:
+            await self.connect()
 
     async def close(self) -> None:
         """Stop the MCP worker and close all transports exactly once."""

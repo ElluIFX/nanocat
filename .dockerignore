@@ -9,6 +9,9 @@ build/
 .env
 .assets
 node_modules/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
 bridge/dist/
 workspace/
 data/

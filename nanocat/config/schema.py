@@ -14,19 +14,37 @@ class Base(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class ChannelsConfig(Base):
-    """Configuration for chat channels.
+class ApiConfig(Base):
+    """Public HTTP API listener and bearer authentication configuration."""
 
-    Built-in and plugin channel configs are stored as extra fields (dicts).
-    Each channel parses its own config in __init__.
-    """
+    enabled: bool = False
+    host: str = Field(default="127.0.0.1", min_length=1)
+    port: int = Field(default=18791, ge=0, le=65535)
+    auth_token: str | None = Field(default=None, min_length=16)
+    cors_origins: list[str] = Field(default_factory=list)
+
+
+class WebChannelConfig(Base):
+    """Local single-user web channel configuration."""
+
+    enabled: bool = True
+    host: str = Field(default="127.0.0.1", min_length=1)
+    port: int = Field(default=18790, ge=0, le=65535)
+    password: str | None = Field(default=None, min_length=1)
+    trusted_proxies: list[str] = Field(default_factory=list)
+    allow_from: list[str] = Field(default_factory=lambda: ["web:local"])
+
+
+class ChannelsConfig(Base):
+    """Configuration for built-in and plugin chat channels."""
 
     model_config = ConfigDict(extra="allow")
 
-    send_progress: bool = True  # stream agent's text progress to the channel
-    send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
+    send_progress: bool = True
+    send_tool_hints: bool = False
     outbound_max_attempts: int = 3
     outbound_retry_delay_s: float = 0.25
+    web: WebChannelConfig = Field(default_factory=WebChannelConfig)
 
 
 class AgentDefaults(Base):
@@ -46,7 +64,7 @@ class AgentDefaults(Base):
         None  # global vision fallback model; None → assistant_model
     )
     compaction_model: str | None = None  # independent low-cost model for session compaction
-    # Saved model catalog used by /model and the local TUI.
+    # Saved model catalog used by /model and rich clients.
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     max_tokens: int | None = 8192
     context_window_tokens: int = 65_536
@@ -79,6 +97,23 @@ class RuntimeLimitsConfig(Base):
 
     max_concurrent_turns: int = Field(default=8, gt=0)
     max_concurrent_tool_calls: int = Field(default=16, gt=0)
+
+
+class RuntimeFilesConfig(Base):
+    """Limits for runtime-owned, agent-readable workspace files."""
+
+    max_file_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
+    max_session_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
+    max_total_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+
+    @model_validator(mode="after")
+    def validate_limit_order(self) -> "RuntimeFilesConfig":
+        """Require each wider quota to contain the narrower quota."""
+        if self.max_file_bytes > self.max_session_bytes:
+            raise ValueError("maxFileBytes cannot exceed maxSessionBytes")
+        if self.max_session_bytes > self.max_total_bytes:
+            raise ValueError("maxSessionBytes cannot exceed maxTotalBytes")
+        return self
 
 
 class ProviderConfig(Base):
@@ -138,14 +173,6 @@ class HeartbeatConfig(Base):
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
     principal_id: str | None = None  # Optional owner used for scheduler-originated interventions
-
-
-class GatewayConfig(Base):
-    """Gateway/server configuration."""
-
-    host: str = "0.0.0.0"
-    port: int = 18790
-    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
 class WebSearchConfig(Base):
@@ -224,7 +251,7 @@ class EnabledBuiltinToolsConfig(Base):
     )
     todo: bool = True
     subagent_tools: bool = True
-    ssh_tools: bool = False  # SSH tools (ssh_open/send/read/close/list)
+    ssh_tools: bool = False  # SSH session and file transfer tools
     proc_tools: bool = True  # background process tools (proc_start/read/stop/list)
     http_request: bool = True  # structured HTTP request tool
     memory_tools: bool = True  # Nowledge memory and captured Thread tools
@@ -310,11 +337,17 @@ class MemoryConfig(Base):
 class Config(BaseSettings):
     """Root configuration for NanoCat."""
 
+    schema_version: Literal[2] = Field(default=2, alias="schemaVersion")
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     runtime: RuntimeLimitsConfig = Field(default_factory=RuntimeLimitsConfig)
+    runtime_files: RuntimeFilesConfig = Field(
+        default_factory=RuntimeFilesConfig,
+        alias="runtimeFiles",
+    )
+    api: ApiConfig = Field(default_factory=ApiConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
-    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)

@@ -41,9 +41,15 @@ class RuntimeContext:
     channels: Any
     heartbeat: Any
     system_turns: Any | None = None
+    runtime_files: Any | None = None
+    activity_journal: Any | None = None
+    api_runtime: Any | None = None
+    control: Any | None = None
     paths: RuntimePaths | None = None
     config_snapshot: ConfigSnapshot | None = None
     supervisor: Any | None = None
     log_sink_id: int | None = None
     intervention: Any | None = None
     command_dispatcher: Any | None = None
+    configuration: Any | None = None
+    instance_lock: Any | None = None

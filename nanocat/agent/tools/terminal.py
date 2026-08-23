@@ -207,7 +207,7 @@ class TerminalSession:
     def render_screen(self) -> str:
         # pyte pads every row to full width; strip per-line trailing spaces and the
         # blank rows at the top/bottom (terminal padding) to save tokens. Interior
-        # blank rows are kept so TUI layout stays faithful.
+        # Blank rows are kept so full-screen terminal layouts stay faithful.
         lines = [line.rstrip() for line in self._screen.display]
         start, end = 0, len(lines)
         while start < end and not lines[start]:

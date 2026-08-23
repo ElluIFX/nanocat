@@ -469,12 +469,14 @@ class QQChannel(BaseChannel):
                     await self._convert_silk(file_path) or file_path
                 )
                 if transcription:
-                    logger.info("Transcribed QQ voice: {}...", transcription[:50])
+                    logger.info("Transcribed QQ voice ({} chars)", len(transcription))
                     return path_str, f"[transcription: {transcription}]"
                 return path_str, f"[voice: {path_str}]"
             return path_str, f"[{media_type}: {path_str}]"
         except Exception as e:
-            logger.warning("Failed to download QQ attachment {}: {}", url, e)
+            logger.warning(
+                "Failed to download QQ attachment ({})", type(e).__name__
+            )
             return None, f"[{media_type}: download failed]"
 
     async def _on_message(self, data: "C2CMessage | GroupMessage", is_group: bool = False) -> None:

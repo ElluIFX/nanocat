@@ -13,7 +13,11 @@ from loguru import logger
 
 from nanocat.core.runtime import HealthState, ShutdownReason
 from nanocat.observability.contracts import HealthReport
-from nanocat.runtime.lifecycle import ComponentOwnerRegistry, ShutdownCoordinator
+from nanocat.runtime.lifecycle import (
+    ComponentOwnerRegistry,
+    ShutdownCoordinator,
+    ShutdownReport,
+)
 
 
 class RuntimeSupervisor:
@@ -26,12 +30,20 @@ class RuntimeSupervisor:
         self._tasks: list[asyncio.Task[Any]] = []
         self._started = False
         self._stop_requested = False
+        self._stop_task: asyncio.Task[ShutdownReport] | None = None
         self._restart_task: asyncio.Task[None] | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._health: dict[str, HealthReport] = {}
         self._register_legacy_components()
 
     def _register_legacy_components(self) -> None:
         """Register current services without moving their business ownership yet."""
+        if getattr(self.runtime, "instance_lock", None) is not None:
+            self.owners.register(
+                "instance_lock",
+                self.runtime.instance_lock,
+                closer=self.runtime.instance_lock.close,
+            )
         log_sink_id = getattr(self.runtime, "log_sink_id", None)
         if log_sink_id is not None:
             self.owners.register(
@@ -42,13 +54,6 @@ class RuntimeSupervisor:
             self._set_health("logging", HealthState.STARTING)
         self.owners.register("message_bus", self.runtime.bus, closer=self.runtime.bus.close)
         self._set_health("message_bus", HealthState.STARTING)
-        self.owners.register(
-            "channels",
-            self.runtime.channels,
-            closer=self.runtime.channels.stop_all,
-            critical=False,
-        )
-        self._set_health("channels", HealthState.STARTING)
         if getattr(self.runtime, "intervention", None) is not None:
             self.owners.register(
                 "intervention",
@@ -56,6 +61,29 @@ class RuntimeSupervisor:
                 closer=self.runtime.intervention.close,
             )
             self._set_health("intervention", HealthState.STARTING)
+        if getattr(self.runtime, "activity_journal", None) is not None:
+            self.owners.register(
+                "activity",
+                self.runtime.activity_journal,
+                closer=self.runtime.activity_journal.close,
+                critical=False,
+            )
+            self._set_health("activity", HealthState.STARTING)
+        if getattr(self.runtime, "runtime_files", None) is not None:
+            self.owners.register(
+                "runtime_files",
+                self.runtime.runtime_files,
+                closer=self.runtime.runtime_files.close,
+                critical=False,
+            )
+            self._set_health("runtime_files", HealthState.STARTING)
+        self.owners.register(
+            "channels",
+            self.runtime.channels,
+            closer=self.runtime.channels.stop_all,
+            critical=False,
+        )
+        self._set_health("channels", HealthState.STARTING)
         self.owners.register("agent", self.runtime.agent, closer=self._stop_agent)
         self._set_health("agent", HealthState.STARTING)
         if getattr(self.runtime, "command_dispatcher", None) is not None:
@@ -74,6 +102,19 @@ class RuntimeSupervisor:
             critical=False,
         )
         self._set_health("heartbeat", HealthState.STARTING)
+        self.owners.register(
+            "channel_ingress",
+            self.runtime.channels,
+            closer=self.runtime.channels.begin_shutdown,
+            critical=False,
+        )
+        if getattr(self.runtime, "api_runtime", None) is not None:
+            self.owners.register(
+                "api",
+                self.runtime.api_runtime,
+                closer=self.runtime.api_runtime.close,
+            )
+            self._set_health("api", HealthState.STARTING)
 
     def _set_health(self, component: str, state: HealthState, reason: str = "") -> None:
         self._health[component] = HealthReport(component=component, state=state, reason=reason)
@@ -91,44 +132,77 @@ class RuntimeSupervisor:
 
     async def start(self) -> None:
         """Start the legacy services through one non-blocking composition root."""
-        if self._started:
-            return
-        if self.shutdown_coordinator.report is not None:
-            raise RuntimeError("runtime supervisor cannot start after shutdown")
-
-        self._started = True
         try:
-            await self.runtime.cron.start()
-            self._set_health("cron", HealthState.READY)
-            await self.runtime.heartbeat.start()
-            self._set_health("heartbeat", HealthState.READY)
-            self._set_health("message_bus", HealthState.READY)
-            if "intervention" in self._health:
-                self._set_health("intervention", HealthState.READY)
-            self._tasks = [
-                asyncio.create_task(
-                    self.runtime.channels.start_all(), name="nanocat.channels"
-                ),
-                asyncio.create_task(self.runtime.agent.run(), name="nanocat.agent"),
-            ]
-            if getattr(self.runtime, "command_dispatcher", None) is not None:
-                self._tasks.append(
-                    await self.runtime.command_dispatcher.start()
+            async with self._lifecycle_lock:
+                if self._started:
+                    return
+                if self._stop_requested:
+                    return
+                if self.shutdown_coordinator.report is not None:
+                    raise RuntimeError("runtime supervisor cannot start after shutdown")
+
+                self._started = True
+                await self.runtime.cron.start()
+                self._raise_if_stopping()
+                self._set_health("cron", HealthState.READY)
+                await self.runtime.heartbeat.start()
+                self._raise_if_stopping()
+                self._set_health("heartbeat", HealthState.READY)
+                self._set_health("message_bus", HealthState.READY)
+                if "intervention" in self._health:
+                    self._set_health("intervention", HealthState.READY)
+                if "activity" in self._health:
+                    self._set_health("activity", HealthState.READY)
+                if "runtime_files" in self._health:
+                    self._set_health("runtime_files", HealthState.READY)
+                self._tasks = [
+                    asyncio.create_task(
+                        self.runtime.channels.start_all(),
+                        name="nanocat.channels",
+                    ),
+                    asyncio.create_task(self.runtime.agent.run(), name="nanocat.agent"),
+                ]
+                if getattr(self.runtime, "command_dispatcher", None) is not None:
+                    self._tasks.append(await self.runtime.command_dispatcher.start())
+                    self._raise_if_stopping()
+                channels_ready = await self.runtime.channels.wait_ready()
+                self._raise_if_stopping()
+                self._set_health(
+                    "channels",
+                    HealthState.READY if channels_ready else HealthState.DEGRADED,
+                    "" if channels_ready else "one or more channels are not ready",
                 )
-            channels_ready = await self.runtime.channels.wait_ready()
-            self._set_health(
+                self._set_health("agent", HealthState.READY)
+                if "commands" in self._health:
+                    self._set_health("commands", HealthState.READY)
+                api_runtime = getattr(self.runtime, "api_runtime", None)
+                if api_runtime is not None and api_runtime.enabled:
+                    await api_runtime.start()
+                    self._raise_if_stopping()
+                    self._tasks.append(
+                        asyncio.create_task(api_runtime.wait(), name="nanocat.http")
+                    )
+                    self._set_health("api", HealthState.READY)
+                elif "api" in self._health:
+                    self._set_health("api", HealthState.STOPPED, "HTTP surfaces disabled")
+                logger.info("NanoCat runtime is ready")
+        except BaseException:
+            for name in (
+                "cron",
+                "heartbeat",
                 "channels",
-                HealthState.READY if channels_ready else HealthState.DEGRADED,
-                "" if channels_ready else "one or more channels are not ready",
-            )
-            self._set_health("agent", HealthState.READY)
-            if "commands" in self._health:
-                self._set_health("commands", HealthState.READY)
-        except Exception:
-            for name in ("cron", "heartbeat", "channels", "agent", "commands"):
-                self._set_health(name, HealthState.FAILED, "startup failed")
+                "agent",
+                "commands",
+                "api",
+            ):
+                if name in self._health:
+                    self._set_health(name, HealthState.FAILED, "startup failed")
             await self.stop(ShutdownReason(kind="component_failure", detail="startup failed"))
             raise
+
+    def _raise_if_stopping(self) -> None:
+        if self._stop_requested:
+            raise RuntimeError("runtime startup interrupted by shutdown")
 
     async def wait(self) -> None:
         """Wait for tracked service tasks and route failures into shutdown."""
@@ -147,45 +221,51 @@ class RuntimeSupervisor:
             raise
         except Exception:
             logger.exception("Runtime component task failed")
-            for name in ("channels", "agent", "commands"):
-                self._set_health(name, HealthState.FAILED, "runtime task failed")
-            await self.stop(
-                ShutdownReason(kind="component_failure", detail="runtime task failed")
-            )
+            for name in ("channels", "agent", "commands", "api"):
+                if name in self._health:
+                    self._set_health(name, HealthState.FAILED, "runtime task failed")
+            await self.stop(ShutdownReason(kind="component_failure", detail="runtime task failed"))
             raise
 
     async def run(self) -> None:
         """Start and wait for the runtime, with a single failure path."""
         await self.start()
+        if self._stop_requested:
+            return
         try:
             await self.wait()
         finally:
             if not self._stop_requested:
                 await self.stop(ShutdownReason(kind="manual", detail="runtime exited"))
 
-    async def stop(self, reason: ShutdownReason | None = None) -> None:
-        """Stop services once, then join or cancel their tracked tasks."""
-        if self._stop_requested:
-            await self.shutdown_coordinator.shutdown(
-                reason or ShutdownReason(kind="manual", detail="stop requested")
+    async def stop(self, reason: ShutdownReason | None = None) -> ShutdownReport:
+        """Share one complete shutdown operation across every caller."""
+        if self._stop_task is None:
+            self._stop_requested = True
+            stop_reason = reason or ShutdownReason(kind="manual", detail="stop requested")
+            self._stop_task = asyncio.create_task(
+                self._stop_once(stop_reason),
+                name="nanocat.supervisor-stop",
             )
-            return
-        self._stop_requested = True
-        restart_task = self._restart_task
-        if (
-            restart_task is not None
-            and restart_task is not asyncio.current_task()
-            and not restart_task.done()
-        ):
-            restart_task.cancel()
-            await asyncio.gather(restart_task, return_exceptions=True)
-            self._restart_task = None
-        for name, report in self._health.items():
-            if report.state not in {HealthState.STOPPED, HealthState.FAILED}:
-                self._set_health(name, HealthState.DRAINING, "shutdown requested")
-        report = await self.shutdown_coordinator.shutdown(
-            reason or ShutdownReason(kind="manual", detail="stop requested")
-        )
+        task = self._stop_task
+        cancelled = False
+        while True:
+            try:
+                report = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return report
+
+    async def _stop_once(self, reason: ShutdownReason) -> ShutdownReport:
+        """Stop owners, join service tasks, and publish final health exactly once."""
+        async with self._lifecycle_lock:
+            for name, report in self._health.items():
+                if report.state not in {HealthState.STOPPED, HealthState.FAILED}:
+                    self._set_health(name, HealthState.DRAINING, "shutdown requested")
+            report = await self.shutdown_coordinator.shutdown(reason)
         for task in self._tasks:
             if task.done():
                 continue
@@ -210,6 +290,7 @@ class RuntimeSupervisor:
                 self._set_health(name, HealthState.FAILED, "shutdown incomplete")
             else:
                 self._set_health(name, HealthState.STOPPED, report.reason.detail)
+        return report
 
     async def request_restart(self, channel: str, chat_id: str) -> None:
         """Schedule a controlled process restart after runtime shutdown begins."""
@@ -242,7 +323,24 @@ class RuntimeSupervisor:
 
         async def _restart() -> None:
             await asyncio.sleep(1)
-            await self.stop(ShutdownReason(kind="restart", detail="restart requested"))
+            report = await self.stop(
+                ShutdownReason(kind="restart", detail="restart requested")
+            )
+            critical_failed = [
+                name
+                for name in report.failed
+                if name not in self.owners.names() or self.owners.get(name).critical
+            ]
+            if critical_failed:
+                try:
+                    notify_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                logger.error(
+                    "Restart aborted after critical shutdown failures: {}",
+                    ", ".join(critical_failed),
+                )
+                return
             os.execv(sys.executable, [sys.executable, "-m", "nanocat"] + sys.argv[1:])
 
         self._restart_task = asyncio.create_task(_restart(), name="nanocat.restart")

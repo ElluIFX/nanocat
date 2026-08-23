@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import shutil
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,36 @@ from nanocat.agent.tools.base import Tool, tool_err, tool_ok
 from nanocat.utils.helpers import detect_image_mime
 
 _err = tool_err  # local alias to keep error call sites short
+
+_DEFAULT_READ_CHARS = 4000
+_MAX_READ_CHARS = 5000
+
+
+def _serialized_chars(value: Any) -> int:
+    """Return the compact JSON size used by bounded read/search payloads."""
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _fit_text(text: str, max_chars: int, marker: str = "... [line truncated]") -> str:
+    """Fit one string within a serialized JSON character budget."""
+    if _serialized_chars(text) <= max_chars:
+        return text
+    if _serialized_chars(marker) > max_chars:
+        return ""
+
+    low = 0
+    high = len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _serialized_chars(text[:middle] + marker) <= max_chars:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + marker
+
+
+def _bounded_chars(value: int) -> int:
+    return max(256, min(value, _MAX_READ_CHARS))
 
 
 def _resolve_path(
@@ -28,11 +59,32 @@ def _resolve_path(
 
 
 class _FsTool(Tool):
-    def __init__(self, workspace: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        runtime_file_store: Any | None = None,
+    ):
         self._workspace = workspace
+        self._runtime_file_store = runtime_file_store
+        self._runtime_root = (
+            runtime_file_store.root
+            if runtime_file_store is not None
+            else (workspace / "_runtime_temp").resolve()
+            if workspace
+            else None
+        )
 
     def _resolve(self, path: str) -> Path:
         return _resolve_path(path, self._workspace)
+
+    def _mark_runtime_access(self, path: Path) -> None:
+        if self._runtime_file_store is None or self._runtime_root is None:
+            return
+        try:
+            path.relative_to(self._runtime_root)
+            self._runtime_file_store.mark_accessed(path)
+        except Exception:
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +103,8 @@ class ReadFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Read the contents of a file. Returns numbered lines. "
-            "Use offset and limit to paginate through large files."
+            "Use offset and limit to paginate through large files, and column_offset "
+            "to continue an oversized single line."
         )
 
     @property
@@ -66,6 +119,15 @@ class ReadFileTool(_FsTool):
                     "description": "Line number to start reading from (1-indexed)",
                     "minimum": 1,
                 },
+                "column_offset": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": (
+                        "Character offset within the first selected line; use the returned "
+                        "next_column_offset to continue an oversized single line"
+                    ),
+                    "minimum": 0,
+                },
                 "limit": {
                     "type": "integer",
                     "default": 2000,
@@ -77,6 +139,13 @@ class ReadFileTool(_FsTool):
                     "default": "utf-8",
                     "description": "Text encoding (python-style)",
                 },
+                "max_chars": {
+                    "type": "integer",
+                    "default": _DEFAULT_READ_CHARS,
+                    "minimum": 256,
+                    "maximum": _MAX_READ_CHARS,
+                    "description": "Maximum serialized characters returned in content",
+                },
             },
             "required": ["path"],
         }
@@ -85,8 +154,10 @@ class ReadFileTool(_FsTool):
         self,
         path: str,
         offset: int = 1,
+        column_offset: int = 0,
         limit: int | None = None,
         encoding: str = "utf-8",
+        max_chars: int = _DEFAULT_READ_CHARS,
         **kwargs: Any,
     ) -> str:
         try:
@@ -96,25 +167,78 @@ class ReadFileTool(_FsTool):
             if not fp.is_file():
                 return _err(f"Not a file: {path}")
 
-            all_lines = fp.read_text(encoding=encoding).splitlines()
-            total = len(all_lines)
-
             if offset < 1:
                 offset = 1
+            column_offset = max(0, column_offset)
+            line_limit = max(1, limit or self._DEFAULT_LIMIT)
+            char_limit = _bounded_chars(max_chars)
+            numbered: list[str] = []
+            total = 0
+            last_included = 0
+            line_truncated = False
+            stopped_at: int | None = None
+            next_column_offset: int | None = None
+
+            with fp.open("r", encoding=encoding) as handle:
+                for line_number, raw_line in enumerate(handle, start=1):
+                    total = line_number
+                    if line_number < offset or stopped_at is not None:
+                        continue
+                    if len(numbered) >= line_limit:
+                        stopped_at = line_number
+                        continue
+
+                    line = raw_line.rstrip("\r\n")
+                    current_column = column_offset if line_number == offset else 0
+                    visible_line = line[current_column:]
+                    prefix = f"{line_number}| "
+                    rendered = f"{prefix}{visible_line}"
+                    candidate = "\n".join([*numbered, rendered])
+                    if _serialized_chars(candidate) <= char_limit:
+                        numbered.append(rendered)
+                        last_included = line_number
+                        continue
+
+                    if numbered:
+                        stopped_at = line_number
+                        continue
+
+                    fitted = _fit_text(rendered, char_limit)
+                    numbered.append(fitted)
+                    last_included = line_number
+                    line_truncated = True
+                    visible_chars = max(
+                        0,
+                        len(fitted) - len(prefix) - len("... [line truncated]"),
+                    )
+                    stopped_at = line_number
+                    next_column_offset = current_column + visible_chars
+
             if total == 0:
-                return tool_ok(total_lines=0, content="")
+                self._mark_runtime_access(fp)
+                return tool_ok(
+                    total_lines=0,
+                    content="",
+                    truncated=False,
+                    next_offset=None,
+                    next_column_offset=None,
+                )
             if offset > total:
                 return _err(f"offset {offset} is beyond end of file ({total} lines)")
 
-            start = offset - 1
-            end = min(start + (limit or self._DEFAULT_LIMIT), total)
-            numbered = [f"{start + i + 1}| {line}" for i, line in enumerate(all_lines[start:end])]
             content = "\n".join(numbered)
+            next_offset = stopped_at if stopped_at is not None and stopped_at <= total else None
+            truncated = line_truncated or next_offset is not None
 
+            self._mark_runtime_access(fp)
             return tool_ok(
                 total_lines=total,
-                showing=[offset, end],
+                showing=[offset, last_included],
                 content=content,
+                truncated=truncated,
+                next_offset=next_offset,
+                next_column_offset=next_column_offset,
+                line_truncated=line_truncated,
             )
         except PermissionError as e:
             return _err(str(e))
@@ -196,6 +320,7 @@ class LoadImageTool(_FsTool):
             exif = self._extract_exif(fp)
             b64 = base64.b64encode(raw).decode("ascii")
             meta_text = json.dumps(exif, ensure_ascii=False, indent=2)
+            self._mark_runtime_access(fp)
 
             return [
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
@@ -629,10 +754,23 @@ class GrepFileTool(_FsTool):
                     "default": 50,
                     "description": "Max matches to return",
                 },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 1,
+                    "description": "Line number to start searching from (1-indexed)",
+                },
                 "encoding": {
                     "type": "string",
                     "default": "utf-8",
                     "description": "Text encoding (python-style)",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "default": _DEFAULT_READ_CHARS,
+                    "minimum": 256,
+                    "maximum": _MAX_READ_CHARS,
+                    "description": "Maximum serialized characters returned in results",
                 },
             },
             "required": ["path", "pattern"],
@@ -644,7 +782,9 @@ class GrepFileTool(_FsTool):
         pattern: str,
         context_lines: int = 0,
         max_matches: int = 50,
+        offset: int = 1,
         encoding: str = "utf-8",
+        max_chars: int = _DEFAULT_READ_CHARS,
         **kwargs: Any,
     ) -> str:
         import re as _re
@@ -653,7 +793,8 @@ class GrepFileTool(_FsTool):
             fp = self._resolve(path)
             if not fp.exists():
                 return _err(f"File not found: {path}")
-            lines = fp.read_text(encoding=encoding).splitlines()
+            if not fp.is_file():
+                return _err(f"Not a file: {path}")
             rx = _re.compile(pattern)
         except PermissionError as e:
             return _err(str(e))
@@ -669,29 +810,93 @@ class GrepFileTool(_FsTool):
 
         results: list[dict[str, Any]] = []
         seen: set[int] = set()
-        match_count = 0
+        returned_matches = 0
+        post_context_until = 0
+        truncated = False
+        next_offset: int | None = None
+        char_limit = _bounded_chars(max_chars)
+        context_lines = min(max(0, context_lines), max(1, char_limit // 32))
+        previous: deque[tuple[int, str]] = deque(maxlen=context_lines)
+        offset = max(1, offset)
+        max_matches = max(1, max_matches)
 
-        for i, line in enumerate(lines):
-            if rx.search(line):
-                match_count += 1
-                if match_count > max_matches:
-                    break
-                start = max(0, i - context_lines)
-                end = min(len(lines), i + context_lines + 1)
-                for j in range(start, end):
-                    if j not in seen:
-                        seen.add(j)
-                        results.append(
-                            {
-                                "line": j + 1,
-                                "content": lines[j],
-                                "match": j == i,
-                            }
+        def append_entries(entries: list[dict[str, Any]]) -> bool:
+            candidate = [*results, *entries]
+            if _serialized_chars(candidate) > char_limit:
+                return False
+            results.extend(entries)
+            seen.update(entry["line"] for entry in entries)
+            return True
+
+        try:
+            with fp.open("r", encoding=encoding) as handle:
+                for line_number, raw_line in enumerate(handle, start=1):
+                    line = raw_line.rstrip("\r\n")
+                    is_match = line_number >= offset and rx.search(line) is not None
+
+                    if is_match:
+                        if returned_matches >= max_matches:
+                            truncated = True
+                            next_offset = line_number
+                            break
+
+                        group = [
+                            {"line": number, "content": content, "match": False}
+                            for number, content in previous
+                            if number not in seen
+                        ]
+                        group.append({"line": line_number, "content": line, "match": True})
+
+                        if not append_entries(group):
+                            match_entry = {"line": line_number, "content": line, "match": True}
+                            if results or not append_entries([match_entry]):
+                                if results:
+                                    truncated = True
+                                    next_offset = line_number
+                                    break
+                                match_entry["content"] = _fit_text(
+                                    line, max(1, char_limit - 80)
+                                )
+                                match_entry["line_truncated"] = True
+                                results.append(match_entry)
+                                seen.add(line_number)
+                            returned_matches += 1
+                            truncated = True
+                            next_offset = line_number + 1
+                            break
+
+                        returned_matches += 1
+                        post_context_until = max(
+                            post_context_until, line_number + context_lines
                         )
+                    elif line_number <= post_context_until and line_number not in seen:
+                        context_entry = {
+                            "line": line_number,
+                            "content": line,
+                            "match": False,
+                        }
+                        if not append_entries([context_entry]):
+                            truncated = True
+                            next_offset = line_number + 1
+                            break
 
+                    previous.append((line_number, _fit_text(line, char_limit)))
+        except PermissionError as e:
+            return _err(str(e))
+        except (UnicodeDecodeError, LookupError) as e:
+            return _err(
+                f"cannot decode {path} as {encoding!r}: {e}",
+                "Try another encoding (e.g. encoding='gbk', 'big5', or 'latin-1').",
+            )
+        except Exception as e:
+            return _err(str(e))
+
+        self._mark_runtime_access(fp)
         return tool_ok(
-            matches=match_count if match_count <= max_matches else f"{max_matches}+",
+            matches=returned_matches,
             results=results,
+            truncated=truncated,
+            next_offset=next_offset,
         )
 
 
@@ -1113,6 +1318,7 @@ class FileHexTool(_FsTool):
                 ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
                 lines.append(f"{addr}  {hex_part}  {ascii_part}")
 
+            self._mark_runtime_access(fp)
             return tool_ok(
                 offset=offset,
                 length=actual,

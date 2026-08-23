@@ -11,8 +11,9 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from nanocat.agent.context_artifacts import ContextArtifactStore
 from nanocat.agent.context_budget import ContextBudget
+from nanocat.agent.memory import format_runtime_transcript
+from nanocat.agent.runtime_files import RuntimeFileStore
 from nanocat.agent.tools.base import Tool
 from nanocat.agent.tools.registry import ToolRegistry
 from nanocat.application.providers import RuntimeProviderResolver
@@ -20,6 +21,7 @@ from nanocat.application.tool_executor import ToolExecutionContext, ToolExecutor
 from nanocat.bus.events import InboundMessage
 from nanocat.bus.queue import MessageBus
 from nanocat.core.messages import ConversationRef
+from nanocat.observability.redaction import redact_mapping
 from nanocat.utils.helpers import build_assistant_message
 
 # Tools excluded from subagents: nesting prevention, message sending,
@@ -63,7 +65,7 @@ class SubagentManager:
         self._provider_resolver = provider_resolver
         self._vision_fallback = vision_fallback
         self._config = config
-        self._context_artifacts: ContextArtifactStore | None = None
+        self._runtime_files: RuntimeFileStore | None = None
         self._steer_inject: dict[str, list[InboundMessage]] | None = None
         self._is_live: Callable[[str], bool] | None = None  # set by AgentLoop
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -75,9 +77,9 @@ class SubagentManager:
         """Attach the runtime security boundary after AgentLoop composition."""
         self._tool_executor = tool_executor
 
-    def set_context_artifacts(self, store: ContextArtifactStore) -> None:
-        """Share the runtime artifact store with isolated subagent sessions."""
-        self._context_artifacts = store
+    def set_runtime_files(self, store: RuntimeFileStore) -> None:
+        """Share the runtime file owner with subagent turns."""
+        self._runtime_files = store
 
     @property
     def model(self) -> str:
@@ -140,12 +142,14 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
+        storage_scope: str | None = None,
         principal_id: str = "user",
     ) -> str:
         origin = {
             "channel": origin_channel,
             "chat_id": origin_chat_id,
             "principal_id": principal_id,
+            "storage_scope": storage_scope or session_key or f"{origin_channel}:{origin_chat_id}",
         }
         spawned = []
         for t in tasks:
@@ -238,6 +242,7 @@ class SubagentManager:
         tool_context = ToolExecutionContext(
             turn_id=f"subagent:{task_id}",
             session_key=f"subagent:{origin['channel']}:{origin['chat_id']}:{task_id}",
+            storage_scope=origin.get("storage_scope") or f"{origin['channel']}:{origin['chat_id']}",
             conversation=ConversationRef(
                 origin["channel"], origin["chat_id"], f"{origin['channel']}:{origin['chat_id']}"
             ),
@@ -270,7 +275,13 @@ class SubagentManager:
                 tool_defs = tools.get_definitions()
                 budget = context_budget.inspect(messages, tool_defs)
                 if budget.over_budget:
-                    messages = context_budget.trim(messages, budget.target_tokens)
+                    messages = self._trim_context_to_runtime_file(
+                        context_budget,
+                        messages,
+                        budget.target_tokens,
+                        tool_context,
+                        source_id=f"{task_id}-{iteration}-preflight",
+                    )
                     budget = context_budget.inspect(messages, tool_defs)
                 if budget.over_budget:
                     final_result = (
@@ -290,7 +301,13 @@ class SubagentManager:
                 if response.finish_reason == "error" and self._is_context_overflow(
                     response.content
                 ):
-                    reduced = context_budget.trim(messages, max(1024, budget.target_tokens // 2))
+                    reduced = self._trim_context_to_runtime_file(
+                        context_budget,
+                        messages,
+                        max(1024, budget.target_tokens // 2),
+                        tool_context,
+                        source_id=f"{task_id}-{iteration}-provider-retry",
+                    )
                     if reduced != messages:
                         messages = reduced
                         response = await self._vision_fallback.chat_with_fallback(
@@ -310,12 +327,18 @@ class SubagentManager:
                             thinking_blocks=response.thinking_blocks,
                         )
                     )
+                    image_blocks: list[dict[str, Any]] = []
                     for tool_call in response.tool_calls:
+                        logged_args = (
+                            {"fields": sorted(tool_call.arguments)}
+                            if tool_call.name.startswith("ssh_")
+                            else redact_mapping(tool_call.arguments)
+                        )
                         logger.debug(
                             "Subagent [{}] executing: {} with arguments: {}",
                             task_id,
                             tool_call.name,
-                            json.dumps(tool_call.arguments, ensure_ascii=False),
+                            json.dumps(logged_args, ensure_ascii=False),
                         )
                         result = await executor.execute(
                             tool_call.name,
@@ -324,13 +347,6 @@ class SubagentManager:
                         )
                         if bridged := self._bridge_image_tool_result(tool_call.name, result):
                             tool_text, user_blocks = bridged
-                            if self._context_artifacts is not None:
-                                self._context_artifacts.capture(
-                                    tool_context.session_key,
-                                    tool_call.name,
-                                    tool_call.id,
-                                    result,
-                                )
                             messages.append(
                                 {
                                     "role": "tool",
@@ -339,11 +355,11 @@ class SubagentManager:
                                     "content": tool_text,
                                 }
                             )
-                            messages.append({"role": "user", "content": user_blocks})
+                            image_blocks.extend(user_blocks)
                             continue
-                        if self._context_artifacts is not None:
-                            result = self._context_artifacts.capture(
-                                tool_context.session_key,
+                        if self._runtime_files is not None:
+                            result = self._runtime_files.capture(
+                                tool_context.storage_scope,
                                 tool_call.name,
                                 tool_call.id,
                                 result,
@@ -356,6 +372,8 @@ class SubagentManager:
                                 "content": result,
                             }
                         )
+                    if image_blocks:
+                        messages.append({"role": "user", "content": image_blocks})
                 else:
                     final_result = response.content
                     break
@@ -363,6 +381,46 @@ class SubagentManager:
             await executor.finish_turn(tool_context)
 
         return final_result or "Task completed but no final response was generated."
+
+    def _trim_context_to_runtime_file(
+        self,
+        budget: ContextBudget,
+        messages: list[dict[str, Any]],
+        target_tokens: int,
+        tool_context: ToolExecutionContext,
+        *,
+        source_id: str,
+    ) -> list[dict[str, Any]]:
+        """Trim a subagent prompt and retain a best-effort readable copy."""
+        trimmed = budget.trim_with_omitted(messages, target_tokens)
+        if not trimmed.omitted or self._runtime_files is None:
+            return trimmed.messages
+        try:
+            ref = self._runtime_files.snapshot(
+                tool_context.storage_scope,
+                "context",
+                format_runtime_transcript(trimmed.omitted),
+                source_name="subagent_context_budget_trim",
+                source_id=source_id,
+                suffix=".md",
+            )
+        except Exception as exc:
+            logger.warning("Subagent context copy failed for {}: {}", source_id, exc)
+            ref = None
+        if ref is None:
+            return trimmed.messages
+        notice = (
+            "\n\nOlder messages were omitted from this model request to fit the context budget. "
+            f"Use read_file or grep_file on `{ref.relative_path}` if details are needed."
+        )
+        reduced = list(trimmed.messages)
+        if reduced and reduced[0].get("role") == "system":
+            system = dict(reduced[0])
+            system["content"] = f"{system.get('content') or ''}{notice}"
+            reduced[0] = system
+        else:
+            reduced.insert(0, {"role": "system", "content": notice.strip()})
+        return reduced
 
     @staticmethod
     def _is_context_overflow(content: str | None) -> bool:
@@ -399,13 +457,14 @@ class SubagentManager:
     async def run_and_collect(
         self,
         tasks: list[tuple[str, str | None]],
+        origin: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Run multiple subagents concurrently and return all results inline."""
 
         async def _run_one(task_text: str, label: str) -> dict[str, Any]:
             task_id = str(uuid.uuid4())[:8]
             try:
-                result = await self._execute_task(task_id, task_text, label)
+                result = await self._execute_task(task_id, task_text, label, origin)
                 return {"label": label, "result": result, "status": "ok"}
             except Exception as e:
                 return {"label": label, "result": str(e), "status": "error"}
@@ -427,6 +486,13 @@ class SubagentManager:
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         sk = f"{origin['channel']}:{origin['chat_id']}"
+        if self._runtime_files is not None:
+            result = self._runtime_files.capture(
+                origin.get("storage_scope") or sk,
+                "subagent_result",
+                task_id,
+                result,
+            )
         announce_content = json.dumps(
             {
                 "subagent_id": task_id,
@@ -444,6 +510,7 @@ class SubagentManager:
             sender_id="subagent",
             chat_id=sk,
             content=announce_content,
+            session_key_override=sk,
         )
         # Fold into the running turn only if one is live for this session; otherwise
         # publish to the bus so an idle agent is woken up to report the result.
@@ -521,6 +588,9 @@ class SubagentSpawnTool(Tool):
         self._origin_channel: ContextVar[str] = ContextVar("subagent_origin_channel", default="cli")
         self._origin_chat_id: ContextVar[str] = ContextVar("subagent_origin_chat", default="direct")
         self._session_key: ContextVar[str] = ContextVar("subagent_session", default="cli:direct")
+        self._storage_scope: ContextVar[str] = ContextVar(
+            "subagent_storage_scope", default="cli:direct"
+        )
         self._principal_id: ContextVar[str] = ContextVar("subagent_principal", default="user")
 
     def set_context(self, channel: str, chat_id: str, principal_id: str = "user") -> None:
@@ -528,6 +598,9 @@ class SubagentSpawnTool(Tool):
         self._origin_chat_id.set(chat_id)
         self._session_key.set(f"{channel}:{chat_id}")
         self._principal_id.set(principal_id)
+
+    def set_storage_scope(self, storage_scope: str) -> None:
+        self._storage_scope.set(storage_scope)
 
     @property
     def name(self) -> str:
@@ -568,6 +641,7 @@ class SubagentSpawnTool(Tool):
             self._origin_channel.get(),
             self._origin_chat_id.get(),
             self._session_key.get(),
+            self._storage_scope.get(),
             self._principal_id.get(),
         )
 
@@ -575,6 +649,20 @@ class SubagentSpawnTool(Tool):
 class SubagentGatherTool(Tool):
     def __init__(self, manager: SubagentManager):
         self._manager = manager
+        self._origin_channel: ContextVar[str] = ContextVar("gather_origin_channel", default="cli")
+        self._origin_chat_id: ContextVar[str] = ContextVar("gather_origin_chat", default="direct")
+        self._principal_id: ContextVar[str] = ContextVar("gather_principal", default="user")
+        self._storage_scope: ContextVar[str] = ContextVar(
+            "gather_storage_scope", default="cli:direct"
+        )
+
+    def set_context(self, channel: str, chat_id: str, principal_id: str = "user") -> None:
+        self._origin_channel.set(channel)
+        self._origin_chat_id.set(chat_id)
+        self._principal_id.set(principal_id)
+
+    def set_storage_scope(self, storage_scope: str) -> None:
+        self._storage_scope.set(storage_scope)
 
     @property
     def name(self) -> str:
@@ -610,7 +698,15 @@ class SubagentGatherTool(Tool):
 
     async def execute(self, tasks: list[dict[str, Any]], **kwargs: Any) -> str:
         task_tuples = [(t["task"], t.get("label")) for t in tasks]
-        results = await self._manager.run_and_collect(task_tuples)
+        results = await self._manager.run_and_collect(
+            task_tuples,
+            origin={
+                "channel": self._origin_channel.get(),
+                "chat_id": self._origin_chat_id.get(),
+                "principal_id": self._principal_id.get(),
+                "storage_scope": self._storage_scope.get(),
+            },
+        )
         return json.dumps(
             {"ok": True, "total": len(results), "results": results}, ensure_ascii=False
         )
