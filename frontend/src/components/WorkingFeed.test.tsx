@@ -49,7 +49,7 @@ describe("WorkingFeed", () => {
     }]} status="failed" />);
 
     expect(screen.getByText("Provider request failed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Worked for/ })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: /Failed after/ })).toHaveAttribute("aria-expanded", "true");
   });
 
   it("settles superseded running nodes while the current step remains active", () => {
@@ -135,7 +135,7 @@ describe("WorkingFeed", () => {
     expect(screen.getByText("Thinking")).toBeInTheDocument();
   });
 
-  it("keeps queued user guidance outside the working ledger", () => {
+  it("shows queued guidance as an explicit control event", () => {
     render(<WorkingFeed active events={[{
       eventId: "queued-guidance",
       sequence: 1,
@@ -145,7 +145,63 @@ describe("WorkingFeed", () => {
       summary: "Guidance queued",
     }]} />);
 
+    expect(screen.getByText("Guidance queued")).toBeInTheDocument();
+  });
+
+  it("replaces queued guidance only after an explicit applied event", () => {
+    render(<WorkingFeed active events={[
+      {
+        eventId: "queued-guidance",
+        nodeId: "steer:request-1",
+        sequence: 1,
+        timestamp: "2026-08-23T00:00:00Z",
+        type: "turn.steer_queued",
+        status: "queued",
+        summary: "Guidance queued",
+      },
+      {
+        eventId: "applied-guidance",
+        nodeId: "steer:request-1",
+        sequence: 2,
+        timestamp: "2026-08-23T00:00:01Z",
+        type: "turn.steer_applied",
+        status: "completed",
+        summary: "Guidance applied",
+      },
+    ]} />);
+
     expect(screen.queryByText("Guidance queued")).not.toBeInTheDocument();
-    expect(screen.getByText("Preparing run")).toBeInTheDocument();
+    expect(screen.getByText("Guidance applied")).toBeInTheDocument();
+  });
+
+  it("folds todo updates into one checklist card", () => {
+    const { container } = render(<WorkingFeed events={[
+      {
+        eventId: "todo-create",
+        sequence: 1,
+        timestamp: "2026-08-23T00:00:00Z",
+        type: "tool.event",
+        status: "completed",
+        toolCallId: "todo-call-1",
+        toolName: "todo",
+        redactedInput: { action: "create", name: "Release", tasks: ["Build", "Ship"] },
+        redactedOutput: { todo: { id: "todo-1", name: "Release", action: "create", completed: false, tasks: [{ index: 1, task: "Build", status: "PENDING" }, { index: 2, task: "Ship", status: "PENDING" }] } },
+      },
+      {
+        eventId: "todo-update",
+        sequence: 2,
+        timestamp: "2026-08-23T00:00:01Z",
+        type: "tool.event",
+        status: "completed",
+        toolCallId: "todo-call-2",
+        toolName: "todo",
+        redactedInput: { action: "update", id: "todo-1", index: 1, status: "COMPLETED" },
+        redactedOutput: { todo: { id: "todo-1", name: "Release", action: "update", completed: false, tasks: [{ index: 1, task: "Build", status: "COMPLETED" }, { index: 2, task: "Ship", status: "PENDING" }] } },
+      },
+    ]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Worked for/ }));
+    expect(container.querySelectorAll(".todo-card")).toHaveLength(1);
+    expect(container.querySelector(".todo-card header small")).toHaveTextContent("1/2 complete");
   });
 });

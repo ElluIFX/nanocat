@@ -13,6 +13,8 @@ class UserTextCatalog:
     stop_tasks: str = "Stopped {count} task(s)."
     stop_idle: str = "No active task to stop."
     stop_persist_failed: str = "Stopped the task, but failed to save its terminal record."
+    turn_stopped: str = "Turn stopped by user."
+    turn_cancelled: str = "Turn interrupted."
     turn_interrupted: str = "Turn interrupted because the runtime stopped."
     command_idle_only: str = "This command is available only when the session is idle."
     command_lane_busy: str = "The command lane is busy. Try again shortly."

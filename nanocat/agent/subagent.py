@@ -144,12 +144,16 @@ class SubagentManager:
         session_key: str | None = None,
         storage_scope: str | None = None,
         principal_id: str = "user",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         origin = {
             "channel": origin_channel,
             "chat_id": origin_chat_id,
             "principal_id": principal_id,
             "storage_scope": storage_scope or session_key or f"{origin_channel}:{origin_chat_id}",
+            "model": model,
+            "reasoning_effort": reasoning_effort,
         }
         spawned = []
         for t in tasks:
@@ -231,7 +235,7 @@ class SubagentManager:
         task_id: str,
         task: str,
         label: str,
-        origin: dict[str, str] | None = None,
+        origin: dict[str, Any] | None = None,
     ) -> str:
         """Run a subagent to completion and return the final result string."""
         tools = self._tools.filtered(_SUBAGENT_EXCLUDED)
@@ -265,6 +269,16 @@ class SubagentManager:
 
             budget_config = get_runtime_config()
         context_budget = ContextBudget(budget_config)
+        task_model = str(origin.get("model") or self.model)
+        task_provider = (
+            self._provider_resolver.resolve(task_model)
+            if self._provider_resolver is not None
+            else self.provider
+        )
+        task_effort = origin.get(
+            "reasoning_effort",
+            budget_config.agents.defaults.reasoning_effort,
+        )
 
         try:
             while iteration < max_iterations:
@@ -293,10 +307,11 @@ class SubagentManager:
                 if self._vision_fallback is None:
                     raise RuntimeError("subagent vision fallback service is unavailable")
                 response = await self._vision_fallback.chat_with_fallback(
-                    self.provider,
+                    task_provider,
                     messages=messages,
                     tools=tool_defs,
-                    model=self.model,
+                    model=task_model,
+                    reasoning_effort=task_effort,
                 )
                 if response.finish_reason == "error" and self._is_context_overflow(
                     response.content
@@ -311,10 +326,11 @@ class SubagentManager:
                     if reduced != messages:
                         messages = reduced
                         response = await self._vision_fallback.chat_with_fallback(
-                            self.provider,
+                            task_provider,
                             messages=messages,
                             tools=tool_defs,
-                            model=self.model,
+                            model=task_model,
+                            reasoning_effort=task_effort,
                         )
 
                 if response.has_tool_calls:
@@ -442,7 +458,7 @@ class SubagentManager:
         task_id: str,
         task: str,
         label: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
     ) -> None:
         """Execute the subagent task and announce the result via the message bus."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -457,7 +473,7 @@ class SubagentManager:
     async def run_and_collect(
         self,
         tasks: list[tuple[str, str | None]],
-        origin: dict[str, str] | None = None,
+        origin: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Run multiple subagents concurrently and return all results inline."""
 
@@ -481,7 +497,7 @@ class SubagentManager:
         label: str,
         task: str,
         result: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
         status: str,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
@@ -592,6 +608,11 @@ class SubagentSpawnTool(Tool):
             "subagent_storage_scope", default="cli:direct"
         )
         self._principal_id: ContextVar[str] = ContextVar("subagent_principal", default="user")
+        self._model: ContextVar[str | None] = ContextVar("subagent_model", default=None)
+        self._reasoning_effort: ContextVar[str | None] = ContextVar(
+            "subagent_reasoning_effort",
+            default=None,
+        )
 
     def set_context(self, channel: str, chat_id: str, principal_id: str = "user") -> None:
         self._origin_channel.set(channel)
@@ -601,6 +622,14 @@ class SubagentSpawnTool(Tool):
 
     def set_storage_scope(self, storage_scope: str) -> None:
         self._storage_scope.set(storage_scope)
+
+    def set_turn_defaults(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> None:
+        self._model.set(model)
+        self._reasoning_effort.set(reasoning_effort)
 
     @property
     def name(self) -> str:
@@ -643,6 +672,8 @@ class SubagentSpawnTool(Tool):
             self._session_key.get(),
             self._storage_scope.get(),
             self._principal_id.get(),
+            self._model.get(),
+            self._reasoning_effort.get(),
         )
 
 
@@ -655,6 +686,11 @@ class SubagentGatherTool(Tool):
         self._storage_scope: ContextVar[str] = ContextVar(
             "gather_storage_scope", default="cli:direct"
         )
+        self._model: ContextVar[str | None] = ContextVar("gather_model", default=None)
+        self._reasoning_effort: ContextVar[str | None] = ContextVar(
+            "gather_reasoning_effort",
+            default=None,
+        )
 
     def set_context(self, channel: str, chat_id: str, principal_id: str = "user") -> None:
         self._origin_channel.set(channel)
@@ -663,6 +699,14 @@ class SubagentGatherTool(Tool):
 
     def set_storage_scope(self, storage_scope: str) -> None:
         self._storage_scope.set(storage_scope)
+
+    def set_turn_defaults(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> None:
+        self._model.set(model)
+        self._reasoning_effort.set(reasoning_effort)
 
     @property
     def name(self) -> str:
@@ -705,6 +749,8 @@ class SubagentGatherTool(Tool):
                 "chat_id": self._origin_chat_id.get(),
                 "principal_id": self._principal_id.get(),
                 "storage_scope": self._storage_scope.get(),
+                "model": self._model.get(),
+                "reasoning_effort": self._reasoning_effort.get(),
             },
         )
         return json.dumps(

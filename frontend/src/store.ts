@@ -8,6 +8,7 @@ import type {
   ConnectionState,
   LogEntry,
   ModelInfo,
+  RuntimeModelState,
   RuntimeSnapshot,
   SessionDetail,
   SessionSummary,
@@ -20,6 +21,7 @@ export const currentSession = signal<SessionDetail | null>(null);
 export const runtime = signal<RuntimeSnapshot | null>(null);
 export const approvals = signal<ApprovalRequest[]>([]);
 export const models = signal<ModelInfo[]>([]);
+export const modelSettings = signal<RuntimeModelState | null>(null);
 export const settings = signal<SettingSection[]>([]);
 export const settingsWritable = signal(false);
 export const settingsDegradedReason = signal<string | null>(null);
@@ -260,8 +262,20 @@ export async function loadEarlierTrajectory(): Promise<void> {
   }
 }
 
-const TERMINAL_EVENT_TYPES = new Set(["assistant.final", "turn.completed", "turn.failed", "turn.cancelled"]);
+const TERMINAL_EVENT_TYPES = new Set(["assistant.final", "turn.completed", "turn.failed", "turn.rejected", "turn.cancelled"]);
 const TRANSIENT_EVENT_STATUSES = new Set(["queued", "running", "cancelling"]);
+const SESSION_STATUS_EVENT_TYPES = new Set([
+  "turn.queued",
+  "turn.cancelling",
+  "assistant.progress",
+  "assistant.final",
+  "turn.completed",
+  "turn.failed",
+  "turn.rejected",
+  "turn.cancelled",
+  "approval.pending",
+  "approval.updated",
+]);
 
 function followsTerminalEvent(events: TimelineEvent[], incoming: TimelineEvent): boolean {
   if (!incoming.turnId || !incoming.status || !TRANSIENT_EVENT_STATUSES.has(incoming.status)) return false;
@@ -272,14 +286,15 @@ export function appendEvent(event: TimelineEvent): boolean {
   const session = currentSession.value;
   if (!session || (event.sessionId && event.sessionId !== session.id)) return false;
   if (followsTerminalEvent(session.events, event)) return false;
+  sessionLoadGeneration += 1;
   const events = mergeTimelineEvent(session.events, event);
   currentSession.value = { ...session, events };
-  if (event.status) {
+  if (event.status && SESSION_STATUS_EVENT_TYPES.has(event.type)) {
     currentSession.value = { ...currentSession.value, status: event.status };
     sessions.value = sessions.value.map((item) => item.id === session.id ? { ...item, status: event.status! } : item);
   }
   if (event.type === "approval.pending" || event.type === "approval.updated") void refreshApprovals(session.id);
-  if (["assistant.final", "turn.completed", "turn.failed", "turn.cancelled"].includes(event.type)) {
+  if (["assistant.final", "turn.completed", "turn.failed", "turn.rejected", "turn.cancelled"].includes(event.type)) {
     void reloadCurrentSession();
   }
   return true;
@@ -294,7 +309,7 @@ export function appendGlobalEvent(event: TimelineEvent): void {
     found = true;
     return {
       ...item,
-      status: event.status ?? item.status,
+      status: event.status && SESSION_STATUS_EVENT_TYPES.has(event.type) ? event.status : item.status,
       updatedAt: event.timestamp || item.updatedAt,
       preview: event.type === "turn.queued" && event.content ? event.content : item.preview,
     };
@@ -314,9 +329,19 @@ export async function refreshApprovals(sessionId?: string): Promise<void> {
   }
 }
 
-export async function loadModels(): Promise<void> {
-  if (models.value.length) return;
-  models.value = await api.models();
+export async function loadModels(force = false): Promise<void> {
+  if (!force && models.value.length && modelSettings.value) return;
+  const state = await api.modelState();
+  models.value = state.catalog;
+  modelSettings.value = state;
+  if (runtime.value) {
+    runtime.value = {
+      ...runtime.value,
+      model: state.effective.agent,
+      effort: state.reasoningEffort,
+      pulseEnabled: state.pulseEnabled,
+    };
+  }
 }
 
 export async function loadSettings(): Promise<void> {

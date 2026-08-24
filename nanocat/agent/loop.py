@@ -107,6 +107,10 @@ class _TurnRunState:
     turn_messages: list[dict[str, Any]]
 
 
+class _TurnProviderError(RuntimeError):
+    """Provider failure that should terminate the turn without becoming assistant text."""
+
+
 @dataclass(slots=True)
 class _StoppedTurn:
     session: Session
@@ -117,6 +121,8 @@ class _StoppedTurn:
     artifact_refs: tuple[dict[str, Any], ...] = ()
     recovery_id: str | None = None
     terminal_content: str | None = None
+    terminal_error: dict[str, Any] | None = None
+    terminal_control: dict[str, Any] | None = None
     tool_error: str = "turn stopped before the tool result was recorded"
     tool_status: str = "cancelled"
     runtime_session_key: str | None = None
@@ -132,6 +138,19 @@ class _PendingTurn:
     run_state: _TurnRunState | None = None
     ordinal: int = 0
     handed_off: bool = False
+
+
+@dataclass(slots=True)
+class _PendingDurabilityRecord:
+    message: InboundMessage
+    transient: bool
+    order_key: tuple[int, float]
+    terminal_content: str
+    terminal_error: dict[str, Any] | None = None
+    terminal_control: dict[str, Any] | None = None
+    tool_error: str = "turn stopped before the tool result was recorded"
+    tool_status: str = "cancelled"
+    recovery_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -269,6 +288,7 @@ class AgentLoop:
         self._web_steer_reservations: dict[str, tuple[int, int]] = {}
         self._web_turn_attachment_usage: dict[str, tuple[int, int]] = {}
         self._post_stop_buf: dict[str, list[InboundMessage]] = {}
+        self._pending_durability: dict[str, list[_PendingDurabilityRecord]] = {}
         self._durability_retry_task: asyncio.Task[None] | None = None
         self._persistence_error_count = 0
         self._steer_events: dict[str, asyncio.Event] = {}
@@ -916,8 +936,8 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     def _strip_pulse(self, text: str | None) -> str | None:
-        """Strip (and debug-log) the PULSE block from any user-facing text when enabled."""
-        if not text or not self._config.agents.defaults.pulse_enabled:
+        """Strip and debug-log any PULSE block from user-facing text."""
+        if not text:
             return text
         from nanocat.agent.pulse import extract_pulse, strip_pulse
 
@@ -995,7 +1015,7 @@ class AgentLoop:
         """Return whether a session still owns history awaiting durable storage."""
         return bool(
             getattr(self, "_stopped_turns", {}).get(session_key)
-            or getattr(self, "_post_stop_buf", {}).get(session_key)
+            or getattr(self, "_pending_durability", {}).get(session_key)
         )
 
     def retry_session_durability(self, session_key: str) -> bool:
@@ -1008,15 +1028,21 @@ class AgentLoop:
                 self._persistence_error_count += 1
                 logger.exception("Failed to prepare durability retry for {}", session_key)
                 return False
-        messages = self._sort_ingress_messages(
-            list(getattr(self, "_post_stop_buf", {}).get(session_key, ()))
+        pending_records = list(
+            getattr(self, "_pending_durability", {}).get(session_key, ())
         )
-        backlog: list[tuple[tuple[int, float], str, _StoppedTurn | InboundMessage]] = [
+        backlog: list[
+            tuple[
+                tuple[int, float],
+                str,
+                _StoppedTurn | _PendingDurabilityRecord,
+            ]
+        ] = [
             (stopped.order_key, "stopped", stopped) for stopped in canonical
         ] if records else []
         backlog.extend(
-            (self._message_order_key(message), "pending", message)
-            for message in messages
+            (record.order_key, "pending", record)
+            for record in pending_records
         )
         backlog.sort(key=lambda item: item[0])
         for index, (_order_key, kind, item) in enumerate(backlog):
@@ -1025,10 +1051,25 @@ class AgentLoop:
                     stopped = item
                     assert isinstance(stopped, _StoppedTurn)
                 else:
-                    message = item
-                    assert isinstance(message, InboundMessage)
+                    pending_record = item
+                    assert isinstance(pending_record, _PendingDurabilityRecord)
                     stopped = self._stopped_turn_from_pending(
-                        self._new_pending_turn(message)
+                        _PendingTurn(
+                            message=pending_record.message,
+                            session_key=None,
+                            transient=pending_record.transient,
+                            ordinal=pending_record.order_key[0],
+                        )
+                    )
+                    stopped = replace(
+                        stopped,
+                        order_key=pending_record.order_key,
+                        recovery_id=pending_record.recovery_id,
+                        terminal_content=pending_record.terminal_content,
+                        terminal_error=pending_record.terminal_error,
+                        terminal_control=pending_record.terminal_control,
+                        tool_error=pending_record.tool_error,
+                        tool_status=pending_record.tool_status,
                     )
                 self._persist_stopped_turn(
                     stopped,
@@ -1046,28 +1087,33 @@ class AgentLoop:
                     for _key, value_kind, value in remaining
                     if value_kind == "stopped" and isinstance(value, _StoppedTurn)
                 ]
-                retained_messages = [
+                retained_pending = [
                     value
                     for _key, value_kind, value in remaining
-                    if value_kind == "pending" and isinstance(value, InboundMessage)
+                    if value_kind == "pending"
+                    and isinstance(value, _PendingDurabilityRecord)
                 ]
                 if retained_stopped:
                     self._stopped_turns[session_key] = retained_stopped
                 else:
                     self._stopped_turns.pop(session_key, None)
-                if retained_messages:
-                    self._post_stop_buf[session_key] = retained_messages
+                if retained_pending:
+                    pending_store = getattr(self, "_pending_durability", None)
+                    if pending_store is None:
+                        pending_store = {}
+                        self._pending_durability = pending_store
+                    pending_store[session_key] = retained_pending
                 else:
-                    self._post_stop_buf.pop(session_key, None)
+                    getattr(self, "_pending_durability", {}).pop(session_key, None)
                 logger.exception("Durability retry failed for {}", session_key)
                 return False
             if kind == "pending":
-                message = item
-                assert isinstance(message, InboundMessage)
-                self.release_web_steer(session_key, message)
-                self._release_buffered_admission(message)
+                pending_record = item
+                assert isinstance(pending_record, _PendingDurabilityRecord)
+                self.release_web_steer(session_key, pending_record.message)
+                self._release_buffered_admission(pending_record.message)
         self._stopped_turns.pop(session_key, None)
-        self._post_stop_buf.pop(session_key, None)
+        getattr(self, "_pending_durability", {}).pop(session_key, None)
         return True
 
     def _ensure_session_durability_retry(self, session_key: str) -> None:
@@ -1098,7 +1144,9 @@ class AgentLoop:
         next_attempts: dict[str, float] = {}
         loop = asyncio.get_running_loop()
         while self._running:
-            session_keys = set(self._stopped_turns) | set(self._post_stop_buf)
+            session_keys = set(self._stopped_turns) | set(
+                getattr(self, "_pending_durability", {})
+            )
             if not session_keys:
                 return
             stop_requested = getattr(self, "_stop_requested", set())
@@ -1491,6 +1539,35 @@ class AgentLoop:
             persisted_message["artifact_refs"] = artifact_refs[:16]
         run_state.turn_messages.append(persisted_message)
         steer_text = "\n\n".join(m.content for m in pending if m.content)
+        for item in pending:
+            if item.channel != "web":
+                continue
+            metadata = dict(item.metadata or {})
+            ingress_request_id = str(
+                metadata.get("_web_ingress_request_id") or item.request_id or ""
+            )
+            metadata["_turn_control_event"] = {
+                "type": "turn.steer_applied",
+                "status": "completed",
+                "summary": "Guidance applied",
+                "phase": "applied",
+            }
+            metadata["node_id"] = (
+                f"steer:{ingress_request_id}" if ingress_request_id else None
+            )
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=item.channel,
+                    chat_id=item.chat_id,
+                    content="",
+                    event_id=item.event_id,
+                    correlation_id=item.correlation_id,
+                    request_id=ingress_request_id or item.request_id,
+                    turn_id=str(metadata.get("turn_id") or "") or item.turn_id,
+                    principal_id=item.principal_id,
+                    metadata=metadata,
+                )
+            )
         if on_progress and steer_text:
             await on_progress(f"↪ {steer_text[:80]}")
         return True
@@ -1609,23 +1686,24 @@ class AgentLoop:
         *,
         turn_id: str | None = None,
         rollback_attachments: tuple[int, int] | None = None,
-    ) -> None:
+    ) -> tuple[TurnState, str] | None:
         """Release a browser steer reservation after consumption or rejection."""
+        released_terminal: tuple[TurnState, str] | None = None
         if isinstance(message, InboundMessage):
             if not isinstance(message.metadata, dict) or not message.metadata.pop(
                 "_web_steer_reserved",
                 False,
             ):
-                return
+                return None
             content_chars = len(message.content)
             if message.metadata.pop("_web_joined_turn", False):
                 joined_turn_id = self._message_turn_id(message)
                 if joined_turn_id is not None:
-                    self.turns.release_join(joined_turn_id)
+                    released_terminal = self.turns.release_join(joined_turn_id)
         else:
             content_chars = max(message, 0)
             if turn_id is not None:
-                self.turns.release_join(turn_id)
+                released_terminal = self.turns.release_join(turn_id)
         if turn_id is not None and rollback_attachments is not None:
             usage = self._web_turn_attachment_usage.get(turn_id)
             if usage is not None:
@@ -1636,6 +1714,7 @@ class AgentLoop:
                     max(0, used_bytes - max(rollback_bytes, 0)),
                 )
         self._release_web_steer_capacity(session_key, content_chars)
+        return released_terminal
 
     def _release_web_steer_capacity(
         self,
@@ -1704,7 +1783,9 @@ class AgentLoop:
         messages = initial_messages
 
         # Cacheable PULSE spec in system; per-turn trigger is in the user message.
-        if self._config.agents.defaults.pulse_enabled:
+        turn_pulse = tool_context.pulse_enabled
+        turn_effort = tool_context.reasoning_effort
+        if turn_pulse:
             from nanocat.agent.pulse import PULSE_PROMPT
 
             sys_msg = dict(messages[0])
@@ -1760,6 +1841,7 @@ class AgentLoop:
                 messages=messages,
                 tools=tool_defs,
                 model=turn_model,
+                reasoning_effort=turn_effort,
             )
             if response.finish_reason == "error" and self._is_context_overflow(response.content):
                 reduced = self._trim_context_to_runtime_file(
@@ -1779,6 +1861,7 @@ class AgentLoop:
                         messages=messages,
                         tools=tool_defs,
                         model=turn_model,
+                        reasoning_effort=turn_effort,
                     )
 
             if on_thinking and (
@@ -1934,8 +2017,9 @@ class AgentLoop:
                 # poison the context and cause permanent 400 loops (#1303).
                 if response.finish_reason == "error":
                     logger.error("LLM returned an error response ({} chars)", len(clean or ""))
-                    final_content = self.tips.error
-                    break
+                    raise _TurnProviderError(
+                        clean or "The provider returned an unspecified error."
+                    )
                 messages = self.context.add_assistant_message(
                     messages,
                     clean,
@@ -2263,7 +2347,11 @@ class AgentLoop:
     ) -> None:
         """Move a late exact-cancel handoff directly to the durability owner."""
         self._handoff_messages.pop(handoff_id, None)
-        self._retain_pending_interruption(self._new_pending_turn(message))
+        self._retain_pending_interruption(
+            self._new_pending_turn(message),
+            content=self.tips.turn_stopped,
+            control_kind="stop",
+        )
         self.release_web_steer(message.session_key, message)
         self._hold_buffered_admission(message)
         self._release_buffered_admission(message)
@@ -2379,10 +2467,18 @@ class AgentLoop:
 
         def retain_claimed_inputs() -> None:
             if claim.pending_turn is not None and not claim.pending_turn.history_committed:
-                self._retain_pending_interruption(claim.pending_turn)
+                self._retain_pending_interruption(
+                    claim.pending_turn,
+                    content=self.tips.turn_stopped,
+                    control_kind="stop",
+                )
             for pending_turn in claimed_pending:
                 if not pending_turn.history_committed:
-                    self._retain_pending_interruption(pending_turn)
+                    self._retain_pending_interruption(
+                        pending_turn,
+                        content=self.tips.turn_stopped,
+                        control_kind="stop",
+                    )
                 self.release_web_steer(session_key, pending_turn.message)
                 self._release_buffered_admission(pending_turn.message)
 
@@ -2423,7 +2519,9 @@ class AgentLoop:
 
             if claim.pending_turn is not None and not claim.pending_turn.history_committed:
                 persisted = await self._persist_pending_interruption_ordered(
-                    claim.pending_turn
+                    claim.pending_turn,
+                    content=self.tips.turn_stopped,
+                    control_kind="stop",
                 )
                 if not persisted:
                     raise RuntimeError("cancelled active turn could not be persisted")
@@ -2434,9 +2532,10 @@ class AgentLoop:
             if claimed_records:
                 for stopped in self._canonicalize_stopped_turns(claimed_records):
                     try:
+                        stopped.terminal_control = {"kind": "stop"}
                         self._persist_stopped_turn(
                             stopped,
-                            self.tips.turn_interrupted,
+                            self.tips.turn_stopped,
                             schedule_background=False,
                         )
                     except Exception:
@@ -2461,7 +2560,9 @@ class AgentLoop:
 
             for pending_turn in claimed_pending:
                 persisted = await self._persist_pending_interruption_ordered(
-                    pending_turn
+                    pending_turn,
+                    content=self.tips.turn_stopped,
+                    control_kind="stop",
                 )
                 self.release_web_steer(session_key, pending_turn.message)
                 self._release_buffered_admission(pending_turn.message)
@@ -2471,14 +2572,21 @@ class AgentLoop:
                 await self.intervention.cancel_turn(turn_id)
         except asyncio.CancelledError:
             retain_claimed_inputs()
-            self.turns.finalize_fail(
+            self.turns.finalize_cancel(
                 turn_id, "turn cancellation cleanup was cancelled"
             )
             raise
         except Exception:
             retain_claimed_inputs()
-            self.turns.finalize_fail(turn_id, "turn cancellation cleanup failed")
-            raise
+            logger.exception(
+                "Turn cancellation cleanup retained for durability: {}",
+                turn_id,
+            )
+            self.turns.finalize_cancel(
+                turn_id,
+                "turn stopped; cleanup continues under runtime ownership",
+            )
+            return True
         self.turns.finalize_cancel(turn_id, record.detail)
         return True
 
@@ -2684,12 +2792,17 @@ class AgentLoop:
             stopped_records = self._canonicalize_stopped_turns(stopped_records)
             for stopped in stopped_records:
                 try:
-                    self._persist_stopped_turn(stopped, content)
+                    stopped.terminal_control = {"kind": "stop"}
+                    self._persist_stopped_turn(stopped, self.tips.turn_stopped)
                 except Exception:
                     persistence_failed = True
                     self._persistence_error_count += 1
                     retry_stopped_records.append(
-                        replace(stopped, terminal_content=content)
+                        replace(
+                            stopped,
+                            terminal_content=self.tips.turn_stopped,
+                            terminal_control={"kind": "stop"},
+                        )
                     )
                     logger.exception(
                         "Failed to persist stopped turn for {}",
@@ -2755,7 +2868,8 @@ class AgentLoop:
                     ]
                 )
                 for record_index, stopped in enumerate(records):
-                    self._persist_stopped_turn(stopped, content)
+                    stopped.terminal_control = {"kind": "stop"}
+                    self._persist_stopped_turn(stopped, self.tips.turn_stopped)
             except Exception:
                 self._persistence_error_count += 1
                 stop_persistence_failed = True
@@ -2797,7 +2911,11 @@ class AgentLoop:
                     "Failed to requeue input received during stop for {}", msg.session_key
                 )
                 pending_requeue = self._new_pending_turn(merged)
-                if not self._persist_pending_interruption(pending_requeue):
+                if not self._persist_pending_interruption(
+                    pending_requeue,
+                    content=self.tips.turn_stopped,
+                    control_kind="stop",
+                ):
                     stop_persistence_failed = True
                     content = self.tips.stop_persist_failed
         if self.has_pending_session_durability(msg.session_key):
@@ -3550,15 +3668,47 @@ class AgentLoop:
         try:
             await self._dispatch_inner(msg, gen, pending_turn)
             if not pending_turn.history_committed:
-                self._persist_pending_failure(pending_turn)
+                self._persist_pending_failure(
+                    pending_turn,
+                    RuntimeError("Turn ended without a durable terminal record."),
+                )
         except asyncio.CancelledError:
             persisted = True
             if not pending_turn.history_committed:
                 if msg.session_key in self._stop_requested:
                     self._stash_pending_turn(msg.session_key, pending_turn)
                 elif asyncio.current_task() not in self._superseded_tasks:
+                    record = (
+                        self.turns.get(turn_id)
+                        if (turn_id := self._message_turn_id(msg))
+                        else None
+                    )
+                    stopped_by_user = (
+                        record is not None
+                        and record.state is TurnState.CANCELLING
+                        and record.detail in {"cancelled by user", "stopped by user"}
+                    )
+                    runtime_shutdown = (
+                        record is not None
+                        and record.state is TurnState.CANCELLING
+                        and record.detail == "runtime shutdown"
+                    )
                     persisted = await self._persist_pending_interruption_ordered(
-                        pending_turn
+                        pending_turn,
+                        content=(
+                            self.tips.turn_stopped
+                            if stopped_by_user
+                            else self.tips.turn_interrupted
+                            if runtime_shutdown
+                            else self.tips.turn_cancelled
+                        ),
+                        control_kind=(
+                            "stop"
+                            if stopped_by_user
+                            else "runtime_shutdown"
+                            if runtime_shutdown
+                            else "interrupted"
+                        ),
                     )
             if turn_id := self._message_turn_id(msg):
                 record = self.turns.get(turn_id)
@@ -3568,10 +3718,10 @@ class AgentLoop:
                     else:
                         self.turns.fail(turn_id, "turn interruption persistence failed")
             raise
-        except Exception:
+        except Exception as exc:
             persisted = True
             if not pending_turn.history_committed:
-                persisted = self._persist_pending_failure(pending_turn)
+                persisted = self._persist_pending_failure(pending_turn, exc)
             if turn_id := self._message_turn_id(msg):
                 record = self.turns.get(turn_id)
                 if record is not None and record.state is not TurnState.CANCELLING:
@@ -3643,28 +3793,40 @@ class AgentLoop:
                         self.turns.cancel(turn_id, "turn task cancelled")
                     logger.info("Task cancelled for session {}", msg.session_key)
                     raise
-                except Exception:
-                    logger.exception("Error processing message for session {}", msg.session_key)
-                    persisted = self._persist_pending_failure(pending_turn)
+                except Exception as exc:
+                    error_detail = self._public_turn_error(exc)
+                    if isinstance(exc, _TurnProviderError):
+                        logger.error(
+                            "Provider failed for session {}: {}",
+                            msg.session_key,
+                            error_detail["message"],
+                        )
+                    else:
+                        logger.exception("Error processing message for session {}", msg.session_key)
+                    persisted = self._persist_pending_failure(pending_turn, exc)
                     turn_id = self._message_turn_id(msg)
                     if turn_id is not None:
                         self.turns.fail(
                             turn_id,
-                            "turn processing failed"
+                            error_detail["message"]
                             if persisted
                             else "turn failure persistence failed",
                         )
                     failure_response = OutboundMessage(
-                            channel=msg.channel,
-                            chat_id=msg.chat_id,
-                            content=self.tips.error,
-                            event_id=msg.event_id,
-                            correlation_id=msg.correlation_id,
-                            request_id=msg.request_id,
-                            turn_id=turn_id,
-                            principal_id=msg.principal_id,
-                            metadata={**(msg.metadata or {}), "_turn_failed": True},
-                        )
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=self.tips.error,
+                        event_id=msg.event_id,
+                        correlation_id=msg.correlation_id,
+                        request_id=msg.request_id,
+                        turn_id=turn_id,
+                        principal_id=msg.principal_id,
+                        metadata={
+                            **(msg.metadata or {}),
+                            "_turn_failed": True,
+                            "_turn_error": error_detail,
+                        },
+                    )
                     self._snapshot_terminal_deferred(msg, failure_response)
                     await self.bus.publish_outbound(failure_response)
                 finally:
@@ -3811,7 +3973,11 @@ class AgentLoop:
             await asyncio.gather(*active_tasks, return_exceptions=True)
         for pending_turn in active_pending_turns:
             if not pending_turn.history_committed:
-                self._persist_pending_interruption(pending_turn)
+                self._persist_pending_interruption(
+                    pending_turn,
+                    content=self.tips.turn_interrupted,
+                    control_kind="runtime_shutdown",
+                )
         self._active_tasks.clear()
         self._direct_tasks.clear()
         self._turn_tasks.clear()
@@ -3868,20 +4034,21 @@ class AgentLoop:
             *handoff_messages,
             *queued_messages,
         ]:
-            self._persist_pending_interruption(self._new_pending_turn(message))
+            self._persist_pending_interruption(
+                self._new_pending_turn(message),
+                content=self.tips.turn_interrupted,
+                control_kind="runtime_shutdown",
+            )
         self._flush_stopped_turn_retries()
-        for session_key, messages in tuple(self._post_stop_buf.items()):
-            retained: list[InboundMessage] = []
-            for message in messages:
-                if not self._journal_pending_turn(
-                    self._new_pending_turn(message),
-                    self.tips.turn_interrupted,
-                ):
-                    retained.append(message)
+        for session_key, records in tuple(self._pending_durability.items()):
+            retained: list[_PendingDurabilityRecord] = []
+            for record in records:
+                if not self._journal_pending_turn(record):
+                    retained.append(record)
             if retained:
-                self._post_stop_buf[session_key] = retained
+                self._pending_durability[session_key] = retained
             else:
-                self._post_stop_buf.pop(session_key, None)
+                self._pending_durability.pop(session_key, None)
 
         unresolved_turn_ids = {
             stopped.turn_id
@@ -3891,9 +4058,9 @@ class AgentLoop:
         }
         unresolved_turn_ids.update(
             turn_id
-            for messages in self._post_stop_buf.values()
-            for message in messages
-            if (turn_id := self._message_turn_id(message)) is not None
+            for records in self._pending_durability.values()
+            for pending_record in records
+            if (turn_id := self._message_turn_id(pending_record.message)) is not None
         )
         for turn_id in shutdown_turn_ids:
             record = self.turns.get(turn_id)
@@ -3937,7 +4104,7 @@ class AgentLoop:
             self._recent_log_sink_id = None
         unresolved_persistence = sum(
             len(records) for records in self._stopped_turns.values()
-        ) + sum(len(messages) for messages in self._post_stop_buf.values())
+        ) + sum(len(records) for records in self._pending_durability.values())
         if unresolved_persistence:
             raise RuntimeError(
                 f"{unresolved_persistence} turn persistence owner(s) remain unresolved"
@@ -4088,6 +4255,10 @@ class AgentLoop:
             principal_id = msg.principal_id or msg.sender_id
             logger.info("Processing system message from {}", principal_id)
             session = self.sessions.get_or_create(channel, chat_id)
+            turn_defaults = self._config.agents.defaults
+            turn_model = turn_defaults.model
+            turn_effort = turn_defaults.reasoning_effort
+            turn_pulse = turn_defaults.pulse_enabled
             if not transient:
                 await self.memory_compactor.maybe_compact_by_tokens(session)
             history = session.get_history(max_messages=0)
@@ -4101,6 +4272,7 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
                 current_role=current_role,
+                pulse=turn_pulse,
                 ssh_sessions=self.ssh.context_block(),
                 proc_sessions=self.procs.context_block(),
                 subs=self.subagents.context_block(),
@@ -4126,7 +4298,14 @@ class AgentLoop:
                 state_hook=lambda state: self.turns.transition(turn_id, state),
                 message_id=msg.metadata.get("message_id"),
                 session=session,
-                model=self.model,
+                model=turn_model,
+                subagent_model=(
+                    turn_defaults.subagent_model
+                    or turn_defaults.assistant_model
+                    or turn_model
+                ),
+                reasoning_effort=turn_effort,
+                pulse_enabled=turn_pulse,
                 user_input=msg.content,
             )
             try:
@@ -4151,6 +4330,11 @@ class AgentLoop:
                     self.turns.cancel(turn_id, "turn stopped by user")
                     raise asyncio.CancelledError from exc
                 self._forget_message_turn(tool_context.turn_id)
+                error_detail = {
+                    "code": "tool_turn_aborted",
+                    "title": "Tool execution aborted",
+                    "message": str(redact_value(exc.message))[:2_000],
+                }
                 self._persist_aborted_turn(
                     session,
                     run_state,
@@ -4159,6 +4343,7 @@ class AgentLoop:
                     self._artifact_refs_from_message(msg),
                     turn_id=turn_id,
                     runtime_session_key=msg.session_key,
+                    terminal_error=error_detail,
                 )
                 self._mark_turn_history_committed(msg, pending_turn)
                 self.turns.fail(turn_id, "tool execution aborted")
@@ -4174,6 +4359,7 @@ class AgentLoop:
                     metadata={
                         **(msg.metadata or {}),
                         "_turn_failed": True,
+                        "_turn_error": error_detail,
                         **self._turn_timing_metadata(turn_id),
                     },
                 )
@@ -4190,6 +4376,17 @@ class AgentLoop:
                     if pending_turn is not None:
                         pending_turn.history_committed = True
                 elif asyncio.current_task() not in self._superseded_tasks:
+                    record = self.turns.get(turn_id)
+                    stopped_by_user = (
+                        record is not None
+                        and record.state is TurnState.CANCELLING
+                        and record.detail in {"cancelled by user", "stopped by user"}
+                    )
+                    runtime_shutdown = (
+                        record is not None
+                        and record.state is TurnState.CANCELLING
+                        and record.detail == "runtime shutdown"
+                    )
                     self._persist_interrupted_turn(
                         session,
                         run_state,
@@ -4197,6 +4394,20 @@ class AgentLoop:
                         self._artifact_refs_from_message(msg),
                         turn_id,
                         runtime_session_key=msg.session_key,
+                        content=(
+                            self.tips.turn_stopped
+                            if stopped_by_user
+                            else self.tips.turn_interrupted
+                            if runtime_shutdown
+                            else self.tips.turn_cancelled
+                        ),
+                        control_kind=(
+                            "stop"
+                            if stopped_by_user
+                            else "runtime_shutdown"
+                            if runtime_shutdown
+                            else "interrupted"
+                        ),
                     )
                     if pending_turn is not None:
                         pending_turn.history_committed = True
@@ -4205,6 +4416,7 @@ class AgentLoop:
                 raise
             except Exception as exc:
                 self._forget_message_turn(tool_context.turn_id)
+                error_detail = self._public_turn_error(exc)
                 self._persist_aborted_turn(
                     session,
                     run_state,
@@ -4213,6 +4425,7 @@ class AgentLoop:
                     self._artifact_refs_from_message(msg),
                     turn_id=turn_id,
                     runtime_session_key=msg.session_key,
+                    terminal_error=error_detail,
                 )
                 self._mark_turn_history_committed(msg, pending_turn)
                 self.turns.fail(
@@ -4296,6 +4509,10 @@ class AgentLoop:
         injected_memories = (
             await self._auto_inject_memories(msg.content, session) if not transient else None
         )
+        turn_defaults = self._config.agents.defaults
+        turn_model = turn_defaults.model
+        turn_effort = turn_defaults.reasoning_effort
+        turn_pulse = turn_defaults.pulse_enabled
         initial_messages = self.context.build_messages(
             history=history,
             compacted_memory=session.compacted_memory,
@@ -4305,7 +4522,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
-            pulse=self._config.agents.defaults.pulse_enabled,
+            pulse=turn_pulse,
             ssh_sessions=self.ssh.context_block(),
             proc_sessions=self.procs.context_block(),
             subs=self.subagents.context_block(),
@@ -4389,7 +4606,14 @@ class AgentLoop:
             state_hook=lambda state: self.turns.transition(turn_id, state),
             message_id=msg.metadata.get("message_id"),
             session=session,
-            model=self.model,
+            model=turn_model,
+            subagent_model=(
+                turn_defaults.subagent_model
+                or turn_defaults.assistant_model
+                or turn_model
+            ),
+            reasoning_effort=turn_effort,
+            pulse_enabled=turn_pulse,
             user_input=msg.content,
         )
         try:
@@ -4420,6 +4644,11 @@ class AgentLoop:
                 self.turns.cancel(turn_id, "turn stopped by user")
                 raise asyncio.CancelledError from exc
             self._forget_message_turn(tool_context.turn_id)
+            error_detail = {
+                "code": "tool_turn_aborted",
+                "title": "Tool execution aborted",
+                "message": str(redact_value(exc.message))[:2_000],
+            }
             self._persist_aborted_turn(
                 session,
                 run_state,
@@ -4428,6 +4657,7 @@ class AgentLoop:
                 self._artifact_refs_from_message(msg),
                 turn_id=turn_id,
                 runtime_session_key=msg.session_key,
+                terminal_error=error_detail,
             )
             self._mark_turn_history_committed(msg, pending_turn)
             self.turns.fail(turn_id, "tool execution aborted")
@@ -4443,6 +4673,7 @@ class AgentLoop:
                 metadata={
                     **(msg.metadata or {}),
                     "_turn_failed": True,
+                    "_turn_error": error_detail,
                     **self._turn_timing_metadata(turn_id),
                 },
             )
@@ -4459,6 +4690,17 @@ class AgentLoop:
                 if pending_turn is not None:
                     pending_turn.history_committed = True
             elif asyncio.current_task() not in self._superseded_tasks:
+                record = self.turns.get(turn_id)
+                stopped_by_user = (
+                    record is not None
+                    and record.state is TurnState.CANCELLING
+                    and record.detail in {"cancelled by user", "stopped by user"}
+                )
+                runtime_shutdown = (
+                    record is not None
+                    and record.state is TurnState.CANCELLING
+                    and record.detail == "runtime shutdown"
+                )
                 self._persist_interrupted_turn(
                     session,
                     run_state,
@@ -4466,6 +4708,20 @@ class AgentLoop:
                     self._artifact_refs_from_message(msg),
                     turn_id,
                     runtime_session_key=msg.session_key,
+                    content=(
+                        self.tips.turn_stopped
+                        if stopped_by_user
+                        else self.tips.turn_interrupted
+                        if runtime_shutdown
+                        else self.tips.turn_cancelled
+                    ),
+                    control_kind=(
+                        "stop"
+                        if stopped_by_user
+                        else "runtime_shutdown"
+                        if runtime_shutdown
+                        else "interrupted"
+                    ),
                 )
                 if pending_turn is not None:
                     pending_turn.history_committed = True
@@ -4474,6 +4730,7 @@ class AgentLoop:
             raise
         except Exception as exc:
             self._forget_message_turn(tool_context.turn_id)
+            error_detail = self._public_turn_error(exc)
             self._persist_aborted_turn(
                 session,
                 run_state,
@@ -4482,6 +4739,7 @@ class AgentLoop:
                 self._artifact_refs_from_message(msg),
                 turn_id=turn_id,
                 runtime_session_key=msg.session_key,
+                terminal_error=error_detail,
             )
             self._mark_turn_history_committed(msg, pending_turn)
             self.turns.fail(
@@ -4712,28 +4970,42 @@ class AgentLoop:
 
     def _wake_durability_retry(self, session_key: str) -> None:
         """Wake the live retry owner after a fallback takes durable ownership."""
-        if self._running and session_key not in self._stop_requested:
+        if getattr(self, "_running", False) and session_key not in self._stop_requested:
             self._ensure_session_durability_retry(session_key)
 
     def request_session_durability_retry(self, session_key: str) -> None:
         """Ask the lock-owning scheduler to retry retained session history."""
         self._wake_durability_retry(session_key)
 
-    def _persist_pending_interruption(self, pending_turn: _PendingTurn) -> bool:
+    def _persist_pending_interruption(
+        self,
+        pending_turn: _PendingTurn,
+        *,
+        content: str | None = None,
+        control_kind: str = "interrupted",
+    ) -> bool:
         """Persist a queued input interrupted by deadline or runtime shutdown."""
         if pending_turn.history_committed:
             return True
+        terminal_content = content or self.tips.turn_cancelled
+        terminal_control = {"kind": control_kind}
         stopped: _StoppedTurn | None = None
         try:
             stopped = self._stopped_turn_from_pending(pending_turn)
+            stopped.terminal_control = terminal_control
             self._persist_stopped_turn(
                 stopped,
-                self.tips.turn_interrupted,
+                terminal_content,
                 schedule_background=False,
             )
         except Exception:
             self._persistence_error_count += 1
-            self._retain_pending_interruption(pending_turn, stopped=stopped)
+            self._retain_pending_interruption(
+                pending_turn,
+                stopped=stopped,
+                content=terminal_content,
+                control_kind=control_kind,
+            )
             if stopped is not None:
                 logger.exception(
                     "Failed to persist queued interrupted turn for {}",
@@ -4753,6 +5025,11 @@ class AgentLoop:
         pending_turn: _PendingTurn,
         *,
         stopped: _StoppedTurn | None = None,
+        content: str | None = None,
+        control_kind: str = "interrupted",
+        terminal_error: dict[str, Any] | None = None,
+        tool_error: str = "turn stopped before the tool result was recorded",
+        tool_status: str = "cancelled",
     ) -> None:
         """Transfer an interrupted input to the live durability owner."""
         if pending_turn.history_committed:
@@ -4765,7 +5042,11 @@ class AgentLoop:
         if stopped is not None:
             retained = replace(
                 stopped,
-                terminal_content=self.tips.turn_interrupted,
+                terminal_content=content or self.tips.turn_cancelled,
+                terminal_error=terminal_error,
+                terminal_control=(None if terminal_error is not None else {"kind": control_kind}),
+                tool_error=tool_error,
+                tool_status=tool_status,
             )
             durability_key = self._durability_session_key(stopped)
             records = self._stopped_turns.setdefault(durability_key, [])
@@ -4773,15 +5054,43 @@ class AgentLoop:
                 records.append(retained)
         else:
             durability_key = pending_turn.message.session_key
-            messages = self._post_stop_buf.setdefault(durability_key, [])
-            if not any(message is pending_turn.message for message in messages):
-                messages.append(pending_turn.message)
+            pending_store = getattr(self, "_pending_durability", None)
+            if pending_store is None:
+                pending_store = {}
+                self._pending_durability = pending_store
+            records = pending_store.setdefault(durability_key, [])
+            recovery_id = self._message_recovery_id(pending_turn.message)
+            if not any(
+                record.message is pending_turn.message
+                or (recovery_id is not None and record.recovery_id == recovery_id)
+                for record in records
+            ):
+                records.append(
+                    _PendingDurabilityRecord(
+                        message=pending_turn.message,
+                        transient=pending_turn.transient,
+                        order_key=self._pending_order_key(pending_turn),
+                        terminal_content=content or self.tips.turn_cancelled,
+                        terminal_error=terminal_error,
+                        terminal_control=(
+                            None
+                            if terminal_error is not None
+                            else {"kind": control_kind}
+                        ),
+                        tool_error=tool_error,
+                        tool_status=tool_status,
+                        recovery_id=recovery_id,
+                    )
+                )
         pending_turn.history_committed = True
         self._wake_durability_retry(durability_key)
 
     async def _persist_pending_interruption_ordered(
         self,
         pending_turn: _PendingTurn,
+        *,
+        content: str | None = None,
+        control_kind: str = "interrupted",
     ) -> bool:
         """Serialize a cancelled queued turn after all earlier session work."""
         session_lock = self._session_locks.setdefault(
@@ -4790,18 +5099,66 @@ class AgentLoop:
         )
         try:
             async with session_lock:
-                return self._persist_pending_interruption(pending_turn)
+                return self._persist_pending_interruption(
+                    pending_turn,
+                    content=content,
+                    control_kind=control_kind,
+                )
         except asyncio.CancelledError:
-            self._retain_pending_interruption(pending_turn)
+            self._retain_pending_interruption(
+                pending_turn,
+                content=content,
+                control_kind=control_kind,
+            )
             raise
 
-    def _persist_pending_failure(self, pending_turn: _PendingTurn) -> bool:
+    @staticmethod
+    def _public_turn_error(error: BaseException | None) -> dict[str, Any]:
+        """Return a bounded, redacted error safe for session and Web projections."""
+        if error is None:
+            return {
+                "code": "turn_failed",
+                "title": "Turn failed",
+                "message": "The turn ended before it produced a valid result.",
+            }
+        safe_message = str(redact_value(str(error))).strip()
+        if not safe_message:
+            safe_message = "The turn ended before it produced a valid result."
+        safe_message = safe_message[:2_000]
+        if isinstance(error, _TurnProviderError):
+            return {
+                "code": "provider_error",
+                "title": "Provider request failed",
+                "message": safe_message,
+                "hint": "Review the provider response and retry when the cause is resolved.",
+            }
+        if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+            return {
+                "code": "timeout",
+                "title": "Turn timed out",
+                "message": safe_message,
+                "hint": "Retry the turn or increase the relevant timeout.",
+            }
+        return {
+            "code": "turn_failed",
+            "title": "Turn failed",
+            "message": safe_message,
+            "errorType": type(error).__name__,
+        }
+
+    def _persist_pending_failure(
+        self,
+        pending_turn: _PendingTurn,
+        error: BaseException | None = None,
+    ) -> bool:
         """Persist a terminal error when execution fails outside the provider loop."""
         if pending_turn.history_committed:
             return True
+        error_detail = self._public_turn_error(error)
         stopped: _StoppedTurn | None = None
         try:
             stopped = self._stopped_turn_from_pending(pending_turn)
+            stopped.terminal_error = error_detail
             self._persist_stopped_turn(
                 stopped,
                 self.tips.error,
@@ -4815,6 +5172,7 @@ class AgentLoop:
                 retained = replace(
                     stopped,
                     terminal_content=self.tips.error,
+                    terminal_error=error_detail,
                     tool_error="turn failed before the tool result was recorded",
                     tool_status="error",
                 )
@@ -4825,11 +5183,13 @@ class AgentLoop:
                 self._wake_durability_retry(durability_key)
                 logger.exception("Failed to persist failed turn for {}", stopped.session.key)
             else:
-                self._post_stop_buf.setdefault(
-                    pending_turn.message.session_key,
-                    [],
-                ).append(pending_turn.message)
-                self._wake_durability_retry(pending_turn.message.session_key)
+                self._retain_pending_interruption(
+                    pending_turn,
+                    content=self.tips.error,
+                    terminal_error=error_detail,
+                    tool_error="turn failed before the tool result was recorded",
+                    tool_status="error",
+                )
                 logger.exception(
                     "Failed to prepare failed turn for {}",
                     pending_turn.message.session_key,
@@ -4847,6 +5207,8 @@ class AgentLoop:
         artifact_refs: tuple[dict[str, Any], ...] = (),
         turn_id: str | None = None,
         runtime_session_key: str | None = None,
+        content: str | None = None,
+        control_kind: str = "interrupted",
     ) -> bool:
         """Persist a terminal record for cancellation outside explicit /stop."""
         stopped = _StoppedTurn(
@@ -4855,12 +5217,13 @@ class AgentLoop:
             transient=transient,
             turn_id=turn_id,
             artifact_refs=artifact_refs,
+            terminal_control={"kind": control_kind},
             runtime_session_key=runtime_session_key,
         )
         try:
             self._persist_stopped_turn(
                 stopped,
-                self.tips.turn_interrupted,
+                content or self.tips.turn_cancelled,
                 schedule_background=False,
             )
         except Exception:
@@ -4871,7 +5234,8 @@ class AgentLoop:
                 records.append(
                     replace(
                         stopped,
-                        terminal_content=self.tips.turn_interrupted,
+                        terminal_content=content or self.tips.turn_cancelled,
+                        terminal_control={"kind": control_kind},
                     )
                 )
             self._wake_durability_retry(durability_key)
@@ -4888,6 +5252,7 @@ class AgentLoop:
         artifact_refs: tuple[dict[str, Any], ...] = (),
         turn_id: str | None = None,
         runtime_session_key: str | None = None,
+        terminal_error: dict[str, Any] | None = None,
     ) -> bool:
         """Persist a structured terminal record for an application-aborted turn."""
         stopped = _StoppedTurn(
@@ -4896,6 +5261,7 @@ class AgentLoop:
             transient=transient,
             turn_id=turn_id,
             artifact_refs=artifact_refs,
+            terminal_error=terminal_error,
             runtime_session_key=runtime_session_key,
         )
         try:
@@ -4914,6 +5280,7 @@ class AgentLoop:
                     replace(
                         stopped,
                         terminal_content=content,
+                        terminal_error=terminal_error,
                         tool_error="turn aborted before the tool result was recorded",
                         tool_status="aborted",
                     )
@@ -5032,6 +5399,8 @@ class AgentLoop:
             "turnId": stopped.turn_id,
             "artifactRefs": list(stopped.artifact_refs),
             "terminalContent": stopped.terminal_content or content,
+            "terminalError": stopped.terminal_error,
+            "terminalControl": stopped.terminal_control,
             "toolError": stopped.tool_error,
             "toolStatus": stopped.tool_status,
             "runtimeSessionKey": stopped.runtime_session_key,
@@ -5076,10 +5445,10 @@ class AgentLoop:
             normalized.append(entry)
         return normalized
 
-    def _journal_pending_turn(self, pending: _PendingTurn, content: str) -> bool:
+    def _journal_pending_turn(self, record: _PendingDurabilityRecord) -> bool:
         """Durably retain raw ingress when session materialization is unavailable."""
-        recovery_id = uuid.uuid4().hex
-        message = pending.message
+        recovery_id = record.recovery_id or uuid.uuid4().hex
+        message = record.message
         payload = {
             "version": 1,
             "kind": "pending",
@@ -5103,9 +5472,13 @@ class AgentLoop:
                 "principalId": message.principal_id,
                 "artifactRefs": list(self._artifact_refs_from_message(message)),
             },
-            "transient": pending.transient,
-            "orderKey": list(self._pending_order_key(pending)),
-            "terminalContent": content,
+            "transient": record.transient,
+            "orderKey": list(record.order_key),
+            "terminalContent": record.terminal_content,
+            "terminalError": record.terminal_error,
+            "terminalControl": record.terminal_control,
+            "toolError": record.tool_error,
+            "toolStatus": record.tool_status,
             "runtimeSessionKey": message.session_key,
         }
         return self._write_stopped_recovery_payload(recovery_id, payload)
@@ -5177,12 +5550,44 @@ class AgentLoop:
             ingress_ordinal=max(int(raw_order[0]), 0),
         )
 
+    def _recovered_pending_record(
+        self,
+        payload: Mapping[str, Any],
+        raw_order: tuple[int, float],
+        recovery_id: str,
+    ) -> _PendingDurabilityRecord:
+        """Rebuild a pending durability owner without losing terminal semantics."""
+        terminal_error = payload.get("terminalError")
+        terminal_control = payload.get("terminalControl")
+        return _PendingDurabilityRecord(
+            message=self._recovered_pending_message(payload, raw_order, recovery_id),
+            transient=bool(payload.get("transient")),
+            order_key=raw_order,
+            terminal_content=str(
+                payload.get("terminalContent") or self.tips.turn_interrupted
+            ),
+            terminal_error=(
+                dict(terminal_error) if isinstance(terminal_error, Mapping) else None
+            ),
+            terminal_control=(
+                dict(terminal_control)
+                if isinstance(terminal_control, Mapping)
+                else None
+            ),
+            tool_error=str(
+                payload.get("toolError")
+                or "turn stopped before the tool result was recorded"
+            ),
+            tool_status=str(payload.get("toolStatus") or "cancelled"),
+            recovery_id=recovery_id,
+        )
+
     def _retain_recovery_backlog(
         self,
         owner: str,
         *,
         stopped: _StoppedTurn | None = None,
-        message: InboundMessage | None = None,
+        pending: _PendingDurabilityRecord | None = None,
     ) -> None:
         """Keep a failed startup replay under the live durability gate."""
         if stopped is not None:
@@ -5190,11 +5595,10 @@ class AgentLoop:
             if not any(record.recovery_id == stopped.recovery_id for record in records):
                 records.append(stopped)
             return
-        if message is not None:
-            messages = self._post_stop_buf.setdefault(owner, [])
-            recovery_id = self._message_recovery_id(message)
-            if not any(self._message_recovery_id(item) == recovery_id for item in messages):
-                messages.append(message)
+        if pending is not None:
+            records = self._pending_durability.setdefault(owner, [])
+            if not any(record.recovery_id == pending.recovery_id for record in records):
+                records.append(pending)
 
     def _recover_stopped_turn_journal(self) -> None:
         """Replay durable stopped-turn handoffs before accepting new input."""
@@ -5238,27 +5642,35 @@ class AgentLoop:
             key=lambda item: (item[0], item[1], item[2]),
         ):
             stopped: _StoppedTurn | None = None
-            recovered_message: InboundMessage | None = None
+            recovered_pending: _PendingDurabilityRecord | None = None
             try:
                 session_data = payload.get("session") or {}
                 channel = str(session_data.get("channel") or "")
                 session_id = str(session_data.get("id") or "")
                 if payload.get("kind") == "pending":
-                    recovered_message = self._recovered_pending_message(
+                    recovered_pending = self._recovered_pending_record(
                         payload,
                         raw_order,
                         recovery_id,
                     )
                     stopped = self._stopped_turn_from_pending(
                         _PendingTurn(
-                            message=recovered_message,
+                            message=recovered_pending.message,
                             session_key=None,
-                            transient=bool(payload.get("transient")),
+                            transient=recovered_pending.transient,
                             ordinal=raw_order[0],
                         )
                     )
-                    stopped.order_key = raw_order
-                    stopped.recovery_id = recovery_id
+                    stopped = replace(
+                        stopped,
+                        order_key=recovered_pending.order_key,
+                        recovery_id=recovered_pending.recovery_id,
+                        terminal_content=recovered_pending.terminal_content,
+                        terminal_error=recovered_pending.terminal_error,
+                        terminal_control=recovered_pending.terminal_control,
+                        tool_error=recovered_pending.tool_error,
+                        tool_status=recovered_pending.tool_status,
+                    )
                 else:
                     if channel == "_system":
                         session = self.sessions.get_system_session(session_id)
@@ -5289,6 +5701,16 @@ class AgentLoop:
                             if payload.get("terminalContent")
                             else None
                         ),
+                        terminal_error=(
+                            dict(payload["terminalError"])
+                            if isinstance(payload.get("terminalError"), dict)
+                            else None
+                        ),
+                        terminal_control=(
+                            dict(payload["terminalControl"])
+                            if isinstance(payload.get("terminalControl"), dict)
+                            else None
+                        ),
                         tool_error=str(
                             payload.get("toolError")
                             or "turn stopped before the tool result was recorded"
@@ -5302,7 +5724,7 @@ class AgentLoop:
                     self._retain_recovery_backlog(
                         owner,
                         stopped=stopped,
-                        message=recovered_message,
+                        pending=recovered_pending,
                     )
                     continue
                 self._persist_stopped_turn(
@@ -5319,14 +5741,14 @@ class AgentLoop:
                 if isinstance(exc, ValueError) and "session is unavailable" in str(exc):
                     self._quarantine_stopped_recovery(path)
                     continue
-                if stopped is None and recovered_message is None:
+                if stopped is None and recovered_pending is None:
                     self._quarantine_stopped_recovery(path)
                     continue
                 blocked_owners.add(owner)
                 self._retain_recovery_backlog(
                     owner,
                     stopped=stopped,
-                    message=recovered_message,
+                    pending=recovered_pending,
                 )
 
     def _flush_stopped_turn_retries(self) -> None:
@@ -5442,6 +5864,19 @@ class AgentLoop:
                 stopped.turn_id,
                 status="cancelled" if tool_status == "cancelled" else "failed",
             )
+        terminal = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.get("role") == "assistant" and not message.get("tool_calls")
+            ),
+            None,
+        )
+        if terminal is not None:
+            if stopped.terminal_error:
+                terminal["turn_error"] = dict(stopped.terminal_error)
+            if stopped.terminal_control:
+                terminal["turn_control"] = dict(stopped.terminal_control)
 
         old_message_count = len(stopped.session.messages)
         marker_was_present = recovery_marker_key in stopped.session.metadata
@@ -5694,7 +6129,10 @@ class AgentLoop:
             return await asyncio.wait_for(_run(), timeout=remaining)
         except TimeoutError:
             if not pending_turn.history_committed:
-                self._persist_pending_interruption(pending_turn)
+                self._persist_pending_failure(
+                    pending_turn,
+                    TimeoutError("direct turn deadline expired"),
+                )
             raise
         except asyncio.CancelledError:
             if not pending_turn.history_committed:
@@ -5703,9 +6141,9 @@ class AgentLoop:
                 elif asyncio.current_task() not in self._superseded_tasks:
                     self._persist_pending_interruption(pending_turn)
             raise
-        except Exception:
+        except Exception as exc:
             if not pending_turn.history_committed:
-                self._persist_pending_failure(pending_turn)
+                self._persist_pending_failure(pending_turn, exc)
             raise
         finally:
             if current_task is not None:

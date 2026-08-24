@@ -693,6 +693,7 @@ class ApplicationControlService:
                 "compaction": defaults.compaction_model or defaults.assistant_model or "",
             },
             "reasoning_effort": defaults.reasoning_effort or "auto",
+            "pulse_enabled": defaults.pulse_enabled,
             "provider": self._config.get_provider_name(self._engine.model) or "unknown",
         }
 
@@ -1189,14 +1190,19 @@ class ApplicationControlService:
 
     async def _action_model_select(self, params: dict[str, Any]) -> dict[str, Any]:
         slot = str(params.get("slot") or "").strip().lower()
-        model = str(params.get("model") or "").strip()
+        raw_model = params.get("model")
+        model = str(raw_model).strip() if raw_model is not None else None
         defaults = self._config.agents.defaults
         if slot not in {"agent", "subagent", "assistant", "vision", "compaction"}:
             return _err(
                 "Slot must be one of agent|subagent|assistant|vision|compaction",
                 code="invalid_argument",
             )
-        if model not in (defaults.model_choice or []):
+        if slot == "agent" and not model:
+            return _err("The agent model cannot inherit from another slot.", code="invalid_argument")
+        if model == "":
+            return _err("Use null to restore model inheritance.", code="invalid_argument")
+        if model is not None and model not in (defaults.model_choice or []):
             return _err(f"Model `{model}` is not in the model catalog.", code="invalid_argument")
         paths = {
             "agent": "agents.defaults.model",
@@ -1206,14 +1212,19 @@ class ApplicationControlService:
             "compaction": "agents.defaults.compactionModel",
         }
         def select(current: Any) -> Mapping[str, Any]:
-            if model not in (current.agents.defaults.model_choice or []):
+            if model is not None and model not in (current.agents.defaults.model_choice or []):
                 raise ConfigurationValidationError(
                     f"Model `{model}` is not in the model catalog."
                 )
             return {paths[slot]: model}
 
         await self._configuration.mutate_runtime(select)
-        return _ok({"models": self._model_state(), "message": f"{slot.title()} model → `{model}`"})
+        message = (
+            f"{slot.title()} model → `{model}`"
+            if model is not None
+            else f"{slot.title()} model now inherits its fallback."
+        )
+        return _ok({"models": self._model_state(), "message": message})
 
     async def _action_model_set_effort(self, params: dict[str, Any]) -> dict[str, Any]:
         requested = str(params.get("value") or "").strip().casefold()
@@ -1234,6 +1245,20 @@ class ApplicationControlService:
             {
                 "models": self._model_state(),
                 "message": f"Reasoning effort set to `{effort or 'auto'}`.",
+            }
+        )
+
+    async def _action_agent_set_pulse(self, params: dict[str, Any]) -> dict[str, Any]:
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            return _err("Pulse enabled must be a boolean.", code="invalid_argument")
+        await self._configuration.update_runtime(
+            {"agents.defaults.pulseEnabled": enabled}
+        )
+        return _ok(
+            {
+                "models": self._model_state(),
+                "message": f"Pulse {'enabled' if enabled else 'disabled'}.",
             }
         )
 

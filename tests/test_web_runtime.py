@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from nanocat.agent.context import ContextBuilder
 from nanocat.agent.loop import (
     AgentLoop,
+    _PendingDurabilityRecord,
     _PendingTurn,
     _StoppedTurn,
     _TurnCancellationClaim,
@@ -430,6 +431,7 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         engine._stopped_turns = {}
         engine._post_stop_buf = {}
+        engine._pending_durability = {}
         engine._durability_retry_task = None
         engine._session_locks = {}
         engine._ingress_ordinals = iter(range(1, 10000))
@@ -565,7 +567,15 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "accepted later",
                 ingress_ordinal=2,
             )
-            second._post_stop_buf.setdefault("web:chat", []).append(late)
+            second._pending_durability.setdefault("web:chat", []).append(
+                _PendingDurabilityRecord(
+                    message=late,
+                    transient=False,
+                    order_key=(2, late.timestamp.timestamp()),
+                    terminal_content=second.tips.turn_interrupted,
+                    terminal_control={"kind": "runtime_shutdown"},
+                )
+            )
             self.assertTrue(second.retry_session_durability("web:chat"))
             recovered = second.sessions.get_session("web", session.id)
             assert recovered is not None
@@ -670,7 +680,17 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
             stop_message = InboundMessage("web", "user", "target", "arrived during stop")
-            engine._post_stop_buf["web:target"] = [stop_message]
+            engine._pending_durability = {
+                "web:target": [
+                    _PendingDurabilityRecord(
+                        message=stop_message,
+                        transient=False,
+                        order_key=(0, stop_message.timestamp.timestamp()),
+                        terminal_content=engine.tips.turn_interrupted,
+                        terminal_control={"kind": "runtime_shutdown"},
+                    )
+                ]
+            }
             engine._stop_requested = {"web:target"}
             engine._running = True
             original_retry = engine.retry_session_durability
@@ -697,7 +717,10 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(blocked_attempted.wait(), timeout=1)
                 await asyncio.sleep(0.1)
                 self.assertFalse(target_attempted.is_set())
-                self.assertEqual(engine._post_stop_buf["web:target"], [stop_message])
+                self.assertEqual(
+                    engine._pending_durability["web:target"][0].message,
+                    stop_message,
+                )
 
                 engine._stop_requested.clear()
                 await asyncio.wait_for(target_attempted.wait(), timeout=1)
@@ -837,7 +860,7 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
             session = engine.sessions.get_or_create("web", "chat")
             self.assertEqual(
                 [item["content"] for item in session.messages],
-                ["deferred input", engine.tips.turn_interrupted],
+                ["deferred input", engine.tips.turn_cancelled],
             )
             await engine.sessions.close()
 
@@ -1066,7 +1089,7 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
             ]
             claim = _TurnCancellationClaim(messages=messages, task=None, pending_turn=None)
 
-            async def fail_first(_pending_turn: _PendingTurn) -> bool:
+            async def fail_first(_pending_turn: _PendingTurn, **_kwargs: Any) -> bool:
                 return False
 
             with patch.object(
@@ -1074,9 +1097,11 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "_persist_pending_interruption_ordered",
                 side_effect=fail_first,
             ):
-                with self.assertRaisesRegex(RuntimeError, "could not be persisted"):
+                self.assertTrue(
                     await engine._cancel_turn_owned(turn_id, "web:chat", claim)
+                )
 
+            self.assertEqual(engine.turns.get(turn_id).state, TurnState.CANCELLED)
             self.assertTrue(engine.has_pending_session_durability("web:chat"))
             self.assertEqual(engine._turn_admission_slots._value, 2)
             self.assertEqual(engine._web_steer_reservations, {})
@@ -1462,7 +1487,17 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 transient=False,
                 ordinal=7,
             )
-            self.assertTrue(first._journal_pending_turn(pending, "Recovered after restart."))
+            self.assertTrue(
+                first._journal_pending_turn(
+                    _PendingDurabilityRecord(
+                        message=pending.message,
+                        transient=pending.transient,
+                        order_key=first._pending_order_key(pending),
+                        terminal_content="Recovered after restart.",
+                        terminal_control={"kind": "runtime_shutdown"},
+                    )
+                )
+            )
 
             second = self._minimal_recovery_engine(root_path)
             second._recover_stopped_turn_journal()
@@ -2760,7 +2795,7 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         persisted: list[str] = []
 
-        async def persist(_self: Any, pending: Any) -> bool:
+        async def persist(_self: Any, pending: Any, **_kwargs: Any) -> bool:
             started.set()
             await release.wait()
             persisted.append(pending.message.content)
@@ -2969,7 +3004,11 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
         engine.turns.register(turn_id, session_key, "user")
         persisted: list[str] = []
 
-        async def persist(_self: Any, pending: _PendingTurn) -> bool:
+        async def persist(
+            _self: Any,
+            pending: _PendingTurn,
+            **_kwargs: Any,
+        ) -> bool:
             persisted.append(pending.message.content)
             pending.history_committed = True
             return True
@@ -3016,7 +3055,7 @@ class AsyncRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
         engine.turns.register(turn_id, session_key, "user")
         persisted: list[str] = []
 
-        async def persist(_self: Any, pending: Any) -> bool:
+        async def persist(_self: Any, pending: Any, **_kwargs: Any) -> bool:
             persisted.append(pending.message.content)
             pending.history_committed = True
             return True

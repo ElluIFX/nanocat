@@ -195,16 +195,17 @@ class TurnCoordinator:
         self._join_counts[turn_id] = self._join_counts.get(turn_id, 0) + 1
         return True
 
-    def release_join(self, turn_id: str) -> None:
-        """Release one queued steer and apply any deferred terminal transition."""
+    def release_join(self, turn_id: str) -> tuple[TurnState, str] | None:
+        """Release one queued steer and return an applied deferred terminal."""
         count = self._join_counts.get(turn_id, 0)
         if count <= 1:
             self._join_counts.pop(turn_id, None)
             terminal = self._deferred_terminal.pop(turn_id, None)
             if terminal is not None:
                 self.transition(turn_id, *terminal)
-            return
+            return terminal
         self._join_counts[turn_id] = count - 1
+        return None
 
     def activate_join(self, turn_id: str) -> bool:
         """Transfer a queued steer into a new execution of the same logical turn."""

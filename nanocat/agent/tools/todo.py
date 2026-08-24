@@ -51,6 +51,16 @@ def _render_md(todo: TodoList) -> str:
     return "\n".join(rows)
 
 
+def _snapshot(todo: TodoList, action: str) -> dict[str, Any]:
+    return {
+        "id": todo.id,
+        "name": todo.name,
+        "action": action,
+        "completed": all(item.status == "COMPLETED" for item in todo.tasks),
+        "tasks": [asdict(item) for item in todo.tasks],
+    }
+
+
 def _get_store(session: Session | None) -> dict[str, Any]:
     if session is None:
         return {}
@@ -123,7 +133,7 @@ class TodoTool(Tool):
                 chat_id=chat_id,
                 content=_render_md(todo),
                 media=[],
-                metadata={},
+                metadata={"_tool_notification": "todo"},
             )
             try:
                 await self._send_callback(msg)
@@ -228,6 +238,7 @@ class TodoTool(Tool):
             id=todo.id,
             name=name,
             task_count=len(tasks),
+            todo=_snapshot(todo, "create"),
             instruction=_PROGRESS_INSTRUCTION,
         )
 
@@ -237,7 +248,12 @@ class TodoTool(Tool):
         todo = _load(self._session, id)
         if todo is None:
             return tool_err(f"Todo list '{id}' not found")
-        return tool_ok(id=todo.id, name=todo.name, tasks=[asdict(t) for t in todo.tasks])
+        return tool_ok(
+            id=todo.id,
+            name=todo.name,
+            tasks=[asdict(t) for t in todo.tasks],
+            todo=_snapshot(todo, "check"),
+        )
 
     async def _update(
         self,
@@ -262,10 +278,20 @@ class TodoTool(Tool):
         if notify:
             await self._notify(todo)
         if status != "COMPLETED":
-            return tool_ok(index=index, status=status)
+            return tool_ok(index=index, status=status, todo=_snapshot(todo, "update"))
         if index + 1 >= len(todo.tasks):
-            return tool_ok(index=index, status=status, all_completed=True)
-        return tool_ok(index=index, status=status, next_index=index + 1)
+            return tool_ok(
+                index=index,
+                status=status,
+                all_completed=True,
+                todo=_snapshot(todo, "update"),
+            )
+        return tool_ok(
+            index=index,
+            status=status,
+            next_index=index + 1,
+            todo=_snapshot(todo, "update"),
+        )
 
     async def _append(
         self, id: str | None = None, task: str | None = None, notify: bool = False, **_: Any
@@ -280,7 +306,7 @@ class TodoTool(Tool):
         _save(self._session, todo)
         if notify:
             await self._notify(todo)
-        return tool_ok(index=new_index)
+        return tool_ok(index=new_index, todo=_snapshot(todo, "append"))
 
     async def _complete(self, id: str | None = None, notify: bool = False, **_: Any) -> str:
         if not id:
@@ -296,4 +322,4 @@ class TodoTool(Tool):
         store.pop(id, None)
         if notify:
             await self._notify(todo)
-        return tool_ok(completed=todo.name)
+        return tool_ok(completed=todo.name, todo=_snapshot(todo, "complete"))

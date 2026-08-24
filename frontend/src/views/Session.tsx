@@ -10,7 +10,6 @@ import {
   LoaderCircle,
   MessageSquareText,
   MoreHorizontal,
-  Pencil,
   Paperclip,
   Send,
   Sparkles,
@@ -31,6 +30,7 @@ import { WorkingFeed } from "../components/WorkingFeed";
 import { hrefFor, navigate, route } from "../router";
 import {
   approvals,
+  appendEvent,
   connection,
   currentSession,
   inspectorOpen,
@@ -40,6 +40,7 @@ import {
   loadEarlierTrajectory,
   loadModels,
   loadingSession,
+  modelSettings,
   models,
   recoverGlobalState,
   reloadCurrentSession,
@@ -104,29 +105,23 @@ function ApprovalDock({ approval, onDone }: { approval: ApprovalRequest; onDone:
   </section>;
 }
 
-function SessionActions({ session, onClose }: { session: NonNullable<typeof currentSession.value>; onClose: () => void }) {
-  const [title, setTitle] = useState(session.title);
-  const [effort, setEffort] = useState(runtime.value?.effort ?? "auto");
+function SessionActions({ session, busy, onClose }: { session: NonNullable<typeof currentSession.value>; busy: boolean; onClose: () => void }) {
   const [working, setWorking] = useState("");
+  const [applied, setApplied] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const dialog = useDialogFocus<HTMLElement>(true, onClose);
+  useEffect(() => {
+    if (!applied) return;
+    const timer = window.setTimeout(() => setApplied(""), 1600);
+    return () => window.clearTimeout(timer);
+  }, [applied]);
 
-  const rename = async () => {
-    const next = title.trim();
-    if (!next || next === session.title) return;
-    setWorking("rename");
-    try {
-      const updated = await api.renameSession(session.id, next, session.revision);
-      if (currentSession.value?.id === session.id) currentSession.value = { ...currentSession.value, title: next, revision: updated.revision ?? currentSession.value.revision };
-      sessions.value = sessions.value.map((item) => item.id === session.id ? { ...item, title: next, revision: updated.revision ?? item.revision } : item);
-      onClose();
-    } catch (error) {
-      reportOperationError(error, "The session could not be renamed");
-    } finally {
-      setWorking("");
-    }
-  };
+  const settingFeedback = (name: string) => working === name
+    ? <small class="setting-feedback saving"><LoaderCircle class="spin" size={10} /> Saving</small>
+    : applied === name
+      ? <small class="setting-feedback applied"><Check size={10} /> Applied</small>
+      : null;
 
   const compact = async () => {
     setWorking("compact");
@@ -141,14 +136,43 @@ function SessionActions({ session, onClose }: { session: NonNullable<typeof curr
     }
   };
 
+  const updateModel = async (slot: "agent" | "subagent", value: string) => {
+    setApplied("");
+    setWorking(slot);
+    try {
+      await api.selectModel(value || null, slot);
+      await loadModels(true);
+      setApplied(slot);
+    } catch (error) {
+      reportOperationError(error, `${slot === "agent" ? "Agent" : "Subagent"} model could not be changed`);
+    } finally {
+      setWorking("");
+    }
+  };
+
   const updateEffort = async (value: string) => {
-    setEffort(value);
+    setApplied("");
     setWorking("effort");
     try {
       await api.setEffort(value);
-      if (runtime.value) runtime.value = { ...runtime.value, effort: value };
+      await loadModels(true);
+      setApplied("effort");
     } catch (error) {
       reportOperationError(error, "Reasoning effort could not be changed");
+    } finally {
+      setWorking("");
+    }
+  };
+
+  const updatePulse = async (enabled: boolean) => {
+    setApplied("");
+    setWorking("pulse");
+    try {
+      await api.setPulse(enabled);
+      await loadModels(true);
+      setApplied("pulse");
+    } catch (error) {
+      reportOperationError(error, "Pulse could not be changed");
     } finally {
       setWorking("");
     }
@@ -172,14 +196,17 @@ function SessionActions({ session, onClose }: { session: NonNullable<typeof curr
     }
   };
 
-  return <section ref={dialog} tabIndex={-1} class="session-action-menu" role="dialog" aria-modal="true" aria-label="Session actions" onKeyDown={(event) => {
+  return <section id="session-actions-menu" ref={dialog} tabIndex={-1} class="session-action-menu" role="dialog" aria-label="Session actions" onKeyDown={(event) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
     onClose();
   }}>
     <header><strong>Session actions</strong><IconButton label="Close session actions" onClick={onClose}><X size={15} /></IconButton></header>
-    <label><span>Title</span><span class="session-rename-row"><input autoFocus value={title} maxLength={200} onInput={(event) => setTitle(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") void rename(); }} /><button class="secondary-button" disabled={!title.trim() || title.trim() === session.title || Boolean(working)} onClick={() => void rename()}>{working === "rename" ? <LoaderCircle class="spin" size={14} /> : <Pencil size={14} />} Rename</button></span></label>
-    <label><span>Reasoning effort</span><select value={effort} disabled={Boolean(working)} onChange={(event) => void updateEffort(event.currentTarget.value)}><option value="auto">Auto</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></label>
+    <div class="session-action-section"><span>Runtime defaults</span><small>{busy ? "Available when the active turn finishes" : "Applied to the next turn"}</small></div>
+    <label><span class="session-setting-label">Agent model{settingFeedback("agent")}</span><select value={modelSettings.value?.slots.agent ?? modelSettings.value?.effective.agent ?? ""} disabled={busy || Boolean(working)} onChange={(event) => void updateModel("agent", event.currentTarget.value)}>{[...new Set(models.value.map((model) => model.providerLabel || model.provider || "Other"))].map((provider) => <optgroup key={provider} label={provider}>{models.value.filter((model) => (model.providerLabel || model.provider || "Other") === provider).map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}</option>)}</optgroup>)}</select></label>
+    <label><span class="session-setting-label">Subagent model{settingFeedback("subagent")}</span><select value={modelSettings.value?.slots.subagent ?? ""} disabled={busy || Boolean(working)} onChange={(event) => void updateModel("subagent", event.currentTarget.value)}><option value="">Inherit assistant / agent</option>{[...new Set(models.value.map((model) => model.providerLabel || model.provider || "Other"))].map((provider) => <optgroup key={provider} label={provider}>{models.value.filter((model) => (model.providerLabel || model.provider || "Other") === provider).map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}</option>)}</optgroup>)}</select></label>
+    <label><span class="session-setting-label">Reasoning effort{settingFeedback("effort")}</span><select value={modelSettings.value?.reasoningEffort ?? runtime.value?.effort ?? "auto"} disabled={busy || Boolean(working)} onChange={(event) => void updateEffort(event.currentTarget.value)}><option value="auto">Auto</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></label>
+    <label class="session-toggle"><span><span class="session-setting-title"><strong>Pulse</strong>{settingFeedback("pulse")}</span><small>Show concise progress between tool steps</small></span><input type="checkbox" checked={modelSettings.value?.pulseEnabled ?? runtime.value?.pulseEnabled ?? false} disabled={busy || Boolean(working)} onChange={(event) => void updatePulse(event.currentTarget.checked)} /><i aria-hidden="true" /></label>
     <button class="menu-action" disabled={Boolean(working)} onClick={() => void compact()}>{working === "compact" ? <LoaderCircle class="spin" size={15} /> : <Sparkles size={15} />} Compact context</button>
     {confirmDelete ? <div class="delete-confirm"><p>Permanently delete this session and its local conversation history?</p><button class="secondary-button" onClick={() => setConfirmDelete(false)}>Cancel</button><button class="danger-button" disabled={Boolean(working)} onClick={() => void remove()}>{working === "delete" ? <LoaderCircle class="spin" size={14} /> : <Trash2 size={14} />} Delete</button></div> : <button class="menu-action danger" disabled={Boolean(working)} onClick={() => setConfirmDelete(true)}><Trash2 size={15} /> Delete session</button>}
   </section>;
@@ -257,18 +284,10 @@ function Composer({ sessionId, running }: { sessionId: string; running: boolean 
         currentSession.value = {
           ...active,
           status: "running",
-          events: [...active.events, {
-            eventId: `local-${submitted.turnId ?? crypto.randomUUID?.() ?? Date.now()}`,
-            sequence: active.events.length ? Math.max(...active.events.map((event) => event.sequence)) + 1 : 1,
-            timestamp: new Date().toISOString(),
-            sessionId,
-            turnId: submitted.turnId,
-            type: running ? "turn.steer_queued" : "turn.queued",
-            status: "running",
-            summary: running ? "Guidance queued" : "Turn queued",
-          }],
+          events: active.events,
           turns: [...active.turns, {
             id: `local-${crypto.randomUUID?.() ?? Date.now()}`,
+            turnId: submitted.turnId,
             role: "user",
             content,
             timestamp: new Date().toISOString(),
@@ -289,6 +308,26 @@ function Composer({ sessionId, running }: { sessionId: string; running: boolean 
       }
       sessionStorage.removeItem(draftKey);
     } catch (error) {
+      if (running) {
+        const active = currentSession.value;
+        const turnId = [...(active?.events ?? [])].reverse().find((event) => event.turnId)?.turnId;
+        appendEvent({
+          eventId: `local-steer-error-${crypto.randomUUID?.() ?? Date.now()}`,
+          sequence: active?.events.length ? Math.max(...active.events.map((event) => event.sequence)) + 1 : 1,
+          timestamp: new Date().toISOString(),
+          sessionId,
+          turnId,
+          type: "turn.steer_rejected",
+          summary: "Guidance rejected",
+          redactedOutput: {
+            error: {
+              code: "steer_rejected",
+              title: "Guidance rejected",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          },
+        });
+      }
       reportOperationError(error, running ? "The steer request could not be queued" : "The message could not be sent");
     } finally {
       setSubmitting(false);
@@ -335,14 +374,31 @@ function ConversationView() {
   const [following, setFollowing] = useState(true);
   const [newUpdates, setNewUpdates] = useState(0);
   const [visibleCount, setVisibleCount] = useState(250);
+  const [stopPending, setStopPending] = useState(false);
   const lastCount = useRef(0);
   const lastEventCount = useRef(0);
   const lastTailId = useRef<string | undefined>();
+  const lastEventSignature = useRef("");
+  const eventSignature = JSON.stringify((session?.events ?? []).slice(-3).map((event) => [
+    event.eventId,
+    event.nodeId,
+    event.type,
+    event.status,
+    event.summary,
+    event.redactedOutput,
+  ]));
+
+  useEffect(() => {
+    if (!session || !["running", "queued", "cancelling", "waiting_approval", "waiting_user"].includes(session.status)) {
+      setStopPending(false);
+    }
+  }, [session?.id, session?.status]);
 
   useLayoutEffect(() => {
     setVisibleCount(250);
     lastCount.current = session?.turns.length ?? 0;
     lastEventCount.current = session?.events.length ?? 0;
+    lastEventSignature.current = eventSignature;
     lastTailId.current = session?.turns.at(-1)?.id;
     setFollowing(true);
     followingRef.current = true;
@@ -387,12 +443,14 @@ function ConversationView() {
   }, [session?.turns.length, following]);
   useEffect(() => {
     const count = session?.events.length ?? 0;
-    if (count > lastEventCount.current) {
+    const changed = eventSignature !== lastEventSignature.current;
+    if (changed) {
       if (following) requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }));
-      else setNewUpdates((value) => value + count - lastEventCount.current);
+      else setNewUpdates((value) => value + Math.max(1, count - lastEventCount.current));
     }
     lastEventCount.current = count;
-  }, [session?.events.length, following]);
+    lastEventSignature.current = eventSignature;
+  }, [eventSignature, following]);
 
   const preservePrepend = async (action: () => void | Promise<void>) => {
     const node = scrollRef.current;
@@ -410,9 +468,51 @@ function ConversationView() {
   const liveTurnId = [...session.events].reverse().find((event) => event.turnId)?.turnId;
   const activeEvents = liveTurnId ? session.events.filter((event) => {
     if (event.turnId !== liveTurnId) return false;
-    return !["assistant.final", "turn.completed", "turn.failed", "turn.cancelled", "user.message"].includes(event.type);
+    return !["assistant.final", "turn.completed", "user.message", "user.steer"].includes(event.type);
   }) : [];
-  const stop = () => void api.cancel(session.id).catch((error) => reportOperationError(error, "The turn could not be stopped"));
+  const projectedLiveTurn = Boolean(
+    liveTurnId
+    && session.turns.some((turn) => turn.role === "assistant" && turn.turnId === liveTurnId),
+  );
+  const liveTerminal = [...activeEvents].reverse().find((event) => event.type === "turn.failed" || event.type === "turn.rejected" || event.type === "turn.cancelled");
+  const showLiveTurn = running || Boolean(liveTerminal && !projectedLiveTurn);
+  const stop = () => {
+    if (stopPending || !liveTurnId) return;
+    setStopPending(true);
+    appendEvent({
+      eventId: `local-stop-${liveTurnId}`,
+      nodeId: `stop:${liveTurnId}`,
+      sequence: session.events.length ? Math.max(...session.events.map((event) => event.sequence)) + 1 : 1,
+      timestamp: new Date().toISOString(),
+      sessionId: session.id,
+      turnId: liveTurnId,
+      type: "turn.cancelling",
+      status: "cancelling",
+      summary: "Stop requested",
+      redactedOutput: { control: { kind: "stop", phase: "requested" } },
+    });
+    void api.cancel(session.id).catch((error) => {
+      setStopPending(false);
+    const active = currentSession.value;
+    appendEvent({
+      eventId: `local-stop-error-${crypto.randomUUID?.() ?? Date.now()}`,
+      sequence: active?.events.length ? Math.max(...active.events.map((event) => event.sequence)) + 1 : 1,
+      timestamp: new Date().toISOString(),
+      sessionId: session.id,
+      turnId: liveTurnId,
+      type: "control.stop_failed",
+      summary: "Stop failed",
+      redactedOutput: {
+        error: {
+          code: "stop_failed",
+          title: "Stop failed",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      },
+    });
+    reportOperationError(error, "The turn could not be stopped");
+    });
+  };
   return <div ref={scrollRef} class="conversation-scroll" onScroll={(event) => {
     const target = event.currentTarget;
     const next = target.scrollHeight - target.scrollTop - target.clientHeight < 140;
@@ -426,7 +526,7 @@ function ConversationView() {
       {session.turns.length
         ? visibleTurns.map((turn) => <Turn key={turn.id} turn={turn} />)
         : <EmptyState icon={<MessageSquareText size={27} />} title="Start a new conversation" description="Describe a task, ask a question, or attach context. NanoCat will expose each important action as it works." />}
-      {running && <Turn turn={{ id: `active-${liveTurnId ?? session.id}`, role: "assistant", content: "", timestamp: activeEvents[0]?.timestamp ?? "", status: session.status }} active events={activeEvents} onStop={stop} />}
+      {showLiveTurn && <Turn turn={{ id: `active-${liveTurnId ?? session.id}`, turnId: liveTurnId, role: "assistant", content: "", timestamp: activeEvents[0]?.timestamp ?? "", status: liveTerminal?.status ?? session.status }} active={running} events={activeEvents} onStop={session.status === "cancelling" || stopPending ? undefined : stop} />}
     </div>
     {newUpdates > 0 && <button class="new-updates" onClick={() => { followingRef.current = true; setFollowing(true); scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); setNewUpdates(0); }}><ArrowDown size={15} /> {newUpdates} new updates</button>}
   </div>;
@@ -485,24 +585,10 @@ export function Session() {
 
   return <div class={`session-page ${inspectorOpen.value ? "with-inspector" : ""}`}>
     <PageHeader title={session?.title || "Session"} eyebrow={session?.model ?? "Agent workspace"} actions={<>
-      <label class="header-model-select">
-        <span class="sr-only">Agent model</span>
-        <select value={session?.model ?? runtime.value?.model ?? ""} onChange={(event) => {
-          const model = event.currentTarget.value;
-          void api.selectModel(model).then(() => {
-            if (runtime.value) runtime.value = { ...runtime.value, model };
-            if (currentSession.value) currentSession.value = { ...currentSession.value, model };
-            sessions.value = sessions.value.map((item) => item.id === sessionId ? { ...item, model } : item);
-          }).catch((error) => reportOperationError(error, "The model could not be changed"));
-        }}>
-          {!models.value.some((item) => item.id === (session?.model ?? runtime.value?.model)) && <option value={session?.model ?? runtime.value?.model ?? ""}>{session?.model ?? runtime.value?.model ?? "Select model"}</option>}
-          {[...new Set(models.value.map((model) => model.providerLabel || model.provider || "Other"))].map((provider) => <optgroup key={provider} label={provider}>{models.value.filter((model) => (model.providerLabel || model.provider || "Other") === provider).map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}</option>)}</optgroup>)}
-        </select>
-      </label>
       <span class={`header-connection ${connection.value}`}><span />{connection.value}</span>
       <span ref={actionsAnchor} class="session-actions-anchor">
-        <IconButton label="Session actions" onClick={() => actionsOpen ? closeActions() : setActionsOpen(true)}><MoreHorizontal size={18} /></IconButton>
-        {session && actionsOpen && <SessionActions session={session} onClose={closeActions} />}
+        <IconButton label="Session actions" aria-expanded={actionsOpen} aria-controls="session-actions-menu" onClick={() => actionsOpen ? closeActions() : setActionsOpen(true)}><MoreHorizontal size={18} /></IconButton>
+        {session && actionsOpen && <SessionActions session={session} busy={running || Boolean(runtime.value?.busy)} onClose={closeActions} />}
       </span>
     </>}>
       {session && <div class="session-tabs" role="tablist">

@@ -133,6 +133,11 @@ class ToolRegistry:
             tool.set_session_key(context.session_key)  # type: ignore[attr-defined]
         if hasattr(tool, "set_storage_scope"):
             tool.set_storage_scope(context.storage_scope)  # type: ignore[attr-defined]
+        if hasattr(tool, "set_turn_defaults"):
+            tool.set_turn_defaults(  # type: ignore[attr-defined]
+                context.subagent_model,
+                context.reasoning_effort,
+            )
 
     def filtered(self, exclude: frozenset[str] | set[str]) -> ToolRegistry:
         """Return a new registry with the same tool instances except those in *exclude*."""

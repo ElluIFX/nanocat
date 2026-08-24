@@ -162,6 +162,69 @@ class WebChannel(BaseChannel):
         except Exception as exc:
             logger.warning("Web SSE publish failed ({})", type(exc).__name__)
 
+    async def publish_feed_event(
+        self,
+        event_type: str,
+        *,
+        session_id: str,
+        turn_id: str | None,
+        request_id: str | None,
+        status: str,
+        summary: str,
+        node_id: str | None = None,
+        source: str = "control",
+        output: Any = None,
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Publish and persist one structured browser feed event."""
+        safe_output = _working_value(output) if output is not None else None
+        payload = {
+            "summary": summary,
+            "status": status,
+            **({"redactedOutput": safe_output} if safe_output is not None else {}),
+            **({"startedAt": started_at.isoformat()} if started_at else {}),
+            **({"endedAt": ended_at.isoformat()} if ended_at else {}),
+            **({"durationMs": duration_ms} if duration_ms is not None else {}),
+        }
+        await self._emit(
+            event_type,
+            payload,
+            session_id=session_id,
+            request_id=request_id,
+            turn_id=turn_id,
+            source=source,
+            status=status,
+            node_id=node_id,
+        )
+        await self._record_activity(
+            self._storage_scope(session_id),
+            type=event_type,
+            source=source,
+            status=status,
+            turn_id=turn_id,
+            request_id=request_id,
+            node_id=node_id,
+            summary=summary,
+            redacted_output=safe_output,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=duration_ms,
+            metadata={"conversationVisible": True},
+        )
+
+    def schedule_feed_event(self, event_type: str, **values: Any) -> None:
+        """Schedule a feed event from a synchronous turn finalizer."""
+        if not self._running:
+            return
+        self._track_task(
+            asyncio.create_task(
+                self.publish_feed_event(event_type, **values),
+                name=f"nanocat.web.feed.{event_type}",
+            )
+        )
+
     async def submit(
         self,
         content: str,
@@ -245,6 +308,52 @@ class WebChannel(BaseChannel):
                     raise WebIngressRejectedError("capacity_timeout", retry_after=1)
                 steer_reserved = True
         turn_id = turn_id or uuid4().hex
+
+        async def publish_released_terminal(
+            terminal: tuple[Any, str] | None,
+        ) -> None:
+            if terminal is None or session_id is None:
+                return
+            state, detail = terminal
+            terminal_type = {
+                "completed": "turn.completed",
+                "cancelled": "turn.cancelled",
+                "failed": "turn.failed",
+            }.get(str(state))
+            if terminal_type is None:
+                return
+            record = turns.get(turn_id) if turns is not None else None
+            failed = terminal_type == "turn.failed"
+            cancelled = terminal_type == "turn.cancelled"
+            await self.publish_feed_event(
+                terminal_type,
+                session_id=session_id,
+                turn_id=turn_id,
+                request_id=turn_request_id,
+                status="failed" if failed else "cancelled" if cancelled else "completed",
+                summary="Turn failed" if failed else "Turn stopped" if cancelled else "Turn completed",
+                node_id=f"turn:{turn_id}",
+                source="runtime",
+                output=(
+                    {
+                        "error": {
+                            "code": "turn_failed",
+                            "title": "Turn failed",
+                            "message": detail or "The turn ended before it produced a valid result.",
+                        }
+                    }
+                    if failed
+                    else {
+                        "control": {
+                            "kind": "stop" if cancelled else "turn",
+                            "phase": "completed",
+                        }
+                    }
+                ),
+                started_at=record.started_at if record is not None else None,
+                ended_at=record.ended_at if record is not None else None,
+                duration_ms=record.duration_ms if record is not None else None,
+            )
         if turns is not None and not joined_turn:
             turns.register(
                 turn_id,
@@ -291,28 +400,34 @@ class WebChannel(BaseChannel):
                     "artifactRefs": list(artifact_refs or []),
                 },
             )
-            await self._emit(
+            assert session_id is not None
+            await self.publish_feed_event(
                 "turn.steer_queued" if steer else "turn.queued",
-                {
-                    "content": content[:240],
+                session_id=session_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                status="queued",
+                summary="Guidance queued" if steer else "Turn queued",
+                node_id=f"{'steer' if steer else 'turn'}:{request_id}",
+                source="web",
+                output={
+                    "control": {
+                        "kind": "steer" if steer else "submit",
+                        "phase": "queued",
+                    },
                     "contentChars": len(content),
                     "mediaCount": len(media or []),
-                    "artifactRefs": list(artifact_refs or []),
                 },
-                session_id=session_id,
-                request_id=request_id,
-                turn_id=turn_id,
-                source="web",
-                status="queued",
             )
         except asyncio.CancelledError:
             if steer_reserved and engine is not None:
-                engine.release_web_steer(
+                terminal = engine.release_web_steer(
                     session_key,
                     len(content),
                     turn_id=turn_id if joined_turn else None,
                     rollback_attachments=(attachment_count, attachment_bytes),
                 )
+                await publish_released_terminal(terminal)
             if turns is not None and not joined_turn:
                 turns.fail(turn_id, "ingress request cancelled")
             raise
@@ -333,44 +448,45 @@ class WebChannel(BaseChannel):
             admission = "unavailable"
         except asyncio.CancelledError:
             if steer_reserved and engine is not None:
-                engine.release_web_steer(
+                terminal = engine.release_web_steer(
                     session_key,
                     len(content),
                     turn_id=turn_id if joined_turn else None,
                     rollback_attachments=(attachment_count, attachment_bytes),
                 )
+                await publish_released_terminal(terminal)
             if turns is not None and not joined_turn:
                 turns.fail(turn_id, "ingress request cancelled")
             raise
         if admission != "accepted":
             if steer_reserved and engine is not None:
-                engine.release_web_steer(
+                terminal = engine.release_web_steer(
                     session_key,
                     len(content),
                     turn_id=turn_id if joined_turn else None,
                     rollback_attachments=(attachment_count, attachment_bytes),
                 )
+                await publish_released_terminal(terminal)
             if turns is not None and not joined_turn:
                 turns.fail(turn_id, f"ingress rejected: {admission}")
-            await self._record_activity(
-                storage_scope,
-                type="turn.rejected",
-                source="web",
-                status="failed",
-                turn_id=turn_id,
-                request_id=request_id,
-                summary="Web ingress rejected",
-                redacted_output={"reason": admission},
-                metadata={"conversationVisible": True},
-            )
-            await self._emit(
-                "turn.rejected",
-                {"reason": admission},
+            assert session_id is not None
+            event_type = "turn.steer_rejected" if steer else "turn.rejected"
+            await self.publish_feed_event(
+                event_type,
                 session_id=session_id,
-                request_id=request_id,
                 turn_id=turn_id,
-                source="web",
+                request_id=request_id,
                 status="failed",
+                summary="Guidance rejected" if steer else "Request rejected",
+                node_id=f"{'steer' if steer else 'turn'}:{request_id}",
+                source="web",
+                output={
+                    "error": {
+                        "code": "steer_rejected" if steer else "turn_rejected",
+                        "title": "Guidance rejected" if steer else "Request rejected",
+                        "message": f"Web ingress rejected the request: {admission}.",
+                    }
+                },
             )
             raise WebIngressRejectedError(
                 admission,
@@ -405,6 +521,8 @@ class WebChannel(BaseChannel):
         if broker is None:
             return
         metadata = dict(msg.metadata or {})
+        if metadata.get("_tool_notification"):
+            return
         explicit_session_id = str(metadata.pop("_web_session_id", "") or "") or None
         session_id = explicit_session_id
         if session_id is not None:
@@ -439,8 +557,13 @@ class WebChannel(BaseChannel):
             return
         request_id = msg.request_id or str(metadata.get("request_id") or "") or None
         turn_id = msg.turn_id or str(metadata.get("turn_id") or "") or None
+        control_event = metadata.get("_turn_control_event")
         if metadata.get("_turn_failed"):
             event_type = "turn.failed"
+        elif isinstance(control_event, dict) and control_event.get("type") in {
+            "turn.steer_applied",
+        }:
+            event_type = str(control_event["type"])
         elif metadata.get("_intervention"):
             action_names = {
                 "approve_once": "once",
@@ -507,6 +630,18 @@ class WebChannel(BaseChannel):
         public_metadata: dict[str, Any] = {}
         if safe_tool_event is not None:
             public_metadata["_tool_event"] = safe_tool_event
+        safe_error: dict[str, Any] | None = None
+        raw_error = metadata.get("_turn_error")
+        if event_type == "turn.failed" and isinstance(raw_error, dict):
+            bounded_error = _working_value(raw_error)
+            if isinstance(bounded_error, dict):
+                safe_error = bounded_error
+        if event_type == "turn.failed" and safe_error is None:
+            safe_error = {
+                "code": "turn_failed",
+                "title": "Turn failed",
+                "message": "The turn ended before it produced a valid result.",
+            }
         redacted_input = None
         redacted_output = None
         if safe_tool_event is not None:
@@ -534,6 +669,15 @@ class WebChannel(BaseChannel):
                 redacted_input = {"calls": input_calls}
             if output_calls:
                 redacted_output = {"calls": output_calls}
+        if safe_error is not None:
+            redacted_output = {"error": safe_error}
+        if isinstance(control_event, dict):
+            redacted_output = {
+                "control": {
+                    "kind": "steer",
+                    "phase": str(control_event.get("phase") or "applied"),
+                }
+            }
         if event_type == "assistant.thinking" and metadata.get(
             "_thinking_payload"
         ) is not None:
@@ -545,7 +689,7 @@ class WebChannel(BaseChannel):
         payload = {
             "content": (
                 ""
-                if event_type == "tool.event"
+                if event_type in {"tool.event", "turn.failed"}
                 else _working_value(msg.content)
                 if event_type == "assistant.thinking"
                 else msg.content
@@ -556,7 +700,15 @@ class WebChannel(BaseChannel):
             **({"redactedInput": redacted_input} if redacted_input is not None else {}),
             **({"redactedOutput": redacted_output} if redacted_output is not None else {}),
             **timing,
-            **({"summary": tool_summary} if tool_summary else {}),
+            **(
+                {"summary": str(safe_error.get("title") or "Turn failed")}
+                if safe_error is not None
+                else {"summary": str(control_event.get("summary") or "Guidance applied")}
+                if isinstance(control_event, dict)
+                else {"summary": tool_summary}
+                if tool_summary
+                else {}
+            ),
         }
         await broker.publish(
             event_type,
@@ -566,6 +718,9 @@ class WebChannel(BaseChannel):
             turn_id=turn_id,
             source="runtime",
             status=(
+                str(control_event.get("status") or "completed")
+                if isinstance(control_event, dict)
+                else
                 "failed"
                 if event_type == "turn.failed"
                 else "completed"
@@ -587,6 +742,15 @@ class WebChannel(BaseChannel):
             "artifactCount": len(artifact_refs),
             "toolEvent": safe_tool_event,
         }
+        if safe_error is not None:
+            activity_output = {"error": safe_error}
+        if isinstance(control_event, dict):
+            activity_output = {
+                "control": {
+                    "kind": "steer",
+                    "phase": str(control_event.get("phase") or "applied"),
+                }
+            }
         if event_type == "assistant.thinking" and msg.content:
             activity_output["content"] = _working_value(msg.content)
         await self._record_activity(
@@ -594,6 +758,9 @@ class WebChannel(BaseChannel):
             type=event_type,
             source="runtime",
             status=(
+                str(control_event.get("status") or "completed")
+                if isinstance(control_event, dict)
+                else
                 "failed"
                 if event_type == "turn.failed"
                 else "completed"
@@ -605,9 +772,11 @@ class WebChannel(BaseChannel):
             turn_id=turn_id,
             request_id=request_id,
             summary=(
-                f"Assistant response ({len(msg.content)} chars)"
+                str(control_event.get("summary") or "Guidance applied")
+                if isinstance(control_event, dict)
+                else f"Assistant response ({len(msg.content)} chars)"
                 if event_type == "assistant.final"
-                else f"Turn failed ({len(msg.content)} chars)"
+                else str(safe_error.get("title") or "Turn failed")
                 if event_type == "turn.failed"
                 else tool_summary
                 if tool_summary

@@ -4,6 +4,7 @@ import type {
   CommandInfo,
   LogEntry,
   ModelInfo,
+  RuntimeModelState,
   RuntimeSnapshot,
   SessionDetail,
   SessionSummary,
@@ -105,8 +106,9 @@ function normalizeStatus(value: unknown): SessionSummary["status"] {
 function eventStatus(type: string, explicit?: unknown): TimelineEvent["status"] {
   if (explicit) return normalizeStatus(explicit);
   if (type === "approval.pending") return "waiting_approval";
+  if (type === "turn.cancelling") return "cancelling";
   if (type === "assistant.final" || type === "turn.completed") return "completed";
-  if (type === "turn.failed") return "failed";
+  if (type === "turn.failed" || type === "turn.rejected") return "failed";
   if (type === "turn.cancelled") return "cancelled";
   if (["turn.queued", "turn.steer_queued", "assistant.progress", "tool.event"].includes(type)) return "running";
   return undefined;
@@ -114,13 +116,17 @@ function eventStatus(type: string, explicit?: unknown): TimelineEvent["status"] 
 
 function sessionDetailStatus(events: TimelineEvent[], busy: boolean): SessionSummary["status"] {
   if (busy) {
-    const waiting = [...events].reverse().find((event) => (
-      event.status === "waiting_approval" || event.status === "waiting_user"
+    const intervention = [...events].reverse().find((event) => (
+      event.type === "approval.pending"
+      || event.type === "approval.updated"
+      || event.status === "waiting_user"
     ));
-    return waiting?.status ?? "running";
+    if (intervention?.type === "approval.pending") return "waiting_approval";
+    if (intervention?.status === "waiting_user") return "waiting_user";
+    return "running";
   }
   const terminal = [...events].reverse().find((event) => (
-    event.status === "completed" || event.status === "failed" || event.status === "cancelled"
+    ["assistant.final", "turn.completed", "turn.failed", "turn.rejected", "turn.cancelled"].includes(event.type)
   ));
   return terminal?.status ?? "idle";
 }
@@ -314,6 +320,26 @@ function projectionEvent(item: ProjectionItem, index: number): TimelineEvent {
 function conversationTurns(conversation: ProjectionItem[]): SessionDetail["turns"] {
   const turns: SessionDetail["turns"] = [];
   let pendingActivity: TimelineEvent[] = [];
+  const flushActivity = () => {
+    if (!pendingActivity.length) return;
+    const terminal = pendingActivity.at(-1);
+    const status = terminal?.type === "turn.failed" || terminal?.type === "turn.rejected"
+      ? "failed"
+      : terminal?.type === "turn.cancelled"
+        ? "cancelled"
+        : "completed";
+    turns.push({
+      id: `work-${terminal?.turnId ?? terminal?.eventId ?? turns.length}`,
+      turnId: terminal?.turnId,
+      role: "assistant",
+      content: "",
+      timestamp: terminal?.endedAt ?? terminal?.timestamp ?? "",
+      status,
+      activity: pendingActivity,
+      artifactRefs: terminal?.artifactRefs,
+    });
+    pendingActivity = [];
+  };
   for (const [index, item] of conversation.entries()) {
     const projected = projectionEvent(item, index);
     if (item.type === "assistant.work") {
@@ -322,8 +348,10 @@ function conversationTurns(conversation: ProjectionItem[]): SessionDetail["turns
     }
     const role = item.role ?? (item.type.startsWith("user.") ? "user" : item.type.startsWith("assistant.") ? "assistant" : undefined);
     if (role === "user" || role === "assistant") {
+      if (role === "user" && pendingActivity.length && pendingActivity.some((event) => event.turnId !== item.turnId)) flushActivity();
       turns.push({
         id: item.id,
+        turnId: item.turnId,
         role,
         content: textContent(item.content),
         timestamp: item.timestamp ?? "",
@@ -336,22 +364,47 @@ function conversationTurns(conversation: ProjectionItem[]): SessionDetail["turns
       pendingActivity.push(projected);
     }
   }
-  if (pendingActivity.length) {
-    const terminal = pendingActivity.at(-1);
-    const status = terminal?.status === "failed" || terminal?.status === "cancelled"
-      ? terminal.status
-      : "completed";
-    turns.push({
-      id: `work-${terminal?.turnId ?? terminal?.eventId ?? turns.length}`,
-      role: "assistant",
-      content: "",
-      timestamp: terminal?.endedAt ?? terminal?.timestamp ?? "",
-      status,
-      activity: pendingActivity,
-      artifactRefs: terminal?.artifactRefs,
-    });
-  }
+  flushActivity();
   return turns;
+}
+
+function attachTrajectoryActivity(
+  turns: SessionDetail["turns"],
+  events: TimelineEvent[],
+): SessionDetail["turns"] {
+  const hidden = new Set(["user.message", "user.steer", "assistant.final", "turn.completed"]);
+  const byTurn = new Map<string, TimelineEvent[]>();
+  for (const event of events) {
+    if (!event.turnId || hidden.has(event.type)) continue;
+    const retained = byTurn.get(event.turnId) ?? [];
+    retained.push(event);
+    byTurn.set(event.turnId, retained);
+  }
+  const lastAssistant = new Map<string, number>();
+  turns.forEach((turn, index) => {
+    if (turn.role === "assistant" && turn.turnId) lastAssistant.set(turn.turnId, index);
+  });
+  return turns.map((turn, index) => {
+    if (turn.role !== "assistant" || !turn.turnId) return turn;
+    if (lastAssistant.get(turn.turnId) !== index) return turn;
+    const trajectory = byTurn.get(turn.turnId) ?? [];
+    if (!trajectory.length) return turn;
+    const trajectoryTypes = new Set(trajectory.map((event) => event.type));
+    const historical = (turn.activity ?? []).filter((event) => (
+      !trajectoryTypes.has(event.type)
+      || !["turn.failed", "turn.rejected", "turn.cancelled", "turn.cancelling", "turn.steer_queued", "turn.queued"].includes(event.type)
+    ));
+    const activity = [...historical, ...trajectory].sort((left, right) => {
+      const time = Date.parse(left.timestamp) - Date.parse(right.timestamp);
+      return Number.isFinite(time) && time !== 0 ? time : left.sequence - right.sequence;
+    });
+    const terminal = [...activity].reverse().find((event) => event.type === "turn.failed" || event.type === "turn.rejected" || event.type === "turn.cancelled");
+    return {
+      ...turn,
+      status: terminal?.status ?? turn.status,
+      activity,
+    };
+  });
 }
 
 function normalizeSettings(payload: unknown): SettingSection[] {
@@ -484,6 +537,53 @@ function parseLogLine(value: unknown, index: number): LogEntry {
   return { id: String(index), timestamp: "", level: "info", source: "runtime", message: raw };
 }
 
+async function requestModelState(): Promise<RuntimeModelState> {
+  const payload = record(await request<unknown>("/api/v1/models"));
+  const state = record(payload.models);
+  const providerItems = Array.isArray(state.providers) ? state.providers.map(record) : [];
+  const providers = new Map(providerItems.map((item) => [String(item.name ?? ""), item]));
+  const catalogById = new Map((Array.isArray(state.catalog) ? state.catalog : []).map((value) => { const item = record(value); return [String(item.id ?? ""), item]; }));
+  const references = record(payload.references ?? state.references);
+  const catalog = (Array.isArray(state.choices) ? state.choices : []).map((value) => {
+    const rawItem = record(value);
+    const id = typeof value === "string" ? value : String(rawItem.id ?? rawItem.model ?? "");
+    const item = catalogById.get(id) ?? rawItem;
+    const provider = String(item.provider ?? id.split("/", 1)[0] ?? "unknown");
+    const providerMeta = providers.get(provider) ?? {};
+    const refs = Array.isArray(references[id]) ? references[id].map(String) : Array.isArray(item.references) ? item.references.map(String) : [];
+    return {
+      id,
+      name: typeof item.name === "string" ? item.name : id.includes("/") ? id.slice(id.indexOf("/") + 1) : id,
+      provider,
+      providerLabel: String(item.providerLabel ?? providerMeta.label ?? providerMeta.displayName ?? provider),
+      configured: item.configured === undefined ? Boolean(providerMeta.configured ?? true) : Boolean(item.configured),
+      removable: item.removable === undefined ? refs.length === 0 : Boolean(item.removable),
+      references: refs,
+    } satisfies ModelInfo;
+  }).filter((item) => item.id);
+  const slots = record(state.slots);
+  const effective = record(state.effective);
+  return {
+    catalog,
+    slots: {
+      agent: String(slots.agent ?? effective.agent ?? ""),
+      subagent: String(slots.subagent ?? "") || undefined,
+      assistant: String(slots.assistant ?? "") || undefined,
+      vision: String(slots.vision ?? "") || undefined,
+      compaction: String(slots.compaction ?? "") || undefined,
+    },
+    effective: {
+      agent: String(effective.agent ?? slots.agent ?? ""),
+      subagent: String(effective.subagent ?? ""),
+      assistant: String(effective.assistant ?? "") || undefined,
+      vision: String(effective.vision ?? "") || undefined,
+      compaction: String(effective.compaction ?? "") || undefined,
+    },
+    reasoningEffort: String(state.reasoningEffort ?? state.reasoning_effort ?? "auto"),
+    pulseEnabled: Boolean(state.pulseEnabled ?? state.pulse_enabled),
+  };
+}
+
 export const api = {
   authStatus: () => request<{ protected: boolean; authenticated: boolean }>("/auth/status"),
   runtime: async () => {
@@ -498,6 +598,7 @@ export const api = {
       sessionId: String(identity.sessionId ?? identity.session_id ?? "") || undefined,
       model: String(effective.agent ?? "") || undefined,
       effort: String(models.reasoningEffort ?? models.reasoning_effort ?? "") || undefined,
+      pulseEnabled: Boolean(models.pulseEnabled ?? models.pulse_enabled),
       contextUsed: Number(compact.estimatedPromptTokens ?? compact.estimated_prompt_tokens ?? 0),
       contextLimit: Number(compact.contextWindowTokens ?? compact.context_window_tokens ?? 0),
     } satisfies RuntimeSnapshot;
@@ -515,7 +616,7 @@ export const api = {
       ...trajectory.historical.map((item, index) => ({ ...projectionEvent(item, index), sequence: index - trajectory.historical.length })),
       ...trajectory.activity.map(projectionEvent),
     ];
-    const turns = conversationTurns(conversation.items);
+    const turns = attachTrajectoryActivity(conversationTurns(conversation.items), events);
     if (!turns.length && Array.isArray(historyData.events)) {
       for (const [index, raw] of historyData.events.entries()) {
         const item = record(raw);
@@ -606,35 +707,13 @@ export const api = {
       headers: { "Idempotency-Key": randomId() },
       body: JSON.stringify(sessionId ? { requestId, action } : { action }),
     }),
-  models: async () => {
-    const payload = record(await request<unknown>("/api/v1/models"));
-    const state = record(payload.models);
-    const providerItems = Array.isArray(state.providers) ? state.providers.map(record) : [];
-    const providers = new Map(providerItems.map((item) => [String(item.name ?? ""), item]));
-    const catalog = new Map((Array.isArray(state.catalog) ? state.catalog : []).map((value) => { const item = record(value); return [String(item.id ?? ""), item]; }));
-    const references = record(payload.references ?? state.references);
-    return (Array.isArray(state.choices) ? state.choices : []).map((value) => {
-      const rawItem = record(value);
-      const id = typeof value === "string" ? value : String(rawItem.id ?? rawItem.model ?? "");
-      const item = catalog.get(id) ?? rawItem;
-      const provider = String(item.provider ?? id.split("/", 1)[0] ?? "unknown");
-      const providerMeta = providers.get(provider) ?? {};
-      const refs = Array.isArray(references[id]) ? references[id].map(String) : Array.isArray(item.references) ? item.references.map(String) : [];
-      return {
-        id,
-        name: typeof item.name === "string" ? item.name : id.includes("/") ? id.slice(id.indexOf("/") + 1) : id,
-        provider,
-        providerLabel: String(item.providerLabel ?? providerMeta.label ?? providerMeta.displayName ?? provider),
-        configured: item.configured === undefined ? Boolean(providerMeta.configured ?? true) : Boolean(item.configured),
-        removable: item.removable === undefined ? refs.length === 0 : Boolean(item.removable),
-        references: refs,
-      } satisfies ModelInfo;
-    }).filter((item) => item.id);
-  },
+  modelState: requestModelState,
+  models: async () => (await requestModelState()).catalog,
   addModel: (provider: string, model: string) => request<unknown>("/api/v1/models/catalog", { method: "POST", body: JSON.stringify({ provider, model }) }),
   deleteModel: (modelId: string) => request<void>(`/api/v1/models/catalog/${encodeURIComponent(modelId)}`, { method: "DELETE" }),
-  selectModel: (model: string, slot = "agent") => request<void>("/api/v1/models/select", { method: "POST", body: JSON.stringify({ slot, model }) }),
+  selectModel: (model: string | null, slot = "agent") => request<void>("/api/v1/models/select", { method: "POST", body: JSON.stringify({ slot, model }) }),
   setEffort: (value: string) => request<void>("/api/v1/models/effort", { method: "POST", body: JSON.stringify({ value }) }),
+  setPulse: (enabled: boolean) => request<void>("/api/v1/agent/pulse", { method: "POST", body: JSON.stringify({ enabled }) }),
   compact: (sessionId: string) => request<Record<string, unknown>>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`, { method: "POST" }),
   commands: async () => {
     const payload = record(await request<unknown>("/api/v1/commands"));

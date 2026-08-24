@@ -42,6 +42,9 @@ class ToolExecutionContext:
     message_id: str | None = None
     session: Any | None = None
     model: str | None = None
+    subagent_model: str | None = None
+    reasoning_effort: str | None = None
+    pulse_enabled: bool = False
     user_input: str = ""
 
 

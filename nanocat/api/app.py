@@ -71,11 +71,15 @@ class SessionCreateBody(ApiModel):
 
 class ModelSelectBody(ApiModel):
     slot: str
-    model: str
+    model: str | None
 
 
 class EffortBody(ApiModel):
     value: str
+
+
+class PulseBody(ApiModel):
+    enabled: bool
 
 
 class ModelCatalogBody(ApiModel):
@@ -1456,36 +1460,43 @@ def create_api_app(
             def publish_terminal() -> None:
                 terminal = control._engine.turns.get(turn_id)
                 failed = terminal is not None and terminal.state is TurnState.FAILED
-                timing = (
-                    {
-                        "startedAt": terminal.started_at.isoformat(),
-                        "endedAt": terminal.ended_at.isoformat(),
-                        "durationMs": terminal.duration_ms,
-                    }
-                    if terminal is not None and terminal.ended_at is not None
-                    else {}
-                )
-                broker.schedule_publish(
+                channel.schedule_feed_event(
                     "turn.failed" if failed else "turn.cancelled",
-                    {
-                        "sessionId": session_id,
-                        "status": "failed" if failed else "cancelled",
-                        **timing,
-                    },
                     session_id=session_id,
                     turn_id=turn_id,
                     request_id=record.request_id,
                     status="failed" if failed else "cancelled",
+                    summary="Stop failed" if failed else "Turn stopped",
+                    node_id=f"stop:{turn_id}",
+                    source="control",
+                    output=(
+                        {
+                            "error": {
+                                "code": "stop_failed",
+                                "title": "Stop failed",
+                                "message": terminal.detail or "Cancellation cleanup failed.",
+                            }
+                        }
+                        if failed and terminal is not None
+                        else {"control": {"kind": "stop", "phase": "completed"}}
+                    ),
+                    started_at=terminal.started_at if terminal is not None else None,
+                    ended_at=terminal.ended_at if terminal is not None else None,
+                    duration_ms=terminal.duration_ms if terminal is not None else None,
                 )
 
             control._engine.turns.add_terminal_finalizer(turn_id, publish_terminal)
-            await broker.publish(
+            await channel.publish_feed_event(
                 "turn.cancelling",
-                {"sessionId": session_id, "source": "control", "status": "cancelling"},
                 session_id=session_id,
                 turn_id=turn_id,
                 request_id=record.request_id,
                 status="cancelling",
+                summary="Stop requested",
+                node_id=f"stop:{turn_id}",
+                source="control",
+                output={"control": {"kind": "stop", "phase": "requested"}},
+                started_at=record.started_at,
             )
             return JSONResponse(
                 status_code=202,
@@ -1534,38 +1545,46 @@ def create_api_app(
             def publish_terminal() -> None:
                 terminal = control._engine.turns.get(turn_id)
                 failed = terminal is not None and terminal.state is TurnState.FAILED
-                timing = (
-                    {
-                        "startedAt": terminal.started_at.isoformat(),
-                        "endedAt": terminal.ended_at.isoformat(),
-                        "durationMs": terminal.duration_ms,
-                    }
-                    if terminal is not None and terminal.ended_at is not None
-                    else {}
-                )
-                broker.schedule_publish(
+                channel.schedule_feed_event(
                     "turn.failed" if failed else "turn.cancelled",
-                    {
-                        "sessionId": session_id,
-                        "status": "failed" if failed else "cancelled",
-                        **timing,
-                    },
                     session_id=session_id,
                     turn_id=turn_id,
                     request_id=record.request_id,
                     status="failed" if failed else "cancelled",
+                    summary="Stop failed" if failed else "Turn stopped",
+                    node_id=f"stop:{turn_id}",
+                    source="control",
+                    output=(
+                        {
+                            "error": {
+                                "code": "stop_failed",
+                                "title": "Stop failed",
+                                "message": terminal.detail or "Cancellation cleanup failed.",
+                            }
+                        }
+                        if failed and terminal is not None
+                        else {"control": {"kind": "stop", "phase": "completed"}}
+                    ),
+                    started_at=terminal.started_at if terminal is not None else None,
+                    ended_at=terminal.ended_at if terminal is not None else None,
+                    duration_ms=terminal.duration_ms if terminal is not None else None,
                 )
 
             control._engine.turns.add_terminal_finalizer(
                 turn_id,
                 publish_terminal,
             )
-            await broker.publish(
+            await channel.publish_feed_event(
                 "turn.cancelling",
-                {"sessionId": session_id, "status": "cancelling"},
                 session_id=session_id,
                 turn_id=turn_id,
                 request_id=record.request_id,
+                status="cancelling",
+                summary="Stop requested",
+                node_id=f"stop:{turn_id}",
+                source="control",
+                output={"control": {"kind": "stop", "phase": "requested"}},
+                started_at=record.started_at,
             )
             return JSONResponse(
                 status_code=202,
@@ -1697,6 +1716,12 @@ def create_api_app(
     async def model_effort(body: EffortBody) -> Response:
         return _control_response(
             await control.execute("model.set_effort", {"value": body.value})
+        )
+
+    @app.post("/api/v1/agent/pulse", dependencies=[Depends(auth)])
+    async def agent_pulse(body: PulseBody) -> Response:
+        return _control_response(
+            await control.execute("agent.set_pulse", {"enabled": body.enabled})
         )
 
     @app.post("/api/v1/models/catalog", dependencies=[Depends(auth)])

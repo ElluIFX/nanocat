@@ -437,7 +437,14 @@ _TERMINAL_ACTIVITY_TYPES = frozenset(
     {"assistant.final", "turn.completed", "turn.failed", "turn.cancelled"}
 )
 _TRANSIENT_ACTIVITY_TYPES = frozenset(
-    {"assistant.progress", "assistant.thinking", "tool.event", "turn.cancelling"}
+    {
+        "assistant.progress",
+        "assistant.thinking",
+        "tool.event",
+        "turn.cancelling",
+        "turn.queued",
+        "turn.steer_queued",
+    }
 )
 
 
@@ -504,11 +511,15 @@ class ConversationProjection:
         turn_id = _historical_turn_id(session, turn_start, turn_end)
         base_id = _stable_id("historical_message", session.key, index, role)
         content = _public_content(message.get("content"))
+        turn_timing = _historical_turn_timing(session, turn_start, turn_end)
         metadata: dict[str, Any] = {
             "messageIndex": index,
-            **_historical_turn_timing(session, turn_start, turn_end),
+            **turn_timing,
         }
         event_type = f"message.{role}"
+        projected_role: str | None = role
+        status: str | None = None
+        summary = ""
         if role == "user":
             event_type = "user.message"
             metadata["artifactRefs"] = _public_artifact_refs(
@@ -533,6 +544,49 @@ class ConversationProjection:
                     "assistant.final" if index == turn_end - 1 else "assistant.message"
                 )
                 metadata.update(_public_reasoning(message))
+                terminal_status = str(turn_timing.get("terminalStatus") or "")
+                if index == turn_end - 1 and terminal_status in {"failed", "cancelled"}:
+                    event_type = f"turn.{terminal_status}"
+                    projected_role = None
+                    status = terminal_status
+                    content = ""
+                    if terminal_status == "failed":
+                        raw_error = message.get("turn_error")
+                        error = (
+                            _json_safe(raw_error)
+                            if isinstance(raw_error, Mapping)
+                            else {
+                                "code": "turn_failed",
+                                "title": "Turn failed",
+                                "message": "The turn ended before it produced a valid result.",
+                            }
+                        )
+                        metadata["output"] = {"error": error}
+                        summary = str(
+                            error.get("title")
+                            if isinstance(error, Mapping)
+                            else "Turn failed"
+                        )
+                    else:
+                        raw_control = message.get("turn_control")
+                        control = (
+                            _json_safe(raw_control)
+                            if isinstance(raw_control, Mapping)
+                            else {"kind": "interrupted"}
+                        )
+                        kind = str(
+                            control.get("kind")
+                            if isinstance(control, Mapping)
+                            else "interrupted"
+                        )
+                        summary = {
+                            "stop": "Turn stopped",
+                            "runtime_shutdown": "Runtime stopped the turn",
+                        }.get(kind, "Turn interrupted")
+                        metadata["output"] = {
+                            "control": control,
+                            "message": _public_content(message.get("content")),
+                        }
         elif role == "tool":
             event_type = "tool.result"
             content = _public_tool_result(message)
@@ -547,8 +601,10 @@ class ConversationProjection:
             type=event_type,
             source="session",
             timestamp=timestamp,
+            status=status,
             turn_id=turn_id,
-            role=role,
+            role=projected_role,
+            summary=summary,
             content=content,
             detail_available=False,
             metadata=metadata,
@@ -717,6 +773,14 @@ class TrajectoryProjection:
                         elif kind == "message":
                             parent_id = turn_id
                             event_type = f"message.{role}"
+                            projected_role: str | None = role
+                            projected_status: str | None = None
+                            projected_summary = ""
+                            projected_content = (
+                                _public_tool_result(message)
+                                if role == "tool"
+                                else _public_content(message.get("content"))
+                            )
                             metadata: dict[str, Any] = {
                                 "messageIndex": index,
                                 **turn_timing,
@@ -734,6 +798,53 @@ class TrajectoryProjection:
                             elif role == "assistant" and index == end - 1:
                                 event_type = "assistant.final"
                                 metadata.update(_public_reasoning(message))
+                                terminal_status = str(
+                                    turn_timing.get("terminalStatus") or ""
+                                )
+                                if terminal_status in {"failed", "cancelled"}:
+                                    event_type = f"turn.{terminal_status}"
+                                    projected_role = None
+                                    projected_status = terminal_status
+                                    projected_content = ""
+                                    if terminal_status == "failed":
+                                        raw_error = message.get("turn_error")
+                                        error = (
+                                            _json_safe(raw_error)
+                                            if isinstance(raw_error, Mapping)
+                                            else {
+                                                "code": "turn_failed",
+                                                "title": "Turn failed",
+                                                "message": "The turn ended before it produced a valid result.",
+                                            }
+                                        )
+                                        metadata["output"] = {"error": error}
+                                        projected_summary = str(
+                                            error.get("title")
+                                            if isinstance(error, Mapping)
+                                            else "Turn failed"
+                                        )
+                                    else:
+                                        raw_control = message.get("turn_control")
+                                        control = (
+                                            _json_safe(raw_control)
+                                            if isinstance(raw_control, Mapping)
+                                            else {"kind": "interrupted"}
+                                        )
+                                        control_kind = str(
+                                            control.get("kind")
+                                            if isinstance(control, Mapping)
+                                            else "interrupted"
+                                        )
+                                        projected_summary = {
+                                            "stop": "Turn stopped",
+                                            "runtime_shutdown": "Runtime stopped the turn",
+                                        }.get(control_kind, "Turn interrupted")
+                                        metadata["output"] = {
+                                            "control": control,
+                                            "message": _public_content(
+                                                message.get("content")
+                                            ),
+                                        }
                             elif role == "tool":
                                 event_type = "tool.result"
                                 call_id = str(message.get("tool_call_id") or "")
@@ -752,14 +863,12 @@ class TrajectoryProjection:
                                     type=event_type,
                                     source="session",
                                     timestamp=timestamp,
+                                    status=projected_status,
                                     turn_id=turn_id,
                                     parent_id=parent_id,
-                                    role=role,
-                                    content=(
-                                        _public_tool_result(message)
-                                        if role == "tool"
-                                        else _public_content(message.get("content"))
-                                    ),
+                                    role=projected_role,
+                                    summary=projected_summary,
+                                    content=projected_content,
                                     detail_available=False,
                                     metadata=metadata,
                                 )

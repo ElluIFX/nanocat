@@ -6,16 +6,20 @@ import {
   MessageSquareText,
   Moon,
   PanelLeftClose,
+  Pencil,
   Plus,
   Search,
   Settings,
   Sun,
   TerminalSquare,
+  Trash2,
+  LoaderCircle,
   X,
 } from "lucide-preact";
 import type { ComponentChildren } from "preact";
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../api/client";
+import { deleteDraftFiles } from "../api/drafts";
 import { connectGlobalEvents } from "../api/sse";
 import { hrefFor, navigate, route, type Route } from "../router";
 import {
@@ -27,6 +31,7 @@ import {
   connection,
   createSessionAndOpen,
   creatingSession,
+  currentSession,
   navigatorOpen,
   operationError,
   recoverGlobalState,
@@ -60,20 +65,119 @@ function Link({ to, label, children, class: className = "", current = false }: {
 
 function SessionItem({ session }: { session: SessionSummary }) {
   const active = route.value.name === "session" && route.value.sessionId === session.id;
-  return <a
-    data-router
-    href={hrefFor({ name: "session", sessionId: session.id, view: "conversation" })}
-    class={`session-item ${active ? "active" : ""}`}
-    aria-current={active ? "page" : undefined}
-    onClick={() => { navigatorOpen.value = false; }}
-  >
-    <span class="session-item-title">{session.title || "Untitled session"}</span>
-    <span class="session-item-meta">
-      <StatusBadge status={session.status} />
-      <time dateTime={session.updatedAt}>{relativeTime(session.updatedAt)}</time>
-    </span>
-    {session.preview && <span class="session-preview">{session.preview}</span>}
-  </a>;
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(session.title);
+  const [working, setWorking] = useState<"rename" | "delete" | null>(null);
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const deleteTimer = useRef<number | undefined>(undefined);
+  const itemRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!editing) setTitle(session.title);
+  }, [editing, session.title]);
+  useEffect(() => () => {
+    if (deleteTimer.current !== undefined) window.clearTimeout(deleteTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!deleteArmed) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!itemRef.current?.contains(event.target as Node)) setDeleteArmed(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDeleteArmed(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [deleteArmed]);
+
+  const rename = async () => {
+    const next = title.trim();
+    if (working || !editing) return;
+    if (!next || next === session.title) {
+      setTitle(session.title);
+      setEditing(false);
+      return;
+    }
+    setWorking("rename");
+    try {
+      const updated = await api.renameSession(session.id, next, session.revision);
+      sessions.value = sessions.value.map((item) => item.id === session.id ? { ...item, title: next, revision: updated.revision ?? item.revision } : item);
+      if (currentSession.value?.id === session.id) currentSession.value = { ...currentSession.value, title: next, revision: updated.revision ?? currentSession.value.revision };
+      setEditing(false);
+    } catch (error) {
+      reportOperationError(error, "The session could not be renamed");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const remove = async () => {
+    setWorking("delete");
+    try {
+      await api.deleteSession(session.id, session.revision);
+      await deleteDraftFiles(session.id).catch((error) => reportOperationError(error, "Session deleted, but its attachment draft needs cleanup"));
+      sessions.value = sessions.value.filter((item) => item.id !== session.id);
+      if (currentSession.value?.id === session.id) currentSession.value = null;
+      if (active) navigate({ name: "home" });
+    } catch (error) {
+      setDeleteArmed(false);
+      reportOperationError(error, "The session could not be deleted");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const requestDelete = () => {
+    if (working) return;
+    if (deleteArmed) {
+      if (deleteTimer.current !== undefined) window.clearTimeout(deleteTimer.current);
+      void remove();
+      return;
+    }
+    setDeleteArmed(true);
+    deleteTimer.current = window.setTimeout(() => setDeleteArmed(false), 3_000);
+  };
+
+  return <div ref={itemRef} class={`session-item ${active ? "active" : ""} ${deleteArmed ? "delete-armed" : ""}`}>
+    <div class="session-item-main">
+      {editing ? <input
+        autoFocus
+        class="session-item-rename"
+        value={title}
+        maxLength={200}
+        aria-label={`Rename ${session.title || "session"}`}
+        onFocus={(event) => event.currentTarget.select()}
+        onInput={(event) => setTitle(event.currentTarget.value)}
+        onBlur={() => void rename()}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            setTitle(session.title);
+            setEditing(false);
+          }
+        }}
+      /> : <a
+        data-router
+        href={hrefFor({ name: "session", sessionId: session.id, view: "conversation" })}
+        class="session-item-link"
+        aria-current={active ? "page" : undefined}
+        onClick={() => { navigatorOpen.value = false; }}
+      >
+        <span class="session-item-title">{session.title || "Untitled session"}</span>
+        <span class="session-item-meta"><StatusBadge status={session.status} /><time dateTime={session.updatedAt}>{relativeTime(session.updatedAt)}</time></span>
+        {session.preview && <span class="session-preview">{session.preview}</span>}
+      </a>}
+    </div>
+    <div class="session-item-actions">
+      <button aria-label={`Rename ${session.title || "session"}`} title="Rename session" disabled={Boolean(working)} onClick={() => { setDeleteArmed(false); setEditing(true); }}>{working === "rename" ? <LoaderCircle class="spin" size={13} /> : <Pencil size={13} />}</button>
+      <button class={deleteArmed ? "armed" : ""} aria-label={deleteArmed ? `Confirm deletion of ${session.title || "session"}` : `Delete ${session.title || "session"}`} title={deleteArmed ? "Click again to delete" : "Delete session"} disabled={Boolean(working)} onClick={requestDelete}>{working === "delete" ? <LoaderCircle class="spin" size={13} /> : <Trash2 size={13} />}</button>
+    </div>
+    {deleteArmed && <span class="session-delete-prompt" role="status">Click again</span>}
+  </div>;
 }
 
 function relativeTime(value: string): string {

@@ -61,6 +61,7 @@ export interface TimelineEvent {
 
 export interface ConversationTurn {
   id: string;
+  turnId?: string;
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: string;
@@ -99,6 +100,7 @@ export interface RuntimeSnapshot {
   version?: string;
   model?: string;
   effort?: string;
+  pulseEnabled?: boolean;
   contextUsed?: number;
   contextLimit?: number;
   unprotected?: boolean;
@@ -112,6 +114,26 @@ export interface ModelInfo {
   configured?: boolean;
   removable?: boolean;
   references?: string[];
+}
+
+export interface RuntimeModelState {
+  catalog: ModelInfo[];
+  slots: {
+    agent: string;
+    subagent?: string;
+    assistant?: string;
+    vision?: string;
+    compaction?: string;
+  };
+  effective: {
+    agent: string;
+    subagent: string;
+    assistant?: string;
+    vision?: string;
+    compaction?: string;
+  };
+  reasoningEffort: string;
+  pulseEnabled: boolean;
 }
 
 export interface CommandInfo {
