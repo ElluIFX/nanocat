@@ -7,8 +7,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
-from pydantic import BaseModel
-
 from nanocat.config.schema import Config
 
 # Global variable to store current config path (for multi-instance support)
@@ -160,44 +158,6 @@ def apply_environment_overrides(config: Config) -> Config:
     return validate_persisted_config(payload)
 
 
-def _unknown_config_paths(raw: Any, parsed: Any, prefix: str = "") -> list[str]:
-    """Find config keys ignored by the validated schema before normalization."""
-    if not isinstance(raw, dict) or not isinstance(parsed, BaseModel):
-        return []
-    if parsed.__class__.__name__ == "ChannelsConfig":
-        return []
-
-    fields = type(parsed).model_fields
-    aliases = {
-        alias
-        for field in fields.values()
-        if (alias := field.alias) is not None
-    }
-    accepted = set(fields) | aliases
-    unknown = [
-        f"{prefix}.{key}" if prefix else str(key)
-        for key in raw
-        if key not in accepted
-    ]
-    paths = list(unknown)
-    for field_name, field in fields.items():
-        raw_key = field.alias if field.alias in raw else field_name
-        if raw_key not in raw:
-            continue
-        value = getattr(parsed, field_name, None)
-        raw_value = raw[raw_key]
-        if isinstance(value, BaseModel):
-            nested_prefix = f"{prefix}.{raw_key}" if prefix else raw_key
-            paths.extend(_unknown_config_paths(raw_value, value, nested_prefix))
-        elif isinstance(value, dict) and isinstance(raw_value, dict):
-            for item_key, item_value in value.items():
-                item = raw_value.get(item_key)
-                if isinstance(item, dict) and isinstance(item_value, BaseModel):
-                    item_prefix = f"{prefix}.{raw_key}.{item_key}" if prefix else f"{raw_key}.{item_key}"
-                    paths.extend(_unknown_config_paths(item, item_value, item_prefix))
-    return paths
-
-
 def set_config_path(path: Path) -> None:
     """Set the current config path (used to derive data directory)."""
     global _current_config_path
@@ -251,12 +211,6 @@ def load_config(config_path: Path | None = None) -> Config:
             if not isinstance(data, dict):
                 raise ValueError("configuration root must be a JSON object")
             config = validate_persisted_config(data)
-            unknown_paths = _unknown_config_paths(data, config)
-            if unknown_paths:
-                print(
-                    "Warning: Unsupported config keys will be discarded when saved: "
-                    + ", ".join(sorted(unknown_paths))
-                )
             return apply_environment_overrides(config)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise ConfigLoadError(f"Failed to load existing config from {path}: {exc}") from exc

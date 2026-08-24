@@ -245,8 +245,8 @@ tool_err("operation failed", hint="retry with ...", detail=detail)
 - `ApplicationControlService` 为 HTTP API 提供 session、model、compact、turn cancel、approval、runtime snapshot、logs 和 command action；HTTP handler 返回稳定 JSON。`POST /sessions/{id}/turns|steer` 只接收普通 agent 输入，在任何 turn/join/steer/attachment reservation 前以 422 拒绝 slash command candidate；Web Composer 和外部调用方通过 `/commands/execute` 进入 `CommandDispatcher`。
 - `ApplicationControlService.routing_guard()` 以 `web:<chat_id>` 串行化 turn admission 与 active mapping 变更，并支持当前 asyncio task 的有界重入。session create/new/switch/delete、cancel、compact、approval 和 command 的复合 HTTP 操作在同一 guard 内重新校验目标；compact status 按显式 session id 只读目标 Session，查询 inactive session 保持 active mapping 和 intervention 状态。
 - `MessageBus` 分离 normal/command/control outbound 队列，并分别跟踪每个 session 的 pending normal 与 command ingress；普通 outbound 在同一 turn 内保持 progress/tool/final FIFO，control outbound 保留优先通道。session 删除的 idle reservation 同时覆盖 queued/active command、normal turn、direct turn、steer 和后台 scope task。
-- `ApiConfig` 与 `WebChannelConfig` 使用 schema v2；loader 直接验证当前 schema。旧 gateway 与 TUI 配置迁移、备份和 session 导入路径已删除，现有 Web session 数据继续按普通 session 读取。
-- 已有 `config.json` 的解析或 schema 校验失败会抛出 `ConfigLoadError` 并终止启动，源文件保持原字节；文件缺失时使用默认配置。`NANOCAT_WEB_HOST`/`NANOCAT_WEB_PORT` 只形成运行时覆盖，供容器绑定使用。
+- `ApiConfig` 与 `WebChannelConfig` 使用 schema v2；loader 直接验证当前 schema，并静默忽略 schema 外字段，规范化保存时只写当前字段。旧 gateway 与 TUI 配置迁移、备份和 session 导入路径已删除，现有 Web session 数据继续按普通 session 读取。
+- 已有 `config.json` 的 JSON 解析或已知字段 schema 校验失败会抛出 `ConfigLoadError` 并终止启动，源文件保持原字节；文件缺失时使用默认配置。`NANOCAT_WEB_HOST`/`NANOCAT_WEB_PORT` 只形成运行时覆盖，供容器绑定使用。
 - `ApiRuntime` 始终使用同一 core API；公开 API 与内部 Web BFF 共用 control、WebChannel、SSE broker、artifact registry 和 activity journal。公开 API token 只在显式 API 启用且配置为空时输出一次，私有 core token 保持进程内可见。
 - Preact/Vite 前端位于 `frontend/`，生产静态资源由 Hatch custom build hook 编译并打入 wheel；源码 checkout 的 `uv run nanocat` 通过源指纹按需执行锁文件安装与前端重建。
 - 安全授权参数污染已修复：`ToolRegistry` 保留授权对象作为内部校验输入，不再注入 `_security_authorization`；Shell/proc 不再通过删除该字段掩盖边界错误，MCP wrapper 的远程 `arguments` 保持原始工具参数。在线 MCP 服务仍需在获得明确运行验证授权后检查。
