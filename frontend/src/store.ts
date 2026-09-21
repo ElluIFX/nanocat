@@ -283,6 +283,7 @@ function followsTerminalEvent(events: TimelineEvent[], incoming: TimelineEvent):
 }
 
 export function appendEvent(event: TimelineEvent): boolean {
+  if (event.type === "session.updated") return false;
   const session = currentSession.value;
   if (!session || (event.sessionId && event.sessionId !== session.id)) return false;
   if (followsTerminalEvent(session.events, event)) return false;
@@ -302,6 +303,11 @@ export function appendEvent(event: TimelineEvent): boolean {
 
 export function appendGlobalEvent(event: TimelineEvent): void {
   if (!event.sessionId) return;
+  if (event.type === "session.updated") {
+    if (currentSession.value?.id === event.sessionId) void reloadCurrentSession();
+    else void refreshSessions().catch((error) => reportOperationError(error, "Sessions could not be refreshed"));
+    return;
+  }
   if (currentSession.value?.id === event.sessionId && !appendEvent(event)) return;
   let found = false;
   sessions.value = sortSessions(sessions.value.map((item) => {

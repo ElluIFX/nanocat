@@ -124,6 +124,7 @@ ToolExecutor
 - transient/system turn、ephemeral block、intervention grant 和 pending request 不写入普通 history。
 - terminal assistant 保存结构化 error/control；tool call、tool result、terminal assistant 与连续完整 turn 使用同一边界定义。
 - 删除先将 session 文件移动为同目录 tombstone，再提交 metadata；提交失败恢复源文件。首个 session 先创建 payload，再原子发布 metadata。
+- 首轮完整对话持久化后后台尝试自动命名，使用首轮用户输入与最终回复，60 秒超时；失败后在后续完整轮次重试，人工名称优先。自动名称持久化后由 runtime 发布 `session.updated`，Web 刷新侧栏与当前会话快照。
 
 ### 配置
 

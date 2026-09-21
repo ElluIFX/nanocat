@@ -222,6 +222,7 @@ class SessionManager:
         )
         self._cache_guard = threading.RLock()
         self._name_generator: NameGenerator | None = None
+        self._name_updated: Callable[[Session], Awaitable[None]] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._naming_tasks: dict[str, asyncio.Task[Any]] = {}
         self._write_locks: weakref.WeakValueDictionary[str, threading.RLock] = (
@@ -284,6 +285,10 @@ class SessionManager:
 
     def set_name_generator(self, callback: NameGenerator) -> None:
         self._name_generator = callback
+
+    def set_name_updated_callback(self, callback: Callable[[Session], Awaitable[None]]) -> None:
+        """Notify the runtime after an automatic title is durably committed."""
+        self._name_updated = callback
 
     # -- normal session (channel + metadata) ---------------------------------
 
@@ -501,9 +506,10 @@ class SessionManager:
                 )
 
         # Trigger background naming if needed
-        turn_count = self._count_turns(session)
+        boundaries = session.get_completed_turn_boundaries()
         if (
-            turn_count >= 3
+            boundaries
+            and boundaries[-1][1] == len(session.messages)
             and not session.name
             and self._name_generator
             and session.key not in self._naming_tasks
@@ -1117,7 +1123,7 @@ class SessionManager:
         if not self._name_generator:
             return
         try:
-            name = await self._name_generator(session, session.channel)
+            name = await asyncio.wait_for(self._name_generator(session, session.channel), timeout=60.0)
             if name:
                 with self._channel_lock(session.channel):
                     meta = self._read_metadata(session.channel)
@@ -1135,6 +1141,8 @@ class SessionManager:
                     )
                     session.name = name
                 logger.debug("Auto-named session {}/{} -> {}", session.channel, session.id, name)
+                if self._name_updated is not None:
+                    await self._name_updated(session)
         except Exception as e:
             logger.warning(
                 "Auto-naming failed for session {}/{}: {}", session.channel, session.id, e

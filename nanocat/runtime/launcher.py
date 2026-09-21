@@ -43,7 +43,7 @@ from nanocat.runtime.instance_lock import RuntimeInstanceLock
 from nanocat.runtime.paths import RuntimePaths
 from nanocat.runtime.supervisor import RuntimeSupervisor
 from nanocat.runtime.web_assets import ensure_web_assets
-from nanocat.session.manager import SessionManager
+from nanocat.session.manager import Session, SessionManager
 from nanocat.utils.helpers import sync_workspace_templates
 
 
@@ -398,6 +398,12 @@ def _compose_runtime(
         endpoint_file=paths.runtime_dir / "http-endpoints.json",
     )
     partial.own(api_runtime.close)
+
+    async def on_session_named(session: Session) -> None:
+        if session.channel == "web":
+            await api_runtime.broker.publish("session.updated", session_id=session.id)
+
+    session_manager.set_name_updated_callback(on_session_named)
 
     async def apply_runtime_configuration(
         current: Config,
