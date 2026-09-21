@@ -46,12 +46,15 @@ test("session actions work against the real API", async ({ page }, testInfo) => 
   const sessionId = match![1];
   await expect(page.getByRole("tab", { name: /Conversation/ })).toHaveAttribute("aria-selected", "true");
   try {
-    await page.getByRole("button", { name: "Session actions" }).click();
     const actions = page.getByRole("dialog", { name: "Session actions" });
-    await expect(actions).toBeVisible();
     const renamedTitle = `Renamed regression session ${testInfo.project.name}`;
-    await actions.locator("input").fill(renamedTitle);
-    await actions.getByRole("button", { name: /Rename/ }).click();
+    const navigator = page.locator("#session-navigator");
+    await page.getByRole("button", { name: /^(Open|Show) sessions$/ }).first().click();
+    const item = navigator.locator(".session-item.active");
+    await item.getByRole("button", { name: /^Rename / }).click();
+    await item.getByRole("textbox", { name: /^Rename / }).fill(renamedTitle);
+    await item.getByRole("textbox", { name: /^Rename / }).press("Enter");
+    await item.getByRole("link", { name: renamedTitle }).click();
     await expect(page.getByRole("heading", { name: renamedTitle })).toBeVisible();
     await expect(page.locator(".header-connection")).toContainText("online");
     if (testInfo.project.name === "mobile") {
@@ -66,7 +69,7 @@ test("session actions work against the real API", async ({ page }, testInfo) => 
     await expect(page.locator(".attachment-tray")).toContainText("context.txt");
 
     await page.getByRole("button", { name: "Session actions" }).click();
-    await actions.locator("input").press("Escape");
+    await actions.getByRole("button", { name: "Close session actions" }).press("Escape");
     await expect(actions).toBeHidden();
     await expect(page.getByRole("button", { name: "Session actions" })).toBeFocused();
     await page.getByRole("button", { name: "Session actions" }).click();
