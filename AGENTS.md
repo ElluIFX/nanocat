@@ -83,7 +83,7 @@ channel callback
 - 批准后重新执行 policy evaluation 并校验 fingerprint。参数、路径、策略或配置发生变化时重新请求决策。
 - Web 审批卡通过通用 HTTP control action 提交；渠道只负责展示和 action 归一化，授权判断归 `InterventionBroker`。
 - `tools.policy` 按 safe tool、deny、allow、命令分析、路径和 URL 限制的顺序求值。`HARD_DENY` 与 restrict 规则优先于自动审批。
-- `autoApproveMode` 只审查 `REQUIRE_INTERVENTION`，自动批准只作用于当前 fingerprint；审查失败转人工处理。
+- `autoApproveMode` 只审查 `REQUIRE_INTERVENTION`，自动批准只作用于当前 fingerprint；单次审查及格式重试共享 30 秒 deadline，并发受工具额度限制，批次异常时收敛其余审查任务。审查失败转人工处理；自动通过记 debug，人工介入记 info，硬拒绝记 warning。
 - 策略拒绝返回结构化 `guidance`，要求 agent 停止相关操作并向用户说明原因。
 
 ## 工具契约

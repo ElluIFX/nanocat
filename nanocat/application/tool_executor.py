@@ -75,6 +75,7 @@ class ToolExecutor:
         self._auto_reviewer = auto_reviewer
         self._max_concurrent_calls = max_concurrent_calls
         self._call_slots = asyncio.Semaphore(max_concurrent_calls)
+        self._review_slots = asyncio.Semaphore(max_concurrent_calls)
 
     def apply_concurrency_limit(self, max_concurrent_calls: int) -> None:
         """Use a new admission semaphore for calls started after this update."""
@@ -82,6 +83,7 @@ class ToolExecutor:
             raise ValueError("max_concurrent_calls must be positive")
         self._max_concurrent_calls = max_concurrent_calls
         self._call_slots = asyncio.Semaphore(max_concurrent_calls)
+        self._review_slots = asyncio.Semaphore(max_concurrent_calls)
 
     def apply_auto_reviewer(self, reviewer: AutoApprovalReviewer | None) -> None:
         """Replace the optional reviewer used for calls admitted after this update."""
@@ -100,6 +102,7 @@ class ToolExecutor:
     @staticmethod
     def _strip_success_markers(result: Any) -> Any:
         """Remove successful JSON envelope markers before returning to the LLM."""
+
         def strip(value: Any) -> Any:
             if isinstance(value, dict):
                 return {
@@ -162,7 +165,8 @@ class ToolExecutor:
         decisions = [(name, params, self._policy.evaluate(name, params)) for name, params in calls]
         for name, _params, decision in decisions:
             if decision.kind is not SecurityDecisionKind.ALLOW or decision.reason:
-                logger.warning(
+                logger.log(
+                    "WARNING" if decision.kind is SecurityDecisionKind.HARD_DENY else "DEBUG",
                     "[SECURITY] decision={} tool={} capability={} fingerprint={} reason={}",
                     decision.kind.value,
                     name,
@@ -243,18 +247,26 @@ class ToolExecutor:
 
             automatic: dict[int, AutoApprovalResult] = {}
             if self._auto_reviewer is not None and pending:
+                reviewer = self._auto_reviewer
+
+                async def review_call(name: str, decision: SecurityDecision) -> AutoApprovalResult:
+                    async with self._review_slots:
+                        return await reviewer.review(name, decision, user_input=context.user_input)
+
                 review_tasks = [
                     asyncio.create_task(
-                        self._auto_reviewer.review(
-                            name,
-                            decision,
-                            user_input=context.user_input,
-                        ),
+                        review_call(name, decision),
                         name=f"nanocat.approval.{name}",
                     )
                     for _index, name, _params, decision in pending
                 ]
-                review_results = await asyncio.gather(*review_tasks)
+                try:
+                    review_results = await asyncio.gather(*review_tasks)
+                except BaseException:
+                    for task in review_tasks:
+                        task.cancel()
+                    await asyncio.gather(*review_tasks, return_exceptions=True)
+                    raise
                 automatic = {
                     item[0]: result for item, result in zip(pending, review_results, strict=True)
                 }
@@ -262,9 +274,20 @@ class ToolExecutor:
             for index, name, params, decision in pending:
                 review = automatic.get(index)
                 if review is not None and review.decision == "approve":
+                    logger.debug(
+                        "[SECURITY] auto-approved tool={} fingerprint={}",
+                        name,
+                        decision.call_fingerprint[:16],
+                    )
                     result = None
                     scope = "once"
                 else:
+                    logger.info(
+                        "[SECURITY] manual review required tool={} fingerprint={} auto_review={}",
+                        name,
+                        decision.call_fingerprint[:16],
+                        review.decision if review is not None else "disabled",
+                    )
                     result = await self._request_approval(decision, context, review=review)
                     scope = result.scope or "once"
                 if result is not None and result.state not in {
@@ -359,10 +382,7 @@ class ToolExecutor:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
-        return [
-            self._strip_success_markers(result)
-            for _, result in sorted(results)
-        ]
+        return [self._strip_success_markers(result) for _, result in sorted(results)]
 
     @staticmethod
     def _security_result(
