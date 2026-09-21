@@ -356,9 +356,8 @@ function settleWorkingNodes(nodes: WorkingNode[], active: boolean, terminalStatu
   };
   for (const [index, node] of settled.entries()) {
     if (!node.status || !["queued", "running", "cancelling"].includes(node.status)) continue;
-    const successor = settled.slice(index + 1).find((candidate) => (
-      node.kind !== "tool" || candidate.kind === "thinking" || candidate.kind === "progress" || candidate.kind === "approval"
-    ));
+    // A concurrent tool stays active until its own result or the turn terminal.
+    const successor = node.kind === "tool" ? undefined : settled[index + 1];
     if (successor) {
       node.status = "completed";
       completeControl(node);
@@ -409,7 +408,10 @@ function WorkingEntry({ node }: { node: WorkingNode }) {
       <span class="control-card-mark">{nodeIcon(node)}</span>
       <span class="control-card-copy"><strong>{node.label}</strong>{node.description ? <small>{node.description}</small> : null}</span>
       {node.status && node.status !== "completed" && <span class="control-card-status">{node.status === "running" || node.status === "cancelling" ? <LoaderCircle class="spin" size={11} /> : null}{node.status.replaceAll("_", " ")}</span>}
-    </div> : specializedTool ? <ToolPresentation tool={tool} /> : <>
+    </div> : specializedTool ? <>
+      <div class="tool-operation"><code>{tool.name}</code>{node.durationMs !== undefined && <span>{formatDuration(node.durationMs)}</span>}</div>
+      <ToolPresentation tool={tool} />
+    </> : <>
       <div class="working-entry-line">
         <span class="working-entry-icon">{nodeIcon(node)}</span>
         <button class="working-entry-title" onClick={() => setSelectedNode(node.nodeId ?? node.eventId)}>
@@ -440,8 +442,10 @@ export function WorkingFeed({ events, active = false, status, onStop }: { events
   const mountedAt = useRef(new Date().toISOString());
   const eventList = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
-  const workEvents = events.filter((event) => event.type !== "user.steer");
-  const visibleEvents = workEvents.length ? workEvents : active ? [{ eventId: "working-pending", sequence: 0, timestamp: mountedAt.current, type: "assistant.progress", status: "running" as const, summary: "Preparing run" }] : [];
+  const visibleEvents = useMemo(() => {
+    const workEvents = events.filter((event) => event.type !== "user.steer");
+    return workEvents.length ? workEvents : active ? [{ eventId: "working-pending", sequence: 0, timestamp: mountedAt.current, type: "assistant.progress", status: "running" as const, summary: "Preparing run" }] : [];
+  }, [events, active]);
   const terminalFailure = status === "failed" || status === "cancelled";
   const stopping = status === "cancelling";
   const nodes = useMemo(() => settleWorkingNodes(normalizeWorkingEvents(visibleEvents), active, status), [visibleEvents, active, status]);
@@ -450,6 +454,7 @@ export function WorkingFeed({ events, active = false, status, onStop }: { events
   const wasActive = useRef(active);
   useEffect(() => {
     if (active) setOpen(true);
+    else if (terminalFailure) setOpen(true);
     else if (wasActive.current && !terminalFailure) setOpen(false);
     wasActive.current = active;
   }, [active, terminalFailure]);

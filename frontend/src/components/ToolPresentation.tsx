@@ -134,7 +134,7 @@ function TerminalToolCard({ tool }: { tool: ToolPresentationValue }) {
   if (transfer) {
     const upload = tool.name === "ssh_upload";
     return <div class="tool-card transfer-card">
-      <header><span class="tool-card-mark">{upload ? <Upload size={15} /> : <Download size={15} />}</span><span><strong>{upload ? "Uploaded file" : "Downloaded file"}</strong><small>{host || "SSH transfer"}{numberValue(output.bytes) !== undefined ? ` · ${formatBytes(numberValue(output.bytes) ?? 0)}` : ""}</small></span><ToolCardState status={tool.status} /></header>
+      <header><span class="tool-card-mark">{upload ? <Upload size={15} /> : <Download size={15} />}</span><span><strong>{upload ? "Upload file" : "Download file"}</strong><small>{host || "SSH transfer"}{numberValue(output.bytes) !== undefined ? ` · ${formatBytes(numberValue(output.bytes) ?? 0)}` : ""}</small></span><ToolCardState status={tool.status} /></header>
       <div class="transfer-route"><code>{upload ? stringValue(output.local_path, input.local_path) || "local" : stringValue(output.remote_path, input.remote_path) || "remote"}</code><span>→</span><code>{upload ? stringValue(output.remote_path, input.remote_path) || "remote" : stringValue(output.local_path, input.local_path) || "local"}</code></div>
     </div>;
   }
@@ -181,6 +181,10 @@ function SubagentToolCard({ tool }: { tool: ToolPresentationValue }) {
 }
 
 export function ToolPresentation({ tool }: { tool: ToolPresentationValue }) {
+  const envelope = record(tool.output);
+  if (envelope.redacted === true && envelope.truncated !== true && envelope.preview !== undefined) {
+    tool = { ...tool, output: envelope.preview };
+  }
   if (tool.todo) return <TodoCard tool={tool} />;
   if (FILE_TOOLS.has(tool.name)) return <FileToolCard tool={tool} />;
   if (TERMINAL_TOOLS.has(tool.name)) return <TerminalToolCard tool={tool} />;

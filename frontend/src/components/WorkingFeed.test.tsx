@@ -52,6 +52,31 @@ describe("WorkingFeed", () => {
     expect(screen.getByRole("button", { name: /Failed after/ })).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("keeps a tool running while an approval event is presented", () => {
+    render(<WorkingFeed active events={[
+      { eventId: "tool", sequence: 1, timestamp: "2026-08-23T00:00:00Z", type: "tool.call", toolCallId: "call-1", toolName: "exec", status: "running", redactedInput: { command: "pwd" } },
+      { eventId: "approval", sequence: 2, timestamp: "2026-08-23T00:00:01Z", type: "approval.pending", status: "waiting_approval", summary: "Approval required" },
+    ]} />);
+    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(screen.getByText("exec")).toBeInTheDocument();
+  });
+
+  it("shows redacted historical output in the tool preview and retains its envelope in Details", () => {
+    const { container } = render(<WorkingFeed active events={[
+      { eventId: "result", sequence: 1, timestamp: "2026-08-23T00:00:00Z", type: "tool.result", toolCallId: "call-1", toolName: "exec", status: "completed", redactedOutput: { redacted: true, summary: "Tool execution completed.", preview: { stdout: "workspace ready" } } },
+    ]} />);
+    expect(container.querySelector(".terminal-preview")).toHaveTextContent("workspace ready");
+    expect(container.querySelector(".working-entry-details")).toHaveTextContent('"redacted": true');
+  });
+
+  it("expands a failed turn even when the user collapsed its active feed", () => {
+    const events: TimelineEvent[] = [{ eventId: "work", sequence: 1, timestamp: "2026-08-23T00:00:00Z", type: "assistant.work", status: "running", content: "Inspecting" }];
+    const { rerender } = render(<WorkingFeed active events={events} />);
+    fireEvent.click(screen.getByRole("button", { name: /Working/ }));
+    rerender(<WorkingFeed events={events} status="failed" />);
+    expect(screen.getByRole("button", { name: /Failed after/ })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("settles superseded running nodes while the current step remains active", () => {
     render(<WorkingFeed active events={[
       {
