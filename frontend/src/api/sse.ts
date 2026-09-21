@@ -85,6 +85,7 @@ function connectEvents(path: string, options: StreamOptions): () => void {
   let closed = false;
   let suspended = false;
   let opening = false;
+  let resumePending = false;
   let retry = 750;
   let lastEventId = "";
   let controller: AbortController | undefined;
@@ -110,7 +111,10 @@ function connectEvents(path: string, options: StreamOptions): () => void {
     if (recoveryPromise) return recoveryPromise;
     const generation = recoveryGeneration;
     const reason = recoveryReason;
-    recoveryPromise = Promise.resolve(options.onReset(reason))
+    recoveryPromise = Promise.resolve().then(() => {
+      if (closed || suspended) throw new Error("SSE recovery suspended");
+      return options.onReset(reason);
+    })
       .then(() => {
         if (reason === "subscriber_overflow") lastCapacityRecoveryAt = Date.now();
         if (recoveryDirty && generation === recoveryGeneration) {
@@ -122,12 +126,12 @@ function connectEvents(path: string, options: StreamOptions): () => void {
         return recovered;
       })
       .catch(() => {
-        options.onState("reconnecting");
+        if (!closed && !suspended) options.onState("reconnecting");
         return false;
       })
       .finally(() => {
         recoveryPromise = undefined;
-        if (recoveryDirty && !closed && recoveryTimer === undefined) {
+        if (recoveryDirty && !closed && !suspended && recoveryTimer === undefined) {
           const remaining = recoveryReason === "subscriber_overflow"
             ? Math.max(0, 5000 - (Date.now() - lastCapacityRecoveryAt))
             : Math.min(15_000, 1000 * (2 ** Math.min(recoveryAttempts, 4)));
@@ -137,11 +141,11 @@ function connectEvents(path: string, options: StreamOptions): () => void {
     return recoveryPromise;
   };
   const scheduleRecovery = (delay: number) => {
-    if (closed || recoveryTimer !== undefined) return;
+    if (closed || suspended || recoveryTimer !== undefined) return;
     const retryDelay = recoveryAttempts >= 3 ? Math.max(delay, 15_000) : delay;
     recoveryTimer = window.setTimeout(() => {
       recoveryTimer = undefined;
-      if (!recoveryDirty || closed) return;
+      if (!recoveryDirty || closed || suspended) return;
       recoveryAttempts += 1;
       void attemptRecovery().then((recovered) => {
         if (!recovered) {
@@ -176,10 +180,12 @@ function connectEvents(path: string, options: StreamOptions): () => void {
         controller = new AbortController();
         options.onState(lastEventId ? "reconnecting" : "connecting");
         let serverDelay: number | undefined;
+        let reader: ReadableStreamDefaultReader<string> | undefined;
         try {
           if (recoveryDirty && (recoveryTimer !== undefined || !await attemptRecovery())) {
             throw new Error("SSE state recovery failed");
           }
+          if (closed || suspended) break;
           const headers = new Headers({ Accept: "text/event-stream" });
           if (lastEventId) headers.set("Last-Event-ID", lastEventId);
           const response = await fetch(path, { headers, credentials: "same-origin", signal: controller.signal });
@@ -192,19 +198,21 @@ function connectEvents(path: string, options: StreamOptions): () => void {
             throw new Error(`SSE connection failed (${response.status})`);
           }
           options.onState("online");
-          const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+          reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
           let buffer = "";
           let reset = false;
           while (!closed && !reset) {
             const { value, done } = await reader.read();
-            if (done) break;
+            if (done || closed || suspended) break;
             buffer += value;
             const frames = buffer.split(/\r?\n\r?\n/);
             buffer = frames.pop() ?? "";
             for (const frame of frames) {
+              if (closed || suspended) break;
               let data = "";
+              let frameId: string | undefined;
               for (const line of frame.split(/\r?\n/)) {
-                if (line.startsWith("id:")) lastEventId = line.slice(3).trim();
+                if (line.startsWith("id:")) frameId = line.slice(3).trim();
                 if (line.startsWith("data:")) data += `${line.slice(5).trimStart()}\n`;
               }
               if (!data) continue;
@@ -212,16 +220,24 @@ function connectEvents(path: string, options: StreamOptions): () => void {
               if (!event) continue;
               if (event.type === "stream.reset") {
                 reset = true;
-                await recoverReset(event.resetReason);
+                lastEventId = frameId ?? lastEventId;
                 await reader.cancel();
+                await recoverReset(event.resetReason);
                 break;
               }
               retry = 750;
               options.onEvent(event);
+              lastEventId = frameId ?? lastEventId;
             }
           }
         } catch (error) {
           if (closed || suspended || (error instanceof DOMException && error.name === "AbortError")) break;
+        } finally {
+          if (reader) {
+            try { await reader.cancel(); } catch { /* The transport may already be aborted. */ }
+            reader.releaseLock();
+          }
+          controller?.abort();
         }
         if (closed || suspended) break;
         options.onState(navigator.onLine ? "reconnecting" : "offline");
@@ -230,6 +246,10 @@ function connectEvents(path: string, options: StreamOptions): () => void {
       }
     } finally {
       opening = false;
+      if (resumePending && !closed && !suspended) {
+        resumePending = false;
+        void open();
+      }
     }
   };
 
@@ -256,6 +276,7 @@ function connectEvents(path: string, options: StreamOptions): () => void {
     if (!event.persisted || closed || !suspended) return;
     suspended = false;
     if (recoveryDirty) scheduleRecovery(0);
+    if (opening) resumePending = true;
     void open();
   }
   function close(): void {

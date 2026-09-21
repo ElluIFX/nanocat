@@ -201,12 +201,35 @@ describe("SSE projection", () => {
     });
     await Promise.resolve();
     window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
-    await vi.advanceTimersByTimeAsync(0);
+    // Restore before the aborted fetch has unwound its opening guard.
     window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
     await vi.advanceTimersByTimeAsync(0);
 
     expect(aborts).toBe(1);
     expect(fetch).toHaveBeenCalledTimes(2);
+    close();
+  });
+
+  it("cancels the old response when an event consumer throws", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const encoder = new TextEncoder();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('id: 1\ndata: {"eventId":"1","type":"turn.completed"}\n\n'));
+      },
+      cancel,
+    }))));
+    const close = connectGlobalEvents({
+      onEvent: () => { throw new Error("consumer failed"); },
+      onState: () => undefined,
+      onReset: () => undefined,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(new Headers(vi.mocked(fetch).mock.calls[1][1]?.headers).has("Last-Event-ID")).toBe(false);
     close();
   });
 });
