@@ -51,7 +51,9 @@ def _frontend_build_lock(frontend: Path) -> Iterator[None]:
                     break
                 except OSError:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError("timed out waiting for the frontend build lock") from None
+                        raise TimeoutError(
+                            "timed out waiting for the frontend build lock"
+                        ) from None
                     time.sleep(0.1)
         else:
             import fcntl
@@ -64,7 +66,9 @@ def _frontend_build_lock(frontend: Path) -> Iterator[None]:
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError("timed out waiting for the frontend build lock") from None
+                        raise TimeoutError(
+                            "timed out waiting for the frontend build lock"
+                        ) from None
                     time.sleep(0.1)
         yield
     finally:
@@ -94,12 +98,16 @@ def _packaged_assets() -> Path:
 
 def _source_fingerprint(frontend: Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted(frontend.rglob("*")):
-        if (
-            not path.is_file()
-            or any(part in _IGNORED_PARTS for part in path.parts)
-            or ".test." in path.name
-        ):
+    sources: list[Path] = []
+    for root, directories, filenames in os.walk(frontend):
+        directories[:] = [name for name in directories if name not in _IGNORED_PARTS]
+        sources.extend(
+            Path(root) / name
+            for name in filenames
+            if name not in _IGNORED_PARTS and ".test." not in name
+        )
+    for path in sorted(sources):
+        if not path.is_file():
             continue
         relative = path.relative_to(frontend).as_posix()
         digest.update(relative.encode("utf-8"))
@@ -193,10 +201,9 @@ def ensure_web_assets() -> Path:
         dist = frontend / "dist"
         source_hash = _source_fingerprint(frontend)
         build_stamp = dist / ".nanocat-build.json"
-        if (
-            (dist / "index.html").is_file()
-            and _read_stamp(build_stamp).get("source") == source_hash
-        ):
+        if (dist / "index.html").is_file() and _read_stamp(build_stamp).get(
+            "source"
+        ) == source_hash:
             return dist
 
         lock_path = frontend / "package-lock.json"
