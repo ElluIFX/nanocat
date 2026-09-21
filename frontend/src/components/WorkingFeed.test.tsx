@@ -227,6 +227,6 @@ describe("WorkingFeed", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Worked for/ }));
     expect(container.querySelectorAll(".todo-card")).toHaveLength(1);
-    expect(container.querySelector(".todo-card header small")).toHaveTextContent("1/2 complete");
+    expect(container.querySelector(".todo-card header small:not(.tool-arguments)")).toHaveTextContent("1/2 complete");
   });
 });

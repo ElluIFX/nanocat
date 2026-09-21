@@ -334,6 +334,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .tool-operation { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 2px 10px 5px 0; color: var(--text-secondary); font-size: 11px; }
 .tool-operation code { min-width: 0; overflow-wrap: anywhere; }
 .tool-operation > span { flex: none; color: var(--text-tertiary); font-size: 10px; }
+.tool-arguments, .tool-card > header small.tool-arguments { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 3px; overflow: visible; color: var(--text-secondary); font-size: 10.5px; line-height: 1.6; white-space: normal; }
+.tool-argument { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.tool-argument-name { margin-right: 5px; color: var(--text-tertiary); }
+.tool-argument code { white-space: pre-wrap; font-size: inherit; }
+.working-entry > .tool-arguments { margin: 2px 8px 5px 24px; }
 .tool-card-state { padding-right: 1px; }
 .todo-progress-value { color: var(--text-tertiary); font-size: 9.5px; font-variant-numeric: tabular-nums; }
 .todo-progress { height: 2px; margin: 0 9px; overflow: hidden; border-radius: 99px; background: var(--border); }

@@ -16,6 +16,7 @@ import { api } from "../api/client";
 import { setSelectedNode } from "../store";
 import type { RunStatus, TimelineEvent } from "../types";
 import { Markdown } from "./Markdown";
+import { ToolArguments } from "./ToolArguments";
 import { supportsToolPresentation, ToolPresentation, type TodoPresentation } from "./ToolPresentation";
 
 type JsonRecord = Record<string, unknown>;
@@ -420,6 +421,7 @@ function WorkingEntry({ node }: { node: WorkingNode }) {
         </button>
         {node.status && node.status !== "completed" && <span class={`working-entry-status status-${node.status}`}>{node.status === "running" || node.status === "cancelling" ? <LoaderCircle class="spin" size={12} /> : null}{node.status.replaceAll("_", " ")}</span>}
       </div>
+      {node.kind === "tool" && <ToolArguments input={node.input} />}
       {node.description && <p class="working-entry-description">{node.description}</p>}
       {node.content && <div class="working-entry-content"><Markdown content={node.content} /></div>}
     </>}

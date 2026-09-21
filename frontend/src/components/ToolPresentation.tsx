@@ -12,6 +12,7 @@ import {
   Upload,
 } from "lucide-preact";
 import type { RunStatus } from "../types";
+import { ToolArguments } from "./ToolArguments";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -79,7 +80,7 @@ function TodoCard({ tool }: { tool: ToolPresentationValue }) {
   return <div class="tool-card todo-card">
     <header>
       <span class="tool-card-mark"><ListChecks size={15} /></span>
-      <span><strong>{todo.name || "Task list"}</strong><small>#{todo.id} · {completed}/{todo.tasks.length} complete</small></span>
+      <span><strong>{todo.name || "Task list"}</strong><ToolArguments input={tool.input} /><small>#{todo.id} · {completed}/{todo.tasks.length} complete</small></span>
       <ToolCardState status={tool.status} />
       {(!tool.status || tool.status === "completed") && <span class="todo-progress-value">{progress}%</span>}
     </header>
@@ -112,7 +113,7 @@ function FileToolCard({ tool }: { tool: ToolPresentationValue }) {
   ].filter(Boolean);
   const preview = shortText(output.content ?? output.preview, 520);
   return <div class="tool-card file-tool-card">
-    <header><span class="tool-card-mark">{tool.name === "grep_file" || tool.name === "list_dir" ? <FolderSearch2 size={15} /> : <FileCode2 size={15} />}</span><span><strong>{path || tool.name.replaceAll("_", " ")}</strong>{metrics.length ? <small>{metrics.join(" · ")}</small> : null}</span><ToolCardState status={tool.status} /></header>
+    <header><span class="tool-card-mark">{tool.name === "grep_file" || tool.name === "list_dir" ? <FolderSearch2 size={15} /> : <FileCode2 size={15} />}</span><span><strong>{path || tool.name.replaceAll("_", " ")}</strong><ToolArguments input={tool.input} />{metrics.length ? <small>{metrics.join(" · ")}</small> : null}</span><ToolCardState status={tool.status} /></header>
     {entries.length ? <ul class="tool-result-list">{entries.slice(0, 5).map((entry) => <li key={entry}>{entry}</li>)}</ul> : null}
     {matches.length ? <ul class="tool-result-list code-list">{matches.slice(0, 5).map((match, index) => <li key={`${match.line ?? index}`}><code>{String(match.line ?? "")}</code><span>{shortText(match.content)}</span></li>)}</ul> : null}
     {preview ? <pre class="file-preview"><code>{preview}</code></pre> : null}
@@ -125,7 +126,7 @@ function TerminalToolCard({ tool }: { tool: ToolPresentationValue }) {
   const input = record(tool.input);
   const output = record(tool.output);
   const transfer = tool.name === "ssh_upload" || tool.name === "ssh_download";
-  const command = stringValue(input.command, output.command);
+  const command = stringValue(input.command, input.text, output.command);
   const host = stringValue(input.host, output.host);
   const id = stringValue(input.session_id, input.proc_id, output.session_id, output.proc_id, output.id);
   const stdout = shortText(output.stdout ?? output.output ?? output.screen ?? output.content, 520);
@@ -134,12 +135,12 @@ function TerminalToolCard({ tool }: { tool: ToolPresentationValue }) {
   if (transfer) {
     const upload = tool.name === "ssh_upload";
     return <div class="tool-card transfer-card">
-      <header><span class="tool-card-mark">{upload ? <Upload size={15} /> : <Download size={15} />}</span><span><strong>{upload ? "Upload file" : "Download file"}</strong><small>{host || "SSH transfer"}{numberValue(output.bytes) !== undefined ? ` · ${formatBytes(numberValue(output.bytes) ?? 0)}` : ""}</small></span><ToolCardState status={tool.status} /></header>
+      <header><span class="tool-card-mark">{upload ? <Upload size={15} /> : <Download size={15} />}</span><span><strong>{upload ? "Upload file" : "Download file"}</strong><ToolArguments input={tool.input} /><small>{host || "SSH transfer"}{numberValue(output.bytes) !== undefined ? ` · ${formatBytes(numberValue(output.bytes) ?? 0)}` : ""}</small></span><ToolCardState status={tool.status} /></header>
       <div class="transfer-route"><code>{upload ? stringValue(output.local_path, input.local_path) || "local" : stringValue(output.remote_path, input.remote_path) || "remote"}</code><span>→</span><code>{upload ? stringValue(output.remote_path, input.remote_path) || "remote" : stringValue(output.local_path, input.local_path) || "local"}</code></div>
     </div>;
   }
   return <div class="tool-card terminal-tool-card">
-    <header><span class="tool-card-mark"><MonitorDot size={15} /></span><span><strong>{command || host || id || tool.name.replaceAll("_", " ")}</strong><small>{[id, returnCode !== undefined ? `exit ${returnCode}` : ""].filter(Boolean).join(" · ")}</small></span><ToolCardState status={tool.status} /></header>
+    <header><span class="tool-card-mark"><MonitorDot size={15} /></span><span><strong>{command || host || id || tool.name.replaceAll("_", " ")}</strong><ToolArguments input={tool.input} /><small>{[id, returnCode !== undefined ? `exit ${returnCode}` : ""].filter(Boolean).join(" · ")}</small></span><ToolCardState status={tool.status} /></header>
     {(stdout || stderr) && <pre class="terminal-preview"><code>{stdout}{stdout && stderr ? "\n" : ""}{stderr}</code></pre>}
   </div>;
 }
@@ -155,7 +156,7 @@ function NetworkToolCard({ tool }: { tool: ToolPresentationValue }) {
   const count = numberValue(output.count);
   const body = shortText(output.content ?? output.body, 420);
   return <div class="tool-card network-tool-card">
-    <header><span class="tool-card-mark"><Globe2 size={15} /></span><span><strong>{target || tool.name.replaceAll("_", " ")}</strong><small>{[status !== undefined ? `HTTP ${status}` : "", count !== undefined ? `${count} results` : "", output.extractor ? String(output.extractor) : ""].filter(Boolean).join(" · ")}</small></span><ToolCardState status={tool.status} /></header>
+    <header><span class="tool-card-mark"><Globe2 size={15} /></span><span><strong>{target || tool.name.replaceAll("_", " ")}</strong><ToolArguments input={tool.input} /><small>{[status !== undefined ? `HTTP ${status}` : "", count !== undefined ? `${count} results` : "", output.extractor ? String(output.extractor) : ""].filter(Boolean).join(" · ")}</small></span><ToolCardState status={tool.status} /></header>
     {body && <p>{body}</p>}
   </div>;
 }
@@ -175,7 +176,7 @@ function SubagentToolCard({ tool }: { tool: ToolPresentationValue }) {
   const target = stringValue(input.subagent_id, output.steer_to, output.stopped);
   const count = agents.length || inputTasks.length || resultCount || 0;
   return <div class="tool-card subagent-tool-card">
-    <header><span class="tool-card-mark"><GitBranch size={15} /></span><span><strong>{tool.name.replace("subagent_", "Subagent ").replaceAll("_", " ")}</strong><small>{target ? `Agent ${target}` : count ? `${count} agent${count === 1 ? "" : "s"}` : "Agent orchestration"}</small></span><ToolCardState status={tool.status} /></header>
+    <header><span class="tool-card-mark"><GitBranch size={15} /></span><span><strong>{tool.name.replace("subagent_", "Subagent ").replaceAll("_", " ")}</strong><ToolArguments input={tool.input} /><small>{target ? `Agent ${target}` : count ? `${count} agent${count === 1 ? "" : "s"}` : "Agent orchestration"}</small></span><ToolCardState status={tool.status} /></header>
     {(agents.length || inputTasks.length) ? <ul class="tool-result-list">{(agents.length ? agents : inputTasks).slice(0, 5).map((agent, index) => <li key={String(agent.id ?? index)}>{stringValue(agent.label, agent.task, agent.id) || `Agent ${index + 1}`}</li>)}</ul> : null}
   </div>;
 }

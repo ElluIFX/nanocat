@@ -215,7 +215,7 @@ test("working feed pairs historical tool input and output", async ({ page }) => 
         body: JSON.stringify({
           items: [
             { id: "user-1", type: "user.message", role: "user", content: "Inspect the remote workspace", timestamp: "2026-08-23T00:00:00Z", turnId: "turn-1" },
-            { id: "work-1", type: "assistant.work", role: "assistant", content: "I will inspect the workspace before continuing.", timestamp: "2026-08-23T00:00:01Z", turnId: "turn-1", metadata: { startedAt: "2026-08-23T00:00:00Z", endedAt: "2026-08-23T00:00:03Z", durationMs: 3000, toolCalls: [{ id: "call-1", name: "ssh_send", arguments: { command: "pwd" } }] } },
+            { id: "work-1", type: "assistant.work", role: "assistant", content: "I will inspect the workspace before continuing.", timestamp: "2026-08-23T00:00:01Z", turnId: "turn-1", metadata: { startedAt: "2026-08-23T00:00:00Z", endedAt: "2026-08-23T00:00:03Z", durationMs: 3000, toolCalls: [{ id: "call-1", name: "ssh_send", arguments: { session_id: "ssh-1", text: "pwd", keys: [], enter: true, wait: 0.5, immediate_return: false } }] } },
             { id: "result-1", type: "tool.result", role: "tool", content: { summary: "Tool execution completed.", status: "completed", redacted: true, preview: { content: "/srv/workspace" } }, timestamp: "2026-08-23T00:00:02Z", turnId: "turn-1", metadata: { toolCallId: "call-1", toolName: "ssh_send" } },
             { id: "assistant-1", type: "assistant.final", role: "assistant", content: "The workspace is ready.", timestamp: "2026-08-23T00:00:03Z", turnId: "turn-1", metadata: { startedAt: "2026-08-23T00:00:00Z", endedAt: "2026-08-23T00:00:03Z", durationMs: 3000 } },
           ],
@@ -233,8 +233,11 @@ test("working feed pairs historical tool input and output", async ({ page }) => 
     await working.getByRole("button", { name: /Worked for/ }).click();
     await expect(working.getByText("ssh_send", { exact: true })).toHaveCount(1);
     await expect(working.getByText("I will inspect the workspace before continuing.")).toBeVisible();
+    await expect(working.getByLabel("Call parameters")).toContainText('session_id"ssh-1"');
+    await expect(working.getByLabel("Call parameters")).toContainText('text"pwd"');
+    await expect(working.getByLabel("Call parameters")).toContainText("immediate_returnfalse");
     await working.getByText("Details").click();
-    await expect(working.getByText(/"command": "pwd"/)).toBeVisible();
+    await expect(working.getByText(/"text": "pwd"/)).toBeVisible();
     await expect(working.getByText(/"content": "\/srv\/workspace"/)).toBeVisible();
     await expect(working).not.toContainText("retained in private session history");
     await expect(page).toHaveScreenshot("working-feed.png", { animations: "disabled" });
