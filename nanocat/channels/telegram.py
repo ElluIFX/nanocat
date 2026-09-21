@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 from pydantic import Field
-from telegram import BotCommand, InputFile, MessageEntity, ReplyParameters, Update
-from telegram.error import NetworkError, TelegramError
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.request import HTTPXRequest
-from telegramify_markdown import convert, split_entities, telegramify
-from telegramify_markdown.content import ContentType
 
 from nanocat.bus.events import OutboundMessage
 from nanocat.bus.queue import MessageBus
@@ -21,6 +15,11 @@ from nanocat.config.paths import get_media_dir
 from nanocat.config.schema import Base
 from nanocat.core.ports import ChannelCapabilities
 from nanocat.utils.helpers import split_message
+
+if TYPE_CHECKING:
+    from telegram import BotCommand, Update
+    from telegram.error import TelegramError
+    from telegram.ext import Application, ContextTypes
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
 TELEGRAM_REPLY_CONTEXT_MAX_LEN = (
@@ -55,6 +54,8 @@ class TelegramChannel(BaseChannel):
     # command router, so command groups stay discoverable as they evolve.
     @staticmethod
     def _build_bot_commands() -> list[BotCommand]:
+        from telegram import BotCommand
+
         from nanocat.application.command_router import CommandRouter
 
         commands = [BotCommand("start", "Start the bot")]
@@ -105,6 +106,9 @@ class TelegramChannel(BaseChannel):
         if not self.config.token:
             logger.error("Telegram bot token not configured")
             return
+
+        from telegram.ext import Application, CommandHandler, MessageHandler, filters
+        from telegram.request import HTTPXRequest
 
         self._running = True
 
@@ -224,6 +228,8 @@ class TelegramChannel(BaseChannel):
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Telegram."""
+        from telegram import ReplyParameters
+
         if not self._app:
             logger.warning("Telegram bot not running")
             return
@@ -333,6 +339,10 @@ class TelegramChannel(BaseChannel):
         thread_kwargs: dict | None = None,
     ) -> None:
         """Send via telegramify(): async, auto-splits, extracts code blocks as files."""
+        from telegram import InputFile, MessageEntity
+        from telegramify_markdown import telegramify
+        from telegramify_markdown.content import ContentType
+
         results = await telegramify(
             text, max_message_length=TELEGRAM_MAX_MESSAGE_LEN, min_file_lines=64
         )
@@ -376,6 +386,9 @@ class TelegramChannel(BaseChannel):
         thread_kwargs: dict | None = None,
     ) -> None:
         """Send via convert(): sync, keeps code blocks inline, splits with split_entities()."""
+        from telegram import MessageEntity
+        from telegramify_markdown import convert, split_entities
+
         raw_text, raw_entities = convert(text)
         for chunk_text, chunk_entities in split_entities(
             raw_text, raw_entities, max_utf16_len=TELEGRAM_MAX_MESSAGE_LEN
@@ -725,6 +738,8 @@ class TelegramChannel(BaseChannel):
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log handler errors without dumping tracebacks to the terminal."""
+        from telegram.error import NetworkError, TelegramError
+
         error = context.error
         if isinstance(error, NetworkError):
             logger.warning("Telegram handler network error: {}", error)
@@ -736,6 +751,8 @@ class TelegramChannel(BaseChannel):
 
     def _on_polling_error(self, error: TelegramError) -> None:
         """Handle updater polling errors without PTB's default traceback logging."""
+        from telegram.error import NetworkError
+
         if isinstance(error, NetworkError):
             logger.debug("Telegram polling network error: {}", error)
             return
