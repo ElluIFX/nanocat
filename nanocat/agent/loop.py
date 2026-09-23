@@ -301,6 +301,7 @@ class AgentLoop:
         if self.intervention is not None:
             self.intervention.set_deferred_release(self._release_buffered_admission)
             self.intervention.set_deferred_failure(self._deferred_delivery_failed)
+        self.bus.intervention_reply_classifier = self._is_intervention_reply
         self.subagents._is_live = lambda sk: any(
             not t.done() for t in self._active_tasks.get(sk, [])
         )
@@ -3588,6 +3589,17 @@ class AgentLoop:
             content=f"NanoCat is {status}\n\n## Recent logs (tail {tail_lines})\n\n```log\n{logs}\n```",
         )
 
+    def _is_intervention_reply(self, msg: InboundMessage) -> bool:
+        """Recognize plain YOLO only for this principal's pending approval."""
+        return bool(
+            msg.content.strip().lower() == "yolo"
+            and self.intervention is not None
+            and self.intervention.current_pending(
+                ConversationRef(msg.channel, msg.chat_id, msg.session_key),
+                msg.principal_id or msg.sender_id,
+            ) is not None
+        )
+
     async def _command_intervention_response(self, msg: InboundMessage) -> OutboundMessage:
         """Resolve an intervention response without exposing broker details to ingress."""
         action = parse_intervention_action(msg.content)
@@ -3607,7 +3619,7 @@ class AgentLoop:
             )
             resolved = None
         elif (
-            action.action is not InterventionAction.REVOKE_SESSION
+            action.action not in {InterventionAction.REVOKE_SESSION, InterventionAction.TOGGLE_YOLO}
             and (pending := self.intervention.current_pending(conversation, principal_id))
             is not None
             and action.action not in pending.allowed_actions
@@ -3623,11 +3635,12 @@ class AgentLoop:
                 principal_id,
                 conversation,
                 action.action,
+                require_pending=msg.content.strip().lower() == "yolo",
             )
             accepted = resolved is not None
-            if accepted and action.action is InterventionAction.REVOKE_SESSION:
+            if accepted and resolved.state is InterventionState.REVOKED:
                 title = USER_TEXT.intervention_yolo_disabled
-            elif accepted and action.action is InterventionAction.APPROVE_FOREVER:
+            elif accepted and resolved.state is InterventionState.APPROVED_FOREVER:
                 title = USER_TEXT.intervention_yolo_enabled
             elif accepted and action.action is InterventionAction.APPROVE_TURN:
                 title = USER_TEXT.intervention_turn_approved
@@ -4014,6 +4027,8 @@ class AgentLoop:
                 return_exceptions=True,
             )
         self._turn_cancel_operations.clear()
+        if self.bus.intervention_reply_classifier == self._is_intervention_reply:
+            self.bus.intervention_reply_classifier = None
         if self.intervention is not None:
             await self.intervention.close()
         self._stop_requested.clear()
@@ -6094,7 +6109,7 @@ class AgentLoop:
             metadata=dict(metadata or {}),
             session_key_override=session_key,
         )
-        if MessageBus.is_command_candidate(content):
+        if MessageBus.is_command_candidate(content) or self.bus.is_intervention_reply(msg):
             if self._command_dispatcher is None:
                 raise RuntimeError("command dispatcher is unavailable")
             response = await self._command_dispatcher.execute(msg, publish=False)

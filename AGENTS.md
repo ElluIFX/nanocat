@@ -80,6 +80,7 @@ channel callback
 - `InterventionRequest` 绑定 request、turn、session、conversation、principal、capability、脱敏参数、fingerprint、允许 action、resume mode、过期时间和可选 tool call id。
 - 状态单向且幂等：pending → approved/rejected/expired/cancelled/delivery_failed/consumed。请求送达失败进入终态。
 - once grant 绑定 fingerprint；turn grant 绑定 principal/conversation/turn/capability；session grant 绑定 principal/conversation/session/capability，并只存在于当前 runtime。
+- `/yolo` 原子切换当前会话的 YOLO 授权；审批期间单独回复 `yolo` 批准本次并开启后续授权。纯文本回复仅在同 principal/conversation 存在有效审批时进入控制队列，迟到回复禁止创建授权；Web 回复绑定 request id。硬拒绝与路径限制始终优先。
 - 批准后重新执行 policy evaluation 并校验 fingerprint。参数、路径、策略或配置发生变化时重新请求决策。
 - Web 审批卡通过通用 HTTP control action 提交；渠道只负责展示和 action 归一化，授权判断归 `InterventionBroker`。
 - `tools.policy` 按 safe tool、deny、allow、命令分析、路径和 URL 限制的顺序求值。`HARD_DENY` 与 restrict 规则优先于自动审批。

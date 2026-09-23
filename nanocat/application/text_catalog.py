@@ -32,7 +32,7 @@ class UserTextCatalog:
         "- `/session` — View and switch sessions\n\n"
         "- `/logs [N]` — Show the tail of runtime logs\n\n"
         "- `/approve [once|turn]` — Approve the current sensitive operation\n\n"
-        "- `/approve forever|cancel` — Enable or revoke session-wide YOLO approval\n\n"
+        "- `/yolo` — Toggle session-wide YOLO approval\n\n"
         "- `/deny` — Reject the current sensitive operation\n\n"
         "- `/model effort auto|low|medium|high|xhigh|max` — Set reasoning effort"
     )
@@ -42,7 +42,8 @@ class UserTextCatalog:
     intervention_auto_review: str = (
         "⚠️ **Automatic review requires your decision**: `{tool}`\n\n"
         "Review: {reason}\n\n"
-        "Reply with `/approve` to run it once, or `/deny` to reject it."
+        "Reply with `/approve` to run it once, `yolo` to approve and enable session-wide YOLO, "
+        "or `/deny` to reject it."
     )
     intervention_invalid: str = "Invalid approval command."
     intervention_action_rejected: str = "Use `/approve` or `/deny` for this approval."
@@ -50,7 +51,7 @@ class UserTextCatalog:
     intervention_approved: str = "Approved."
     intervention_turn_approved: str = "Approved for this turn."
     intervention_denied: str = "Denied."
-    intervention_yolo_enabled: str = "YOLO enabled. Use `/approve cancel` to disable."
+    intervention_yolo_enabled: str = "YOLO enabled for this session. Use `/yolo` to disable."
     intervention_yolo_disabled: str = "YOLO disabled."
     model_info: str = (
         "## 🐈 Model info\n\n"

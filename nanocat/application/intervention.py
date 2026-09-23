@@ -169,7 +169,9 @@ def parse_intervention_action(text: str) -> ParsedInterventionAction | None:
     """Parse only explicit approval, rejection, or session-revoke syntax."""
     stripped = text.strip()
     command_hint = stripped.split(maxsplit=1)[0].lower() if stripped else ""
-    if command_hint not in {"/approve", "/deny", "/reject"}:
+    if stripped.lower() == "yolo":
+        return ParsedInterventionAction(InterventionAction.APPROVE_FOREVER)
+    if command_hint not in {"/approve", "/deny", "/reject", "/yolo"}:
         return None
     try:
         parts = shlex.split(stripped)
@@ -177,20 +179,23 @@ def parse_intervention_action(text: str) -> ParsedInterventionAction | None:
         return ParsedInterventionAction(None, str(exc))
 
     command = parts[0].lower()
-    if command == "/approve":
+    if command == "/yolo":
+        if len(parts) != 1:
+            return ParsedInterventionAction(None, "Usage: /yolo")
+        action = InterventionAction.TOGGLE_YOLO
+    elif command == "/approve":
         if len(parts) == 1:
             action = InterventionAction.APPROVE_ONCE
-        elif len(parts) == 2 and parts[1].lower() in {"once", "turn", "forever", "cancel"}:
+        elif len(parts) == 2 and parts[1].lower() in {"once", "turn", "cancel"}:
             action = {
                 "once": InterventionAction.APPROVE_ONCE,
                 "turn": InterventionAction.APPROVE_TURN,
-                "forever": InterventionAction.APPROVE_FOREVER,
                 "cancel": InterventionAction.REVOKE_SESSION,
             }[parts[1].lower()]
         else:
             return ParsedInterventionAction(
                 None,
-                "Usage: /approve [once|turn|forever|cancel]",
+                "Usage: /approve [once|turn|cancel]; /yolo toggles session-wide approval",
             )
     elif command in {"/deny", "/reject"}:
         if len(parts) != 1:
@@ -214,7 +219,7 @@ def intervention_prompt(request: InterventionRequest) -> str:
     if InterventionAction.APPROVE_TURN in request.allowed_actions:
         commands.append("`/approve turn`")
     if InterventionAction.APPROVE_FOREVER in request.allowed_actions:
-        commands.append("`/approve forever`")
+        commands.append("`yolo` (approve and enable session-wide YOLO)")
     if InterventionAction.REJECT in request.allowed_actions:
         commands.append("`/deny`")
     return USER_TEXT.intervention_manual.format(
@@ -451,11 +456,17 @@ class InterventionBroker:
         principal_id: str,
         conversation: ConversationRef,
         action: InterventionAction,
+        *,
+        require_pending: bool = False,
     ) -> InterventionResult | None:
         """Resolve the current session's pending request without user tokens."""
         async with self._lock:
             if self._closed:
                 return None
+            if action is InterventionAction.TOGGLE_YOLO:
+                if (conversation, principal_id, "tool:*") in self._session_grants:
+                    return self._revoke_session_locked(conversation, principal_id)
+                action = InterventionAction.APPROVE_FOREVER
             if action is InterventionAction.REVOKE_SESSION:
                 return self._revoke_session_locked(conversation, principal_id)
 
@@ -470,6 +481,8 @@ class InterventionBroker:
                 None,
             )
             if pending is None:
+                if require_pending:
+                    return None
                 # ``/deny`` and ``/reject`` are intentionally hidden aliases
                 # for ``/approve cancel`` while the session is idle.
                 if action is InterventionAction.REJECT:

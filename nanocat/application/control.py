@@ -1509,7 +1509,7 @@ class ApplicationControlService:
             command = {
                 "once": "/approve once",
                 "turn": "/approve turn",
-                "forever": "/approve forever",
+                "forever": "yolo",
                 "cancel": "/approve cancel",
                 "deny": "/deny",
             }.get(action)

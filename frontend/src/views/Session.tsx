@@ -263,9 +263,16 @@ function Composer({ sessionId, running }: { sessionId: string; running: boolean 
     try {
       const trimmedStart = content.trimStart();
       const commandInput = trimmedStart.startsWith("/") && !trimmedStart.startsWith("//");
-      if (commandInput) {
-        const response = await api.executeCommand(content, sessionId);
-        setCommandResult(response.content?.trim() || "Command completed.");
+      const yoloApproval = content.toLowerCase() === "yolo"
+        ? approvals.value.find((item) => item.sessionId === sessionId) : undefined;
+      if (commandInput || yoloApproval) {
+        if (yoloApproval) {
+          await api.decideApproval(yoloApproval.requestId, "forever", sessionId);
+          setCommandResult("Approved. YOLO enabled for this session.");
+        } else {
+          const response = await api.executeCommand(content, sessionId);
+          setCommandResult(response.content?.trim() || "Command completed.");
+        }
         setText("");
         sessionStorage.removeItem(draftKey);
         await recoverGlobalState();

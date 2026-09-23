@@ -466,7 +466,11 @@ class ToolExecutor:
             review_decision=review.decision if review is not None else None,
             review_reason=review.reason if review is not None else None,
             allowed_actions=(
-                (InterventionAction.APPROVE_ONCE, InterventionAction.REJECT)
+                (
+                    InterventionAction.APPROVE_ONCE,
+                    InterventionAction.APPROVE_FOREVER,
+                    InterventionAction.REJECT,
+                )
                 if review is not None
                 else None
             ),

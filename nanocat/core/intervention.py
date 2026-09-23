@@ -36,6 +36,7 @@ class InterventionAction(StrEnum):
     REJECT = "reject"
     CANCEL = "cancel"
     REVOKE_SESSION = "revoke_session"
+    TOGGLE_YOLO = "toggle_yolo"
 
 
 class ResumeMode(StrEnum):

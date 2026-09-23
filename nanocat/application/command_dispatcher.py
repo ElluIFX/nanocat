@@ -19,7 +19,7 @@ class CommandDispatcher:
     """Execute slash commands independently from the LLM turn pipeline."""
 
     _FAST_COMMANDS = frozenset(
-        {"approve", "deny", "reject", "help", "logs", "whoami", "model", "stop", "restart"}
+        {"approve", "yolo", "deny", "reject", "help", "logs", "whoami", "model", "stop", "restart"}
     )
 
     def __init__(self, agent: Any, bus: MessageBus):
@@ -237,6 +237,8 @@ class CommandDispatcher:
 
     @staticmethod
     def _command_name(msg: InboundMessage) -> str:
+        if msg.content.strip().lower() == "yolo":
+            return "yolo"
         token = (msg.content or "").lstrip().split(maxsplit=1)[0]
         return token[1:].split("@", 1)[0].lower() if token.startswith("/") else "unknown"
 

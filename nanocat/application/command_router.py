@@ -134,8 +134,16 @@ class CommandRouter:
                     name="approve",
                     group="security",
                     summary="Approve the current sensitive operation",
-                    usage="/approve [once|turn|forever|cancel]",
+                    usage="/approve [once|turn|cancel]",
                     execution_policy=CommandExecutionPolicy.INTERVENTION_RESPONSE,
+                ),
+                CommandSpec(
+                    name="yolo",
+                    group="security",
+                    summary="Toggle session-wide YOLO approval",
+                    usage="/yolo",
+                    execution_policy=CommandExecutionPolicy.INTERVENTION_RESPONSE,
+                    accepts_arguments=False,
                 ),
                 CommandSpec(
                     name="deny",
@@ -339,9 +347,6 @@ class CommandRouter:
                 if spec.name == "approve":
                     lines.append(
                         "- `/approve [once|turn]`: Approve the current sensitive operation"
-                    )
-                    lines.append(
-                        "- `/approve forever|cancel`: Enable or revoke session-wide YOLO approval"
                     )
                     continue
                 aliases = (

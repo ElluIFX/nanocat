@@ -155,6 +155,7 @@ class MessageBus:
         self._pending_inbound: dict[str, int] = {}
         self._pending_commands: dict[str, int] = {}
         self._ingress_sequence = count(time.time_ns())
+        self.intervention_reply_classifier: Callable[[InboundMessage], bool] | None = None
         self._outbound_empty.set()
 
     @property
@@ -229,7 +230,7 @@ class MessageBus:
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish an inbound message with bounded backpressure."""
-        if MessageBus.is_command_candidate(msg.content):
+        if MessageBus.is_command_candidate(msg.content) or self.is_intervention_reply(msg):
             await self.publish_command(msg)
             return
         if MessageBus.is_escaped_text(msg.content):
@@ -244,6 +245,10 @@ class MessageBus:
         except BaseException:
             self._decrement_pending(msg.session_key)
             raise
+
+    def is_intervention_reply(self, msg: InboundMessage) -> bool:
+        """Route application-recognized approval replies through the control lane."""
+        return bool(self.intervention_reply_classifier and self.intervention_reply_classifier(msg))
 
     async def publish_command(self, msg: InboundMessage) -> None:
         """Publish a slash command to the reserved command lane."""

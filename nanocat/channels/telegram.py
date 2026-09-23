@@ -136,6 +136,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("compact", self._forward_command))
         self._app.add_handler(CommandHandler("session", self._forward_command))
         self._app.add_handler(CommandHandler("approve", self._forward_command))
+        self._app.add_handler(CommandHandler("yolo", self._forward_command))
         self._app.add_handler(CommandHandler("deny", self._forward_command))
         self._app.add_handler(CommandHandler("reject", self._forward_command))
 
