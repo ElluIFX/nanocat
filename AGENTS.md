@@ -139,6 +139,8 @@ ToolExecutor
 ### Provider、Vision 与 Memory
 
 - Provider 由 registry/spec 按 model 解析；resolver 与 cache 属于 runtime owner。adapter 负责协议格式、响应归一化、有限瞬时错误重试和脱敏。
+- `providers.kimi` 的 API Key 必须同时声明 `billingMode=subscription|pay_as_you_go`；聊天与模型发现共享所选计费类型的端点，`apiBase` 可覆盖默认地址。`kimi/<model-id>` 使用直接 OpenAI-compatible adapter 并保留 reasoning/tool 消息。
+- `/model discover [channel]` 实时读取服务端目录，省略渠道时使用当前主模型渠道；只展示结果，配置目录由 `/model add` 修改。发现请求具有 20 秒总时限、单页 4 MiB 和 20 页上限，通过普通 command task 执行以保持控制命令可用。
 - provider/client/cache 错误分类为 timeout、dependency、policy、validation、state、internal 或 cancelled；取消保持取消语义。
 - `VisionFallbackService` 是 application 级单例。provider 先接收原始图片；明确视觉拒绝后，服务使用 `visionModel` 或 `assistantModel` 生成描述并重试一次。`load_image` 是唯一公开图片工具。
 - `RuntimeFileStore` 在 `workspace/_runtime_temp/sessions/<session-hash>/` 管理 tool、compaction、context、image 和 HTTP stream 副本。LLM 通过 `read_file`/`grep_file` 分页读取；副本失败只影响追溯能力。

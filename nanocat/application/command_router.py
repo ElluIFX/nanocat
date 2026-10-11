@@ -93,7 +93,7 @@ class CommandRouter:
             "restart": ("Restart the runtime", "/restart"),
             "model": (
                 "View or switch models and reasoning effort",
-                "/model [add|delete|agent|subagent|assistant|effort]",
+                "/model [discover [channel]|add|delete|agent|subagent|assistant|effort]",
             ),
             "whoami": ("Show the current principal and session", "/whoami"),
             "compact": (

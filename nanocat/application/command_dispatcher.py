@@ -244,6 +244,8 @@ class CommandDispatcher:
 
     def _is_fast_command(self, msg: InboundMessage) -> bool:
         name = self._command_name(msg)
+        if name == "model" and msg.content.strip().lower().split()[1:2] == ["discover"]:
+            return False
         if name in self._FAST_COMMANDS:
             return True
         return name == "compact" and msg.content.strip().lower().split()[1:] == ["status"]

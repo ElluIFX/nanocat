@@ -3040,6 +3040,28 @@ class AgentLoop:
 
         subcmd = parts[0].lower()
 
+        if subcmd == "discover":
+            from nanocat.providers.discovery import ModelDiscoveryError, discover_models
+
+            if len(parts) > 2:
+                content = USER_TEXT.model_discover_usage
+            else:
+                try:
+                    provider, models = await discover_models(
+                        self._config,
+                        parts[1] if len(parts) == 2 else self._config.get_provider_name(self.model),
+                    )
+                    content = USER_TEXT.model_discovered.format(
+                        provider=provider,
+                        models="\n".join(
+                            f"- `{provider}/{' '.join(model.replace('`', '').split())}`"
+                            for model in models
+                        ) or USER_TEXT.model_discover_empty,
+                    )
+                except ModelDiscoveryError as exc:
+                    content = USER_TEXT.model_discover_error.format(error=str(exc))
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
         if subcmd == "add":
             if len(parts) != 3:
                 return OutboundMessage(
