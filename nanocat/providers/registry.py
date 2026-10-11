@@ -240,6 +240,12 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         litellm_prefix="dashscope",  # qwen-max → dashscope/qwen-max
         skip_prefixes=("dashscope/", "openrouter/"),
     ),
+    ProviderSpec(
+        name="kimi",
+        keywords=(),
+        env_key="KIMI_API_KEY",
+        display_name="Kimi",
+    ),
     # Moonshot: Kimi models, needs "moonshot/" prefix.
     # LiteLLM requires MOONSHOT_API_BASE env var to find the endpoint.
     # Kimi K2.5 API enforces temperature >= 1.0.

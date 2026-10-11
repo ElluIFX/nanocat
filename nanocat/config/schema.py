@@ -124,6 +124,28 @@ class ProviderConfig(Base):
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
 
 
+class KimiProviderConfig(ProviderConfig):
+    billing_mode: Literal["subscription", "pay_as_you_go"] | None = Field(
+        default=None,
+        description="Select the billing type of this API key: Kimi Code subscription or Moonshot pay-as-you-go.",
+    )
+
+    @model_validator(mode="after")
+    def require_billing_mode(self) -> "KimiProviderConfig":
+        if self.api_key and self.billing_mode is None:
+            raise ValueError("Set providers.kimi.billingMode for the supplied API key")
+        return self
+
+    def resolved_api_base(self) -> str:
+        if self.api_base:
+            return self.api_base
+        if self.billing_mode == "subscription":
+            return "https://api.kimi.com/coding/v1"
+        if self.billing_mode == "pay_as_you_go":
+            return "https://api.moonshot.cn/v1"
+        raise ValueError("Set providers.kimi.billingMode before using Kimi")
+
+
 class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
@@ -139,6 +161,7 @@ class ProvidersConfig(Base):
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama local models
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
+    kimi: KimiProviderConfig = Field(default_factory=KimiProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
     siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动)
@@ -383,7 +406,7 @@ class Config(BaseSettings):
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
             if p and model_prefix and normalized_prefix == spec.name:
-                if spec.is_oauth or spec.is_local or p.api_key:
+                if spec.is_oauth or spec.is_local or p.api_key or spec.name == "kimi":
                     return p, spec.name
 
         # Match by keyword (order follows PROVIDERS registry)
@@ -441,6 +464,8 @@ class Config(BaseSettings):
         from nanocat.providers.registry import find_by_name
 
         p, name = self._match_provider(model)
+        if name == "kimi":
+            return self.providers.kimi.resolved_api_base()
         if p and p.api_base:
             return p.api_base
         # Only gateways get a default api_base here. Standard providers

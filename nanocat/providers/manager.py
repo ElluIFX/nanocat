@@ -23,6 +23,7 @@ def make_provider(
     """Create a provider for a model using an explicit runtime config."""
     from nanocat.providers.custom_provider import CustomProvider
     from nanocat.providers.deepseek_provider import DeepSeekProvider
+    from nanocat.providers.kimi_provider import KimiProvider
     from nanocat.providers.litellm_provider import LiteLLMProvider
     from nanocat.providers.openai_codex_provider import OpenAICodexProvider
     from nanocat.providers.registry import find_by_name
@@ -32,7 +33,16 @@ def make_provider(
     provider_name = config.get_provider_name(model)
     provider_cfg = config.get_provider(model)
 
-    if provider_name == "deepseek":
+    if provider_name == "kimi":
+        if not provider_cfg or not provider_cfg.api_key:
+            raise RuntimeError("Configure providers.kimi.apiKey and providers.kimi.billingMode.")
+        provider = KimiProvider(
+            api_key=provider_cfg.api_key,
+            api_base=config.providers.kimi.resolved_api_base(),
+            default_model=model,
+            extra_headers=provider_cfg.extra_headers,
+        )
+    elif provider_name == "deepseek":
         provider = DeepSeekProvider(
             api_key=provider_cfg.api_key if provider_cfg else None,
             api_base=config.get_api_base(model),

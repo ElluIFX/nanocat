@@ -654,7 +654,11 @@ class ApplicationControlService:
                     "is_gateway": spec.is_gateway,
                     "is_local": spec.is_local,
                     "is_oauth": spec.is_oauth,
-                    "default_api_base": spec.default_api_base or "",
+                    "default_api_base": (
+                        self._config.providers.kimi.resolved_api_base()
+                        if spec.name == "kimi" and self._config.providers.kimi.billing_mode
+                        else spec.default_api_base or ""
+                    ),
                     "registry_order": position,
                 }
             )
