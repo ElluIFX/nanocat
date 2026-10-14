@@ -3130,7 +3130,6 @@ class AgentLoop:
                         defaults.subagent_model,
                         defaults.assistant_model,
                         defaults.vision_model,
-                        defaults.compaction_model,
                     }:
                         raise ValueError(f"Model `{deleted_model}` is assigned to an active slot")
                     deleted.append(deleted_model)
@@ -4354,7 +4353,7 @@ class AgentLoop:
                 user_input=msg.content,
             )
             try:
-                final_content, _, _ = await self._run_agent_loop(
+                final_content, _, completed_messages = await self._run_agent_loop(
                     messages,
                     tool_context=tool_context,
                     run_state=run_state,
@@ -4499,7 +4498,10 @@ class AgentLoop:
             self._mark_turn_history_committed(msg, pending_turn)
             if not transient:
                 self._schedule_background(
-                    self.memory_compactor.maybe_compact_by_tokens(session),
+                    self.memory_compactor.maybe_compact_by_tokens(
+                        session, request_messages=completed_messages, model=turn_model,
+                        reasoning_effort=turn_effort, expected_revision=session.revision,
+                    ),
                     storage_scope=session.key,
                     kind="compaction",
                 )
@@ -4662,7 +4664,7 @@ class AgentLoop:
             user_input=msg.content,
         )
         try:
-            final_content, _, _ = await self._run_agent_loop(
+            final_content, _, completed_messages = await self._run_agent_loop(
                 initial_messages,
                 on_progress=on_progress or _bus_progress,
                 on_thinking=(
@@ -4814,7 +4816,10 @@ class AgentLoop:
         self._mark_turn_history_committed(msg, pending_turn)
         if not transient:
             self._schedule_background(
-                self.memory_compactor.maybe_compact_by_tokens(session),
+                self.memory_compactor.maybe_compact_by_tokens(
+                    session, request_messages=completed_messages, model=turn_model,
+                    reasoning_effort=turn_effort, expected_revision=session.revision,
+                ),
                 storage_scope=session.key,
                 kind="compaction",
             )

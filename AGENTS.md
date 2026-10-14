@@ -148,6 +148,7 @@ ToolExecutor
 - Nowledge Thread、Working Memory、auto inject、distill 和 memory tools 使用同一 runtime client；后台后处理有界，服务不可用时基本聊天继续运行。
 - Thread capture 保持 user/assistant/tool 顺序并使用 ack cursor 与幂等键；超长内容写入 runtime file。Memory 与 Thread 搜索保留 Space guard 和来源信息。
 - compaction 只在完整 turn 边界推进 checkpoint；provider/CAS 失败保持 cursor。`compactionEnabled` 只控制自动触发，`/compact` 仍可手动执行。
+- compaction 使用当前主模型，在结构化原始上下文末尾追加停止工作并输出记忆交接的指令；轮次完成后的自动压缩复用该轮上下文、模型和 effort 快照。工具定义保留，调用禁用，单次请求限时 120 秒；失败、截断、工具调用或 revision 变化时不推进 checkpoint。新总结替换旧状态，保留最近完整轮次与原始持久化历史。
 
 ## Channel、HTTP 与 Web
 

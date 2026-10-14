@@ -123,14 +123,12 @@ export interface RuntimeModelState {
     subagent?: string;
     assistant?: string;
     vision?: string;
-    compaction?: string;
   };
   effective: {
     agent: string;
     subagent: string;
     assistant?: string;
     vision?: string;
-    compaction?: string;
   };
   reasoningEffort: string;
   pulseEnabled: boolean;

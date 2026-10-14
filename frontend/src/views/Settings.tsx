@@ -53,7 +53,7 @@ const applyLabel = (mode?: SettingField["applyMode"]) => mode === "restart" ? "R
 
 function Field({ field, value, onChange, disabled }: { field: SettingField; value: unknown; onChange: (value: unknown) => void; disabled?: boolean }) {
   const fieldDisabled = Boolean(disabled || field.readOnly);
-  const isModel = /(?:^|\.)(?:model|subagentModel|assistantModel|visionModel|compactionModel)$/.test(field.key);
+  const isModel = /(?:^|\.)(?:model|subagentModel|assistantModel|visionModel)$/.test(field.key);
   const badge = applyLabel(field.applyMode);
   return <label class="setting-field">
     <span class="setting-copy"><strong>{field.label}{badge && <em class={`apply-mode ${field.applyMode}`}>{badge}</em>}{field.configured && <em>Configured</em>}{field.overriddenValue !== undefined && <em>Environment override</em>}</strong>{field.description && <small>{field.description}</small>}</span>

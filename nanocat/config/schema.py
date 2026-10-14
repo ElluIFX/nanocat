@@ -63,7 +63,6 @@ class AgentDefaults(Base):
     vision_model: str | None = (
         None  # global vision fallback model; None → assistant_model
     )
-    compaction_model: str | None = None  # independent low-cost model for session compaction
     # Saved model catalog used by /model and rich clients.
     model_choice: list[str] = Field(default_factory=lambda: ["openai/gpt-4o"])
     max_tokens: int | None = 8192

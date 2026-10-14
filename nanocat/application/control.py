@@ -687,14 +687,12 @@ class ApplicationControlService:
                 "subagent": defaults.subagent_model or "",
                 "assistant": defaults.assistant_model or "",
                 "vision": defaults.vision_model or "",
-                "compaction": defaults.compaction_model or "",
             },
             "effective": {
                 "agent": self._engine.model,
                 "subagent": self._engine.subagent_model,
                 "assistant": self._engine.assistant_model,
                 "vision": defaults.vision_model or defaults.assistant_model or "",
-                "compaction": defaults.compaction_model or defaults.assistant_model or "",
             },
             "reasoning_effort": defaults.reasoning_effort or "auto",
             "pulse_enabled": defaults.pulse_enabled,
@@ -1197,9 +1195,9 @@ class ApplicationControlService:
         raw_model = params.get("model")
         model = str(raw_model).strip() if raw_model is not None else None
         defaults = self._config.agents.defaults
-        if slot not in {"agent", "subagent", "assistant", "vision", "compaction"}:
+        if slot not in {"agent", "subagent", "assistant", "vision"}:
             return _err(
-                "Slot must be one of agent|subagent|assistant|vision|compaction",
+                "Slot must be one of agent|subagent|assistant|vision",
                 code="invalid_argument",
             )
         if slot == "agent" and not model:
@@ -1213,7 +1211,6 @@ class ApplicationControlService:
             "subagent": "agents.defaults.subagentModel",
             "assistant": "agents.defaults.assistantModel",
             "vision": "agents.defaults.visionModel",
-            "compaction": "agents.defaults.compactionModel",
         }
         def select(current: Any) -> Mapping[str, Any]:
             if model is not None and model not in (current.agents.defaults.model_choice or []):
@@ -1282,8 +1279,6 @@ class ApplicationControlService:
             refs.append("assistant")
         if getattr(defaults, "vision_model", None) == model:
             refs.append("vision")
-        if getattr(defaults, "compaction_model", None) == model:
-            refs.append("compaction")
         return refs
 
     async def _action_model_add(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1323,7 +1318,6 @@ class ApplicationControlService:
             "subagent": "agents.defaults.subagentModel",
             "assistant": "agents.defaults.assistantModel",
             "vision": "agents.defaults.visionModel",
-            "compaction": "agents.defaults.compactionModel",
         }
         def rename(current: Any) -> Mapping[str, Any]:
             current_choices = list(current.agents.defaults.model_choice)
@@ -1343,8 +1337,6 @@ class ApplicationControlService:
                 refs.append("assistant")
             if current_defaults.vision_model == old:
                 refs.append("vision")
-            if current_defaults.compaction_model == old:
-                refs.append("compaction")
             values: dict[str, Any] = {
                 "agents.defaults.modelChoice": [
                     new if item == old else item for item in current_choices
@@ -1383,7 +1375,6 @@ class ApplicationControlService:
                 current_defaults.subagent_model,
                 current_defaults.assistant_model,
                 current_defaults.vision_model,
-                current_defaults.compaction_model,
             }
             if model in assigned:
                 raise ConfigurationValidationError(

@@ -48,7 +48,7 @@
 
 - `runtimeFiles.maxFileBytes <= maxSessionBytes <= maxTotalBytes`。
 - `agents.defaults.assistantModel=null` 使用主模型；`subagentModel=null` 使用 assistantModel，再回退主模型。
-- `visionModel=null` 使用辅助模型；`compactionModel=null` 使用辅助模型，再回退主模型。
+- `visionModel=null` 使用辅助模型；会话压缩使用当前主模型，在原始上下文末尾追加总结指令。
 - `reasoningEffort` 的命令可选值为 `auto/low/medium/high/xhigh/max`，`auto` 保存为 `null`。Kimi 将 `medium` 映射为 `high`，`xhigh` 映射为 `max`，保留其余值。
 - `tools.maxReturnChars=0` 表示关闭工具输出字符数限制。
 - `tools.policy` 中的 `safty*` 是实际字段拼写。`HARD_DENY` 与路径限制优先于 YOLO 或自动批准。
@@ -75,7 +75,6 @@
 | `agents.defaults.assistantModel` | string / null | `null` | — | `next_turn` |
 | `agents.defaults.subagentModel` | string / null | `null` | — | `next_turn` |
 | `agents.defaults.visionModel` | string / null | `null` | — | `next_turn` |
-| `agents.defaults.compactionModel` | string / null | `null` | — | `next_turn` |
 | `agents.defaults.modelChoice` | array<string> | `["openai/gpt-4o"]` | — | `next_turn` |
 | `agents.defaults.maxTokens` | integer / null | `8192` | — | `next_turn` |
 | `agents.defaults.contextWindowTokens` | integer | `65536` | — | `next_turn` |
