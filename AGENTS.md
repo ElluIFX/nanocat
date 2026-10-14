@@ -131,6 +131,7 @@ ToolExecutor
 
 - `Config` 使用 camelCase Pydantic schema v2。schema 外字段静默忽略，规范化保存只写当前字段；`channels` 保留动态插件配置。
 - JSON 解析或已知字段校验失败抛出 `ConfigLoadError`，源文件保持原字节。文件缺失时使用默认配置。
+- runtime 启动在校验成功后原子保存补全默认字段的配置；内容未变时跳过写入，环境变量覆盖值只用于运行时。
 - `memory` 直接承载 Nowledge 配置；session compaction 位于 `agents.defaults`。
 - `get_runtime_config()` 与 `get_config_path()` 是单 runtime facade。新的 application/adapter 构造函数显式接收 runtime context、paths 或配置快照。
 - settings PATCH 使用 revision/ETag CAS、原子保存和 runtime applier。只有 listener 地址与启用状态等无法原地替换的字段要求 restart；其他字段声明 live、next_turn 或 reconnect。

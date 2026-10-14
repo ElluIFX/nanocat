@@ -71,7 +71,7 @@ def load_runtime_config(workdir: str | None = None) -> Config:
     wd.mkdir(parents=True, exist_ok=True)
     set_config_path(wd / "config.json")
 
-    return load_config(get_config_path())
+    return load_config(get_config_path(), normalize=True)
 
 
 def configure_logging(verbose: bool = False) -> int:

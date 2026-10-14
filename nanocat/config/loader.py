@@ -192,12 +192,13 @@ def get_runtime_config() -> Config:
     return _runtime_config
 
 
-def load_config(config_path: Path | None = None) -> Config:
+def load_config(config_path: Path | None = None, *, normalize: bool = False) -> Config:
     """
     Load configuration from file or create default.
 
     Args:
         config_path: Optional path to config file. Uses default if not provided.
+        normalize: Atomically persist schema defaults after successful validation.
 
     Returns:
         Loaded configuration object.
@@ -211,11 +212,18 @@ def load_config(config_path: Path | None = None) -> Config:
             if not isinstance(data, dict):
                 raise ValueError("configuration root must be a JSON object")
             config = validate_persisted_config(data)
-            return apply_environment_overrides(config)
+            effective = apply_environment_overrides(config)
+            if normalize and data != config.model_dump(by_alias=True, mode="json"):
+                save_config(config, path)
+            return effective
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise ConfigLoadError(f"Failed to load existing config from {path}: {exc}") from exc
 
-    return apply_environment_overrides(validate_persisted_config({}))
+    config = validate_persisted_config({})
+    effective = apply_environment_overrides(config)
+    if normalize:
+        save_config(config, path)
+    return effective
 
 
 def save_config(config: Config, config_path: Path | None = None) -> None:
